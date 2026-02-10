@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LaBerry — Login</title>
+  <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body class="auth-page">
+  <div class="auth-card">
+    <h1>LaBerry</h1>
+
+    <form class="auth-form" id="auth-form">
+      <input
+        class="inp"
+        name="username"
+        placeholder="Username"
+        autocomplete="username"
+        required
+      />
+
+      <input
+        class="inp"
+        name="password"
+        type="password"
+        placeholder="Password"
+        autocomplete="current-password"
+        required
+      />
+
+      <button class="btn" id="submit-btn" type="submit">
+        Войти
+      </button>
+    </form>
+
+    <div class="auth-switch">
+      <span id="switch-text">Нет аккаунта?</span>
+      <a href="#" id="to-register">Регистрация</a>
+      <a href="#" id="to-login" hidden>Вход</a>
+    </div>
+
+    <div class="auth-error" id="error" hidden></div>
+  </div>
+
+  <!-- Загрузочный экран -->
+  <div id="loading-overlay" class="overlay hidden">
+    <div class="spinner"></div>
+    <p>Подключаемся к серверу...</p>
+  </div>
+
+  <script src="/static/js/auth.js"></script>
+  <script>
+    const token = localStorage.getItem("auth_token");
+    if (token) {
+      window.location.href = "/app";
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LaBerry</title>
+  <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+
+  <!-- ===== HEADER ===== -->
+  <header class="topbar">
+    <div class="brand">LaBerry</div>
+    <div class="muted" id="status">online</div>
+  </header>
+
+  <div class="layout">
+
+    <!-- ===== SERVERS PANEL ===== -->
+    <aside class="panel servers">
+      <!-- FRIENDS BUTTON -->
+      <div class="friends-button item" id="friendsBtn">
+        <div class="text">
+          <div class="title">👥 Друзья</div>
+          <div class="sub" id="friendsStatus">Загрузка...</div>
+        </div>
+      </div>
+
+      <div class="panelHeader">
+        <h3>Серверы</h3>
+        <button class="btn btn-ghost" type="button" id="addServerBtn">＋</button>
+      </div>
+
+      <div class="list" id="servers-list"></div>
+
+      <!-- USER BAR -->
+      <div class="userbar">
+        <div class="avatar" id="userAvatar">
+          <span id="avatarText">U</span>
+        </div>
+        <div class="userinfo">
+          <div class="username" id="userName">Загрузка...</div>
+          <div class="status online" id="userStatus">online</div>
+        </div>
+        <button class="icon-btn" type="button" id="settingsBtn">⚙</button>
+      </div>
+    </aside>
+
+    <!-- ===== CHANNELS ===== -->
+    <aside class="panel channels" id="channelsPanel">
+      <div class="panelHeader">
+        <h3>Каналы</h3>
+        <button class="btn btn-ghost" type="button" id="addChannelBtn" style="display: none;">＋</button>
+      </div>
+
+      <!-- DM LIST -->
+      <div class="list dm-list" id="dmList" hidden></div>
+
+      <!-- CHANNEL LIST -->
+      <div class="list" id="channels-list">
+        <div class="item active" data-channel-id="1">
+          <span class="hash">#</span>
+          <div class="text">
+            <div class="title">general</div>
+            <div class="sub">Основной канал</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ===== MAIN CHAT PANEL ===== -->
+    <main class="panel chat" id="chatPanel">
+      <!-- CHAT VIEW -->
+      <div id="chatView">
+        <div class="panelHeader">
+          <h3 id="chat-title"># general</h3>
+        </div>
+
+        <div class="messages" id="messages">
+          <div class="channel-welcome">
+            <h2>Добро пожаловать в #general! 👋</h2>
+            <p>Это начало канала #general.</p>
+          </div>
+        </div>
+
+        <form class="composer" id="composer">
+          <input class="inp" id="message" placeholder="Напишите сообщение..." autocomplete="off" />
+          <button class="btn btn-primary" type="submit">Отправить</button>
+        </form>
+      </div>
+
+      <!-- FRIENDS VIEW (нужно добавить стили в main.css) -->
+      <div id="friendsView" hidden>
+        <div class="friends">
+          <div class="friends-header">
+            <h2>Друзья</h2>
+            <div class="friends-tabs">
+              <button class="tab active" type="button" data-filter="online">В сети</button>
+              <button class="tab" type="button" data-filter="all">Все</button>
+              <button class="tab" type="button" data-filter="pending">Ожидание</button>
+              <button class="tab add" type="button" id="addFriendBtn">Добавить в друзья</button>
+            </div>
+          </div>
+
+          <div class="friends-layout">
+            <div class="friends-list" id="friendsList">
+              <div class="no-friends">
+                <p>У вас пока нет друзей</p>
+                <button class="btn btn-secondary" id="findFriendsBtn">Найти друзей</button>
+              </div>
+            </div>
+
+            <aside class="friends-active">
+              <h3>Активные контакты</h3>
+              <div id="activeContacts">
+                <p class="muted">Нет активных контактов</p>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ===== MEMBERS ===== -->
+    <aside class="panel members" id="membersPanel">
+      <div class="panelHeader">
+        <h3>Участники <span class="count">(1)</span></h3>
+      </div>
+      <div class="members-list" id="membersList">
+        <div class="member online">
+          <div class="avatar small">U</div>
+          <div class="text">
+            <div class="name">Вы</div>
+            <div class="role">Участник</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ===== LOADING OVERLAY ===== -->
+  <div id="loading-overlay" class="overlay">
+    <div class="spinner"></div>
+    <p>Подключаемся к серверу...</p>
+  </div>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

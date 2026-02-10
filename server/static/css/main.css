@@ -1,0 +1,1314 @@
+/* ==============================================
+   main.css - ВСЕ стили LaBerry в одном файле
+   ============================================== */
+
+/* =========================
+   1. СБРОС И БАЗОВЫЕ СТИЛИ
+   ========================= */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  background: #0b0f14;
+  color: #e6edf3;
+  line-height: 1.5;
+}
+
+/* =========================
+   2. CSS-ПЕРЕМЕННЫЕ (единые для всего)
+   ========================= */
+:root {
+  /* Цвета */
+  --accent: #b04cff;
+  --accent-strong: #ff6ad5;
+  --accent-light: rgba(176, 76, 255, 0.15);
+  
+  --bg: #0b0f14;
+  --panel: rgba(255, 255, 255, 0.03);
+  --panel-solid: #1a1d21;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-light: rgba(255, 255, 255, 0.04);
+  
+  --text: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: rgba(255, 255, 255, 0.6);
+  
+  --online: #3fb950;
+  --idle: #f0883e;
+  --dnd: #f85149;
+  
+  /* Размеры */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+}
+
+/* =========================
+   3. УТИЛИТЫ (переиспользуемые классы)
+   ========================= */
+.hidden { display: none !important; }
+.muted { color: var(--text-muted); }
+.text-center { text-align: center; }
+.flex { display: flex; }
+.flex-1 { flex: 1; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+
+.status {
+  font-size: 12px;
+}
+.status.online { color: var(--online); }
+.status.idle { color: var(--idle); }
+.status.dnd { color: var(--dnd); }
+.status.offline { color: var(--text-secondary); }
+
+/* =========================
+   4. КОМПОНЕНТЫ (кнопки, инпуты, аватарки)
+   ========================= */
+
+/* Кнопки */
+.btn {
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.btn:hover {
+  background: var(--accent-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(176, 76, 255, 0.35);
+}
+
+.btn:active {
+  transform: translateY(0);
+}
+
+.btn-secondary {
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+}
+
+.btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.btn-small {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+/* Поля ввода */
+.inp {
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+  width: 100%;
+}
+
+.inp:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(176, 76, 255, 0.1);
+}
+
+.inp::placeholder {
+  color: var(--text-muted);
+}
+
+/* Аватарки */
+.avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  color: white;
+  flex-shrink: 0;
+}
+
+.avatar.small {
+  width: 24px;
+  height: 24px;
+  font-size: 12px;
+}
+
+.avatar.large {
+  width: 48px;
+  height: 48px;
+  font-size: 18px;
+}
+
+/* Иконки */
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
+/* =========================
+   5. ШАПКА
+   ========================= */
+.topbar {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.brand {
+  font-weight: 800;
+  font-size: 20px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* =========================
+   6. ОСНОВНОЙ МАКЕТ
+   ========================= */
+.layout {
+  display: flex;
+  height: calc(100vh - 56px);
+  gap: var(--space-md);
+  padding: var(--space-md);
+  overflow: hidden;
+}
+
+/* =========================
+   7. ПАНЕЛИ (серверы, каналы, чат, участники)
+   ========================= */
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Левая панель - серверы */
+.panel.servers {
+  width: 240px;
+  flex-shrink: 0;
+}
+
+/* Правая панель - участники */
+.panel.members {
+  width: 240px;
+  flex-shrink: 0;
+}
+
+/* Центральная панель - чат */
+.panel.chat {
+  flex: 1;
+  min-width: 400px;
+}
+
+/* Панель каналов */
+.panel.channels {
+  width: 240px;
+  flex-shrink: 0;
+}
+
+/* Заголовок панели */
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.panelHeader h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* =========================
+   8. СПИСКИ (серверы, каналы, друзья)
+   ========================= */
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-sm);
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* Элемент списка */
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 4px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.item.active {
+  background: var(--accent-light);
+  border-left: 3px solid var(--accent);
+  font-weight: 600;
+}
+
+.item.active:hover {
+  background: rgba(176, 76, 255, 0.25);
+}
+
+.item .text {
+  flex: 1;
+  min-width: 0;
+}
+
+.item .title {
+  font-weight: 500;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item .sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Специальные элементы */
+.friends-button.item {
+  margin-bottom: var(--space-md);
+  background: rgba(176, 76, 255, 0.1);
+  border: 1px solid rgba(176, 76, 255, 0.2);
+}
+
+.friends-button.item:hover {
+  background: rgba(176, 76, 255, 0.15);
+}
+
+.friends-button.item.active {
+  background: rgba(176, 76, 255, 0.2);
+}
+
+/* =========================
+   9. ЧАТ (основная часть)
+   ========================= */
+#chatView {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
+}
+
+/* Контейнер сообщений */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-lg);
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(176, 76, 255, 0.3) transparent;
+}
+
+.messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.messages::-webkit-scrollbar-thumb {
+  background: rgba(176, 76, 255, 0.3);
+  border-radius: 4px;
+}
+
+.messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(176, 76, 255, 0.5);
+}
+
+/* Приветствие канала */
+.channel-welcome {
+  text-align: center;
+  padding: var(--space-xl);
+  color: var(--text-secondary);
+}
+
+.channel-welcome h2 {
+  font-size: 24px;
+  margin-bottom: var(--space-sm);
+  color: var(--text);
+}
+
+/* Форма ввода */
+.composer {
+  padding: var(--space-md);
+  border-top: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+}
+
+.composer .inp {
+  flex: 1;
+}
+
+.composer .btn {
+  flex-shrink: 0;
+}
+
+/* =========================
+   10. СООБЩЕНИЯ
+   ========================= */
+.message {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border-radius: var(--radius-md);
+  transition: background 0.2s;
+  animation: fadeIn 0.2s ease;
+}
+
+.message:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.message-avatar {
+  grid-row: 1 / span 2;
+}
+
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.message-author {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.message-time {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.message-content {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-word;
+}
+
+/* =========================
+   11. ПОЛЬЗОВАТЕЛЬСКАЯ ПАНЕЛЬ
+   ========================= */
+.userbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border-top: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.25);
+  flex-shrink: 0;
+}
+
+.userinfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.username {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* =========================
+   12. ЗАГРУЗКА И ОВЕРЛЕЙ
+   ========================= */
+#loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  opacity: 1;
+  transition: opacity 0.6s;
+}
+
+#loading-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: var(--space-md);
+}
+
+.loading-text {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* =========================
+   13. АНИМАЦИИ
+   ========================= */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+  from { transform: translateX(-20px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.7; background-color: rgba(176, 76, 255, 0.25); }
+  100% { opacity: 1; }
+}
+
+.message {
+  animation: fadeIn 0.2s ease;
+}
+
+.item {
+  animation: slideIn 0.2s ease;
+}
+
+.item.server.refreshing {
+  animation: pulse 0.3s ease-in-out;
+}
+
+/* =========================
+   14. АДАПТИВНОСТЬ
+   ========================= */
+@media (max-width: 1200px) {
+  .panel.members {
+    display: none;
+  }
+  
+  .panel.servers {
+    width: 200px;
+  }
+  
+  .panel.channels {
+    width: 200px;
+  }
+}
+
+@media (max-width: 900px) {
+  .panel.channels {
+    display: none;
+  }
+  
+  .panel.servers {
+    width: 70px;
+  }
+  
+  .panel.servers .text {
+    display: none;
+  }
+  
+  .panel.servers .panelHeader h3 {
+    display: none;
+  }
+  
+  .panel.servers .panelHeader {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 600px) {
+  .layout {
+    padding: var(--space-sm);
+    gap: var(--space-sm);
+  }
+  
+  .panel.chat {
+    min-width: 300px;
+  }
+  
+  .brand {
+    font-size: 18px;
+  }
+  
+  .topbar {
+    padding: 0 var(--space-md);
+  }
+}
+
+/* =========================
+   15. ПОЛЬЗОВАТЕЛЬСКИЕ ЭЛЕМЕНТЫ
+   ========================= */
+
+/* Индикатор прокрутки */
+.list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+/* Подсказки */
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.9);
+  color: white;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 1000;
+  margin-bottom: 8px;
+}
+
+/* Выделение кода */
+pre, code {
+  font-family: 'Courier New', monospace;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+/* Скелетон для загрузки */
+.skeleton {
+  background: linear-gradient(90deg, 
+    rgba(255,255,255,0.05) 25%, 
+    rgba(255,255,255,0.1) 50%, 
+    rgba(255,255,255,0.05) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s infinite;
+}
+
+@keyframes skeleton-loading {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* =========================
+   16. СТРАНИЦА АВТОРИЗАЦИИ
+   ========================= */
+body.auth-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: radial-gradient(ellipse at top, #1a0f2e, #0b0f14);
+}
+
+.auth-card {
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-xl);
+  width: 380px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.auth-card h1 {
+  text-align: center;
+  margin-bottom: var(--space-xl);
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-size: 28px;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.auth-form .inp {
+  width: 100%;
+}
+
+.auth-form .btn {
+  width: 100%;
+  margin-top: var(--space-sm);
+}
+
+.auth-error {
+  color: #f85149;
+  font-size: 14px;
+  text-align: center;
+  margin-top: var(--space-sm);
+  padding: var(--space-sm);
+  background: rgba(248, 81, 73, 0.1);
+  border-radius: var(--radius-sm);
+}
+
+/* =========================
+   17. СТРАНИЦА АВТОРИЗАЦИИ (дополнительно)
+   ========================= */
+.auth-switch {
+  margin-top: var(--space-lg);
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.auth-switch a {
+  color: var(--accent);
+  text-decoration: none;
+  margin-left: 6px;
+  font-weight: 500;
+}
+
+.auth-switch a:hover {
+  text-decoration: underline;
+}
+
+/* =========================
+   18. КОМПОНЕНТЫ ДРУЗЕЙ
+   ========================= */
+.friends-header {
+  padding: var(--space-lg);
+  border-bottom: 1px solid var(--border);
+}
+
+.friends-tabs {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.tab {
+  padding: 8px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.tab:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.tab.add {
+  margin-left: auto;
+  background: transparent;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tab.add:hover {
+  background: var(--accent);
+  color: white;
+}
+
+.friends-layout {
+  display: flex;
+  height: 100%;
+}
+
+.friends-list {
+  flex: 1;
+  padding: var(--space-lg);
+}
+
+.friends-active {
+  width: 280px;
+  border-left: 1px solid var(--border);
+  padding: var(--space-lg);
+  flex-shrink: 0;
+}
+
+.no-friends {
+  text-align: center;
+  padding: var(--space-xl);
+  color: var(--text-secondary);
+}
+
+.no-friends p {
+  margin-bottom: var(--space-md);
+}
+
+/* =========================
+   19. СПИСОК УЧАСТНИКОВ
+   ========================= */
+.members-list {
+  padding: var(--space-sm);
+}
+
+.member {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  transition: background 0.2s;
+}
+
+.member:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.member .text {
+  flex: 1;
+  min-width: 0;
+}
+
+.member .name {
+  font-weight: 500;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.member .role {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Индикатор статуса */
+.member.online .avatar {
+  position: relative;
+}
+
+.member.online .avatar::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 8px;
+  height: 8px;
+  background: var(--online);
+  border-radius: 50%;
+  border: 2px solid var(--panel);
+}
+
+/* =========================
+   20. РАЗНОЕ
+   ========================= */
+.hash {
+  color: var(--text-secondary);
+  font-weight: bold;
+  font-size: 18px;
+}
+
+.count {
+  color: var(--text-secondary);
+  font-weight: normal;
+  font-size: 14px;
+}
+
+.separator {
+  height: 1px;
+  background: var(--border);
+  margin: var(--space-md) 0;
+}
+
+/* =========================
+   21. СТИЛИ СЕРВЕРОВ И КАНАЛОВ
+   ========================= */
+.server .avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    color: white;
+    flex-shrink: 0;
+    transition: all 0.2s;
+}
+
+.server.active .avatar {
+    background: var(--accent-strong);
+    box-shadow: 0 0 0 2px rgba(176, 76, 255, 0.3);
+}
+
+.channel .hash {
+    color: var(--text-secondary);
+    font-weight: bold;
+    font-size: 18px;
+    margin-right: 8px;
+}
+
+.channel.active .hash {
+    color: var(--accent);
+}
+
+.empty-servers, .empty-channels {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-secondary);
+}
+
+.empty-servers p, .empty-channels p {
+    margin-bottom: 10px;
+}
+
+/* =========================
+   22. СООБЩЕНИЯ (улучшенная версия)
+   ========================= */
+.message {
+    display: grid;
+    grid-template-columns: 40px 1fr;
+    gap: 12px;
+    padding: 12px;
+    border-radius: 8px;
+    transition: background 0.2s;
+    animation: fadeIn 0.2s ease;
+}
+
+.message:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.message .avatar {
+    grid-row: 1 / span 2;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    color: white;
+}
+
+.message .avatar.you {
+    background: linear-gradient(135deg, #3fb950, #2ea043);
+}
+
+.message .content {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.message .author {
+    font-weight: 600;
+    font-size: 14px;
+    line-height: 1.2;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.message .badge {
+    background: var(--accent);
+    color: white;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.message .text {
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.message .time {
+    font-size: 12px;
+    color: var(--text-secondary);
+    opacity: 0.7;
+}
+
+.empty-chat {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-secondary);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.empty-chat h3 {
+    font-size: 20px;
+    margin-bottom: 10px;
+    color: var(--text);
+    background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+/* =========================
+   23. УВЕДОМЛЕНИЯ И ОШИБКИ
+   ========================= */
+.notification {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: var(--space-md);
+    border-radius: var(--radius-md);
+    background: var(--panel-solid);
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    z-index: 1000;
+    animation: slideIn 0.3s ease;
+    max-width: 400px;
+}
+
+.notification.success {
+    border-left: 4px solid var(--online);
+}
+
+.notification.error {
+    border-left: 4px solid var(--dnd);
+}
+
+.notification.warning {
+    border-left: 4px solid var(--idle);
+}
+
+.notification.info {
+    border-left: 4px solid var(--accent);
+}
+
+/* =========================
+   24. МОДАЛЬНЫЕ ОКНА
+   ========================= */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    animation: fadeIn 0.3s ease;
+}
+
+.modal {
+    background: var(--panel-solid);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    width: 90%;
+    max-width: 500px;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: fadeIn 0.3s ease;
+}
+
+.modal-header {
+    padding: var(--space-lg);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.modal-header h2 {
+    font-size: 18px;
+    color: var(--text);
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: var(--radius-sm);
+    transition: all 0.2s;
+}
+
+.modal-close:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text);
+}
+
+.modal-content {
+    padding: var(--space-lg);
+}
+
+.modal-footer {
+    padding: var(--space-lg);
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-sm);
+}
+
+/* =========================
+   25. ТЕМНАЯ ТЕМА (по умолчанию)
+   ========================= */
+.theme-dark {
+  --accent: #b04cff;
+  --accent-strong: #ff6ad5;
+  --accent-light: rgba(176, 76, 255, 0.15);
+  --bg: #0b0f14;
+  --panel: rgba(255, 255, 255, 0.03);
+  --panel-solid: #1a1d21;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #e6edf3;
+  --text-secondary: #8b949e;
+}
+
+/* =========================
+   26. СВЕТЛАЯ ТЕМА (опционально)
+   ========================= */
+.theme-light {
+  --accent: #7c3aed;
+  --accent-strong: #a855f7;
+  --accent-light: rgba(124, 58, 237, 0.1);
+  --bg: #f8fafc;
+  --panel: rgba(0, 0, 0, 0.02);
+  --panel-solid: #ffffff;
+  --border: rgba(0, 0, 0, 0.1);
+  --text: #1e293b;
+  --text-secondary: #64748b;
+  --online: #10b981;
+  --idle: #f59e0b;
+  --dnd: #ef4444;
+}
+
+/* =========================
+   27. СТИЛИ ДЛЯ ПРОИЗВОДИТЕЛЬНОСТИ
+   ========================= */
+.will-change-transform {
+  will-change: transform;
+}
+
+.will-change-opacity {
+  will-change: opacity;
+}
+
+/* =========================
+   28. ФИНАЛЬНЫЕ ШТРИХИ
+   ========================= */
+::selection {
+  background: rgba(176, 76, 255, 0.3);
+  color: white;
+}
+
+::-moz-selection {
+  background: rgba(176, 76, 255, 0.3);
+  color: white;
+}
+
+*:focus {
+  outline: 2px solid rgba(176, 76, 255, 0.3);
+  outline-offset: 2px;
+}
+
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
+*:focus-visible {
+  outline: 2px solid rgba(176, 76, 255, 0.3);
+  outline-offset: 2px;
+}
+
+/* Управление видимостью меню каналов на мобильных устройствах */
+@media (max-width: 900px) {
+    .panel.channels {
+        display: none;
+        position: absolute;
+        left: 80px;
+        top: 56px;
+        bottom: 0;
+        width: 280px;
+        z-index: 100;
+        background: var(--panel-solid);
+        box-shadow: 5px 0 15px rgba(0, 0, 0, 0.3);
+        animation: slideInRight 0.3s ease;
+    }
+    
+    .panel.channels.show-channels {
+        display: flex;
+    }
+    
+    /* Затемнение фона когда меню открыто */
+    .layout::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 99;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+    }
+    
+    .panel.channels.show-channels + .layout::after {
+        opacity: 1;
+        pointer-events: all;
+    }
+}
+
+@keyframes slideInRight {
+    from {
+        transform: translateX(-20px);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}

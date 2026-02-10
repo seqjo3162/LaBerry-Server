@@ -1,0 +1,9 @@
+/target
+*.db
+server/messenger.pfx
+/android
+*.ps1
+server/messenger.key
+server/messenger.crt
+.cargo/config.toml
+server/src/jni_bridge.rs

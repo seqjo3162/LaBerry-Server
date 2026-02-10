@@ -1,0 +1,65 @@
+[package]
+name = "laberry_server"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "laberry_server"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["host"]
+host = []
+android = []
+
+[dependencies]
+hyper = "1.0"
+hyper-util = "0.1"
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "signal", "net"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-rustls = "0.25"
+rustls = "0.22"
+tower = { version = "0.5.3", features = ["make"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+axum = { version = "0.7.9", features = ["ws", "multipart"] }
+tower-service = "0.3"
+anyhow = "1"
+once_cell = "1"
+dashmap = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["std"] }
+rand = "0.8"
+sha2 = "0.10"
+jsonwebtoken = "9"
+uuid = { version = "1", features = ["v4"] }
+mime = "0.3"
+sysinfo = "0.30"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ТОЛЬКО ОДНА СЕКЦИЯ ДЛЯ НЕ-ANDROID!
+[target.'cfg(not(target_os = "android"))'.dependencies]
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "time"
+] }
+
+# ТОЛЬКО ОДНА СЕКЦИЯ ДЛЯ ANDROID!
+[target.'cfg(target_os = "android")'.dependencies]
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "time"
+] }
+jni = "0.21"
+log = "0.4"
+android_logger = "0.13"
+
+[[bin]]
+name = "laberry_server_bin"
+path = "src/main.rs"
