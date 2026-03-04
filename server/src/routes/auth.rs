@@ -1,21 +1,21 @@
 use axum::{
     extract::{Form, State},
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use sqlx::Row;
 use crate::{auth, server::AppState};
 use crate::api_error::ApiError;
 use crate::middleware::auth_guard::AuthUser;
+use crate::middleware::rate_limit;
+use uuid::Uuid;
 use crate::db::bootstrap;
 
-// ===========================
-// Structures
-// ===========================
 #[derive(Serialize)]
 pub struct MeResponse {
     pub id: i64,
@@ -53,34 +53,28 @@ pub struct Verify2FaBody {
 #[derive(Serialize)]
 pub struct LoginResponse {
     pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
     pub token_type: Option<String>,
     pub user_id: Option<i64>,
     pub requires_2fa: bool,
 }
 
-// ===========================
-// Router
-// ===========================
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/verify-2fa", post(verify_2fa))
         .route("/logout", post(logout))
+        .route("/refresh", post(refresh))
         .route("/me", get(me))
-        .route("/verify", get(verify_token)) // ✅ новое
+        .route("/verify", get(verify_token))
 }
 
-// ===========================
-// Register
-// ===========================
 async fn register(
     State(st): State<AppState>,
     Json(body): Json<RegisterBody>,
 ) -> Result<Response, ApiError> {
     let db = &st.db;
-
-    // Проверка username
     let username_exists = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM users WHERE username = ? LIMIT 1",
     )
@@ -94,7 +88,6 @@ async fn register(
         return Err(ApiError::BadRequest("Username already used"));
     }
 
-    // Проверка email
     if let Some(email) = &body.email {
         let email_exists = sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM users WHERE email = ? LIMIT 1",
@@ -129,7 +122,6 @@ async fn register(
     .await
     .map_err(|_| ApiError::Internal("Database error"))?;
 
-    // Добавляем в глобальный сервер
     let user_id = result.last_insert_rowid();
     bootstrap::add_user_to_global_server(db, user_id).await
         .map_err(|_| ApiError::Internal("Failed to join global server"))?;
@@ -140,13 +132,20 @@ async fn register(
     ).into_response())
 }
 
-// ===========================
-// Login
-// ===========================
 async fn login(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Form(body): Form<LoginBody>,
 ) -> Result<Response, ApiError> {
+
+let ip = rate_limit::extract_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+let u = body.username.trim().to_ascii_lowercase();
+let key = format!("login:{}:{}", ip, u);
+if !rate_limit::allow(&key, 12, 300) { // 12 attempts / 5 min per ip+username
+    return Err(ApiError::TooManyRequests("Too many login attempts, try later"));
+}
+
+
     let db = &st.db;
 
     let r = sqlx::query(
@@ -196,6 +195,7 @@ async fn login(
             StatusCode::OK,
             Json(LoginResponse {
                 access_token: None,
+                refresh_token: None,
                 token_type: None,
                 user_id: Some(r.get("id")),
                 requires_2fa: true,
@@ -204,27 +204,70 @@ async fn login(
             .into_response());
     }
 
-    let token = auth::create_access_token(
-        r.get("username"),
-        r.get("token_version"),
-    )
+    
+let username: String = r.get("username");
+let token_version: i64 = r.get("token_version");
+let user_id: i64 = r.get("id");
+let token = auth::create_access_token(&username, token_version)
     .map_err(|_| ApiError::Internal("Token error"))?;
+let refresh_jti = Uuid::new_v4().to_string();
+let refresh = auth::create_refresh_token(&username, token_version, &refresh_jti)
+    .map_err(|_| ApiError::Internal("Token error"))?;
+let refresh_hash = auth::sha256_hex(&refresh);
+let now = auth::now_iso();
+let ua = headers
+    .get(axum::http::header::USER_AGENT)
+    .and_then(|h| h.to_str().ok())
+    .map(|s| s.to_string());
+let ip = rate_limit::extract_ip(&headers);
+let token_hash = auth::sha256_hex(&token);
+let _ = sqlx::query(
+    r#"
+    INSERT OR IGNORE INTO user_sessions(user_id, token_hash, user_agent, ip, created_at, last_seen_at, revoked_at)
+    VALUES(?, ?, ?, ?, ?, ?, NULL)
+    "#,
+)
+.bind(user_id)
+.bind(&token_hash)
+.bind(ua.clone())
+.bind(ip.clone())
+.bind(&now)
+.bind(&now)
+.execute(db)
+.await;
 
-    Ok((
-        StatusCode::OK,
-        Json(LoginResponse {
-            access_token: Some(token),
-            token_type: Some("bearer".into()),
-            user_id: Some(r.get("id")),
-            requires_2fa: false,
-        }),
-    )
-        .into_response())
+let refresh_claims = auth::decode_refresh_claims(&refresh)
+    .map_err(|_| ApiError::Internal("Token error"))?;
+let expires_at = refresh_claims.exp.to_string();
+let _ = sqlx::query(
+    r#"
+    INSERT INTO refresh_sessions(user_id, refresh_token_hash, user_agent, ip, created_at, last_used_at, expires_at, revoked_at)
+    VALUES(?, ?, ?, ?, ?, ?, ?, NULL)
+    "#,
+)
+.bind(user_id)
+.bind(&refresh_hash)
+.bind(ua)
+.bind(ip)
+.bind(&now)
+.bind(&now)
+.bind(&expires_at)
+.execute(db)
+.await;
+
+Ok((
+    StatusCode::OK,
+    Json(LoginResponse {
+        access_token: Some(token),
+        refresh_token: Some(refresh),
+        token_type: Some("bearer".into()),
+        user_id: Some(user_id),
+        requires_2fa: false,
+    }),
+)
+    .into_response())
 }
 
-// ===========================
-// Verify 2FA
-// ===========================
 async fn verify_2fa(
     State(st): State<AppState>,
     Json(body): Json<Verify2FaBody>,
@@ -265,27 +308,182 @@ async fn verify_2fa(
     .await
     .map_err(|_| ApiError::Internal("Database error"))?;
 
-    let token = auth::create_access_token(
-        r.get("username"),
-        r.get("token_version"),
-    )
+    
+let username: String = r.get("username");
+let token_version: i64 = r.get("token_version");
+let user_id: i64 = r.get("id");
+
+let token = auth::create_access_token(&username, token_version)
     .map_err(|_| ApiError::Internal("Token error"))?;
+
+let refresh_jti = Uuid::new_v4().to_string();
+let refresh = auth::create_refresh_token(&username, token_version, &refresh_jti)
+    .map_err(|_| ApiError::Internal("Token error"))?;
+let refresh_hash = auth::sha256_hex(&refresh);
+let now = auth::now_iso();
+let refresh_claims = auth::decode_refresh_claims(&refresh)
+    .map_err(|_| ApiError::Internal("Token error"))?;
+let expires_at = refresh_claims.exp.to_string();
+
+let _ = sqlx::query(
+    r#"
+    INSERT INTO refresh_sessions(user_id, refresh_token_hash, user_agent, ip, created_at, last_used_at, expires_at, revoked_at)
+    VALUES(?, ?, NULL, NULL, ?, ?, ?, NULL)
+    "#,
+)
+.bind(user_id)
+.bind(&refresh_hash)
+.bind(&now)
+.bind(&now)
+.bind(&expires_at)
+.execute(db)
+.await;
+
+Ok((
+    StatusCode::OK,
+    Json(LoginResponse {
+        access_token: Some(token),
+        refresh_token: Some(refresh),
+        token_type: Some("bearer".into()),
+        user_id: Some(user_id),
+        requires_2fa: false,
+    }),
+)
+    .into_response())
+}
+
+async fn refresh(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let Some(authz) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+    else {
+        return Err(ApiError::Unauthorized("Missing token"));
+    };
+
+    let Some(token) = authz.strip_prefix("Bearer ") else {
+        return Err(ApiError::Unauthorized("Missing token"));
+    };
+
+    let ip = rate_limit::extract_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    if !rate_limit::allow(&format!("refresh:{}", ip), 60, 300) {
+        return Err(ApiError::TooManyRequests("Too many refresh requests"));
+    }
+
+    let claims = auth::decode_refresh_claims(token)
+        .map_err(|_| ApiError::Unauthorized("Invalid token"))?;
+
+    let user_row = sqlx::query(
+        r#"
+        SELECT id, token_version, is_banned
+        FROM users
+        WHERE username = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(&claims.sub)
+    .fetch_optional(&st.db)
+    .await
+    .map_err(|_| ApiError::Internal("Database error"))?
+    .ok_or(ApiError::Unauthorized("Invalid token"))?;
+
+    if user_row.get::<i64, _>("is_banned") != 0 {
+        return Err(ApiError::Forbidden("User banned"));
+    }
+
+    let user_id: i64 = user_row.get("id");
+    let tv: i64 = user_row.get("token_version");
+    if tv != claims.token_version {
+        return Err(ApiError::Unauthorized("Token revoked"));
+    }
+
+    let now = auth::now_iso();
+    let now_u = auth::now_unix();
+    let token_hash = auth::sha256_hex(token);
+    let sess = sqlx::query(
+        r#"
+        SELECT id, revoked_at, expires_at
+        FROM refresh_sessions
+        WHERE refresh_token_hash = ? AND user_id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(&token_hash)
+    .bind(user_id)
+    .fetch_optional(&st.db)
+    .await
+    .map_err(|_| ApiError::Internal("Database error"))?
+    .ok_or(ApiError::Unauthorized("Invalid token"))?;
+
+    let revoked_at: Option<String> = sess.get("revoked_at");
+    if revoked_at.is_some() {
+        return Err(ApiError::Unauthorized("Invalid token"));
+    }
+
+    let expires_at: String = sess.get("expires_at");
+    let exp = expires_at.parse::<i64>().unwrap_or(0);
+    if exp <= now_u {
+        let _ = sqlx::query("UPDATE refresh_sessions SET revoked_at = ? WHERE refresh_token_hash = ?")
+            .bind(&now)
+            .bind(&token_hash)
+            .execute(&st.db)
+            .await;
+        return Err(ApiError::Unauthorized("Invalid token"));
+    }
+
+    let _ = sqlx::query("UPDATE refresh_sessions SET revoked_at = ?, last_used_at = ? WHERE refresh_token_hash = ?")
+        .bind(&now)
+        .bind(&now)
+        .bind(&token_hash)
+        .execute(&st.db)
+        .await;
+
+    let access = auth::create_access_token(&claims.sub, tv)
+        .map_err(|_| ApiError::Internal("Token error"))?;
+
+    let refresh_jti = Uuid::new_v4().to_string();
+    let refresh = auth::create_refresh_token(&claims.sub, tv, &refresh_jti)
+        .map_err(|_| ApiError::Internal("Token error"))?;
+    let refresh_claims = auth::decode_refresh_claims(&refresh)
+        .map_err(|_| ApiError::Internal("Token error"))?;
+    let refresh_hash = auth::sha256_hex(&refresh);
+
+    let ua = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+
+    let expires_at_new = refresh_claims.exp.to_string();
+
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO refresh_sessions(user_id, refresh_token_hash, user_agent, ip, created_at, last_used_at, expires_at, revoked_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, NULL)
+        "#,
+    )
+    .bind(user_id)
+    .bind(&refresh_hash)
+    .bind(ua)
+    .bind(rate_limit::extract_ip(&headers))
+    .bind(&now)
+    .bind(&now)
+    .bind(&expires_at_new)
+    .execute(&st.db)
+    .await;
 
     Ok((
         StatusCode::OK,
-        Json(LoginResponse {
-            access_token: Some(token),
-            token_type: Some("bearer".into()),
-            user_id: Some(r.get("id")),
-            requires_2fa: false,
-        }),
+        Json(serde_json::json!({
+            "access_token": access,
+            "refresh_token": refresh,
+            "token_type": "bearer"
+        })),
     )
         .into_response())
 }
 
-// ===========================
-// Logout
-// ===========================
 async fn logout(
     State(st): State<AppState>,
     user: AuthUser,
@@ -301,6 +499,12 @@ async fn logout(
     .execute(&st.db)
     .await
     .map_err(|_| ApiError::Internal("Database error"))?;
+    let now = auth::now_iso();
+    let _ = sqlx::query("UPDATE refresh_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+        .bind(&now)
+        .bind(user.id)
+        .execute(&st.db)
+        .await;
 
     if res.rows_affected() == 0 {
         return Err(ApiError::Internal("Logout failed"));
@@ -313,19 +517,8 @@ async fn logout(
         .into_response())
 }
 
-// ===========================
-// Verify Token (новое для автологина)
-// ===========================
-pub async fn verify_token(headers: HeaderMap) -> impl IntoResponse {
-    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(value) = auth_header.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                if auth::decode_username(token).is_ok() {
-                    return StatusCode::OK.into_response();
-                }
-            }
-        }
-    }
-
-    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid_token" }))).into_response()
+pub async fn verify_token(
+    _user: AuthUser,
+) -> impl IntoResponse {
+    StatusCode::OK.into_response()
 }

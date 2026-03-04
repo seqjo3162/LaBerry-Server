@@ -4,21 +4,26 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LaBerry</title>
-  <link rel="stylesheet" href="/static/css/main.css">
+  <link rel="stylesheet" href="/static/css/main.css?v=13">
 </head>
 <body>
-
-  <!-- ===== HEADER ===== -->
   <header class="topbar">
+    <div class="topbar-left">
+      <button class="icon-btn mobile-only" type="button" id="mobileServersBtn" title="Серверы">☰</button>
+      <button class="icon-btn mobile-only" type="button" id="mobileChannelsBtn" title="Каналы">#</button>
+    </div>
+
     <div class="brand">LaBerry</div>
-    <div class="muted" id="status">online</div>
+
+    <div class="topbar-right">
+      <button class="icon-btn mobile-only" type="button" id="mobileMembersBtn" title="Участники">👥</button>
+    </div>
   </header>
 
   <div class="layout">
 
-    <!-- ===== SERVERS PANEL ===== -->
+    <div id="uiOverlay" class="ui-overlay" aria-hidden="true"></div>
     <aside class="panel servers">
-      <!-- FRIENDS BUTTON -->
       <div class="friends-button item" id="friendsBtn">
         <div class="text">
           <div class="title">👥 Друзья</div>
@@ -32,10 +37,30 @@
       </div>
 
       <div class="list" id="servers-list"></div>
+      <div class="voicebar" id="voiceBar" hidden>
+        <div class="voicebar-main">
+          <div class="voicebar-title"><span class="voice-ic">🔊</span> <span id="voiceChannelName">Voice</span></div>
+          <div class="voicebar-sub" id="voiceStatusText">Подключение...</div>
+          <div class="voicebar-peers" id="voicePeersList"></div>
+          <div class="voicebar-stream" id="voiceStreamNotice" hidden>
+            <span class="live-dot"></span>
+            <span class="voicebar-stream-text" id="voiceStreamText">Демонстрация</span>
+            <button class="btn btn-ghost btn-xs" type="button" id="voiceStreamWatchBtn">Смотреть</button>
+          </div>
+        </div>
+        <div class="voicebar-actions">
+          <button class="icon-btn" type="button" id="voiceMuteBtn" title="Микрофон">🎙</button>
+          <button class="icon-btn" type="button" id="voiceDeafenBtn" title="Отключить звук">🔇</button>
+          <button class="icon-btn" type="button" id="voiceShareBtn" title="Демонстрация экрана">🖥️</button>
+          <button class="icon-btn danger" type="button" id="voiceLeaveBtn" title="Выйти">⏏</button>
+        </div>
+      </div>
 
-      <!-- USER BAR -->
+      <div id="voiceAudioSink" hidden></div>
+      <div id="voiceVideoSink" hidden></div>
       <div class="userbar">
         <div class="avatar" id="userAvatar">
+          <img id="userAvatarImg" class="avatar-img" alt="" style="display:none;" />
           <span id="avatarText">U</span>
         </div>
         <div class="userinfo">
@@ -46,17 +71,13 @@
       </div>
     </aside>
 
-    <!-- ===== CHANNELS ===== -->
     <aside class="panel channels" id="channelsPanel">
       <div class="panelHeader">
         <h3>Каналы</h3>
         <button class="btn btn-ghost" type="button" id="addChannelBtn" style="display: none;">＋</button>
       </div>
 
-      <!-- DM LIST -->
       <div class="list dm-list" id="dmList" hidden></div>
-
-      <!-- CHANNEL LIST -->
       <div class="list" id="channels-list">
         <div class="item active" data-channel-id="1">
           <span class="hash">#</span>
@@ -68,12 +89,14 @@
       </div>
     </aside>
 
-    <!-- ===== MAIN CHAT PANEL ===== -->
     <main class="panel chat" id="chatPanel">
-      <!-- CHAT VIEW -->
       <div id="chatView">
-        <div class="panelHeader">
+        <div class="panelHeader chat-header">
           <h3 id="chat-title"># general</h3>
+          <div class="chat-header-actions">
+            <button class="icon-btn" type="button" id="dmCallBtn" title="Звонок" hidden>📞</button>
+            <button class="icon-btn" type="button" id="pinsBtn" title="Закрепы">📌</button>
+          </div>
         </div>
 
         <div class="messages" id="messages">
@@ -83,13 +106,103 @@
           </div>
         </div>
 
+        <div id="uploadQueue" class="upload-queue" hidden></div>
+
         <form class="composer" id="composer">
-          <input class="inp" id="message" placeholder="Напишите сообщение..." autocomplete="off" />
-          <button class="btn btn-primary" type="submit">Отправить</button>
+          <div class="composer-row">
+            <label class="icon-btn attach-btn" id="attachBtn" for="fileInput" title="Прикрепить файл">📎</label>
+            <input type="file" id="fileInput" class="file-input" multiple />
+            <input class="inp" id="message" placeholder="Напишите сообщение..." autocomplete="off" />
+            <button class="btn btn-primary" type="submit" id="sendBtn">Отправить</button>
+          </div>
+          <div class="attachments" id="attachments" hidden></div>
         </form>
       </div>
 
-      <!-- FRIENDS VIEW (нужно добавить стили в main.css) -->
+      <div id="voiceView" class="voice-view" hidden>
+        <div class="voice-view-header">
+          <div class="voice-view-title">
+            <span class="voice-view-ic">🔊</span>
+            <span id="voiceViewChannelName">Voice</span>
+            <span class="voice-view-sep">•</span>
+            <span id="voiceViewState">Подключение...</span>
+          </div>
+          <div class="voice-view-header-actions">
+            <button class="icon-btn" type="button" id="voicePipBtn" title="Картинка-в-картинке">▣</button>
+            <button class="icon-btn" type="button" id="voiceFullscreenBtn" title="Во весь экран">⛶</button>
+          </div>
+        </div>
+
+        <div class="voice-stage-wrap">
+          <div class="voice-stage" id="voiceStage">
+            <div class="voice-stage-content" id="voiceStageContent">
+              <div class="voice-focus" id="voiceFocus" hidden>
+                <div class="voice-focus-top">
+                  <div class="voice-focus-title" id="voiceFocusTitle"></div>
+                  <div class="voice-focus-actions">
+                    <button class="icon-btn" type="button" id="voiceFocusEyeBtn" title="Перестать смотреть" hidden>👁</button>
+                    <button class="icon-btn" type="button" id="voiceFocusCloseBtn" title="Снять закреп">✕</button>
+                  </div>
+                </div>
+                <div class="voice-focus-body">
+                  <div class="voice-focus-empty" id="voiceFocusEmpty" hidden>
+                    <div class="t">Нет видео</div>
+                    <div class="s">Выберите плитку, чтобы закрепить.</div>
+                  </div>
+                  <video id="voiceFocusVideo" autoplay playsinline></video>
+                </div>
+              </div>
+
+              <div class="voice-tiles-grid" id="voiceTilesGrid"></div>
+              <div class="voice-peer-tile" id="voicePeerTile" hidden>
+                <div class="voice-peer-ava" id="voicePeerAva">U</div>
+                <div class="voice-peer-name" id="voicePeerName"></div>
+              </div>
+              <div class="voice-stage-video-wrap" id="voiceStageVideoWrap">
+                <div class="voice-stage-empty" id="voiceStageEmpty">
+                  <div class="voice-stage-empty-title" id="voiceStageEmptyTitle">Нет демонстрации</div>
+                  <div class="voice-stage-empty-sub" id="voiceStageEmptySub">
+                    Нажмите 🖥️ чтобы начать демонстрацию, или выберите участника с LIVE, чтобы смотреть.
+                  </div>
+                  <div class="voice-stage-empty-actions" id="voiceStageEmptyActions">
+                    <button class="btn btn-primary" type="button" id="voiceStageWatchBtn" hidden>Смотреть</button>
+                  </div>
+                </div>
+                <video id="voiceStageVideo" autoplay playsinline></video>
+              </div>
+            </div>
+
+            <div class="voice-stage-top" id="voiceStageTop">
+              <div class="voice-live-badge" id="voiceLiveBadge" hidden>
+                <span class="live-dot"></span>
+                <span class="live-text">LIVE</span>
+              </div>
+              <div class="voice-stage-name" id="voiceStageName"></div>
+            </div>
+
+            <div class="voice-self-preview" id="voiceSelfPreview" hidden>
+              <video id="voiceSelfVideo" autoplay muted playsinline></video>
+              <div class="voice-self-label">Вы</div>
+            </div>
+
+            <div class="voice-members-dock" id="voiceMembersDock" hidden>
+              <div class="voice-members-head">
+                <div class="t">В голосе</div>
+                <div class="c" id="voiceMembersCount">(0)</div>
+              </div>
+              <div class="voice-members-grid" id="voiceMembersGrid"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="voice-controls" id="voiceControls">
+          <button class="vc-btn" type="button" id="vcMuteBtn" title="Микрофон">🎙</button>
+          <button class="vc-btn" type="button" id="vcDeafenBtn" title="Отключить звук">🔇</button>
+          <button class="vc-btn" type="button" id="vcShareBtn" title="Демонстрация экрана">🖥️</button>
+          <button class="vc-btn danger" type="button" id="vcLeaveBtn" title="Отключиться">⏏</button>
+        </div>
+      </div>
+      
       <div id="friendsView" hidden>
         <div class="friends">
           <div class="friends-header">
@@ -121,29 +234,104 @@
       </div>
     </main>
 
-    <!-- ===== MEMBERS ===== -->
     <aside class="panel members" id="membersPanel">
-      <div class="panelHeader">
-        <h3>Участники <span class="count">(1)</span></h3>
-      </div>
-      <div class="members-list" id="membersList">
-        <div class="member online">
-          <div class="avatar small">U</div>
-          <div class="text">
-            <div class="name">Вы</div>
-            <div class="role">Участник</div>
+      <div id="membersPanelMembers">
+        <div class="panelHeader">
+          <h3>Участники <span class="count">(1)</span></h3>
+        </div>
+        <div class="members-list" id="membersList">
+          <div class="member online">
+            <div class="avatar small">U</div>
+            <div class="text">
+              <div class="name">Вы</div>
+              <div class="role">Участник</div>
+            </div>
           </div>
         </div>
       </div>
+
+      <div id="voiceChatSide" class="voice-chat-side" hidden></div>
     </aside>
   </div>
 
-  <!-- ===== LOADING OVERLAY ===== -->
+
+
+  <div id="dmCallOverlay" class="dm-call-overlay hidden" aria-hidden="true">
+    <div class="dm-call-card" role="dialog" aria-modal="true">
+      <div class="dm-call-title" id="dmCallTitle">Звонок</div>
+      <div class="dm-call-sub" id="dmCallSub">Входящий вызов</div>
+      <div class="dm-call-actions">
+        <button class="btn btn-ghost" type="button" id="dmCallDeclineBtn">Отклонить</button>
+        <button class="btn btn-primary" type="button" id="dmCallAcceptBtn">Принять</button>
+      </div>
+    </div>
+  </div>
+  
   <div id="loading-overlay" class="overlay">
     <div class="spinner"></div>
     <p>Подключаемся к серверу...</p>
   </div>
 
-  <script type="module" src="/static/js/app.js"></script>
+  <div id="screenShareOverlay" class="modal-overlay" hidden>
+    <div class="modal ss-modal">
+      <div class="modal-header">
+        <div class="modal-title">Демонстрация экрана</div>
+        <button class="modal-close" type="button" id="screenShareCloseBtn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="ss-tabs" role="tablist">
+          <button class="ss-tab active" type="button" data-surface="monitor" role="tab">Экран</button>
+          <button class="ss-tab" type="button" data-surface="window" role="tab">Окно</button>
+          <button class="ss-tab" type="button" data-surface="browser" role="tab">Вкладка</button>
+        </div>
+
+        <div class="ss-grid">
+          <div class="ss-card">
+            <div class="ss-card-title">Качество</div>
+            <div class="ss-quality">
+              <label class="ss-radio"><input type="radio" name="ssRes" value="480" /> <span>480p</span></label>
+              <label class="ss-radio"><input type="radio" name="ssRes" value="720" checked /> <span>720p</span></label>
+              <label class="ss-radio"><input type="radio" name="ssRes" value="1080" /> <span>1080p</span></label>
+            </div>
+            <div class="ss-quality" style="margin-top:10px;">
+              <label class="ss-radio"><input type="radio" name="ssFps" value="15" /> <span>15 FPS</span></label>
+              <label class="ss-radio"><input type="radio" name="ssFps" value="30" checked /> <span>30 FPS</span></label>
+              <label class="ss-radio"><input type="radio" name="ssFps" value="60" /> <span>60 FPS</span></label>
+            </div>
+            <div class="ss-toggles">
+              <label class="ss-check"><input type="checkbox" id="ssAudioChk" /> <span>Звук (если поддерживается)</span></label>
+            </div>
+            <div class="ss-note">Выбор источника откроется в системном окне браузера.</div>
+          </div>
+          <div class="ss-card">
+            <div class="ss-card-title">Предпросмотр</div>
+            <div class="ss-preview">
+              <video id="ssPreviewVideo" muted playsinline></video>
+              <div class="ss-preview-hint" id="ssPreviewHint">Нажми «Начать», затем выбери экран/окно/вкладку.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" type="button" id="screenShareCancelBtn">Отмена</button>
+        <button class="btn btn-primary" type="button" id="screenShareStartBtn">Начать</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ssPanel" class="ss-panel" hidden>
+    <div class="ss-panel-head">
+      <div class="ss-panel-title" id="ssPanelTitle">Демонстрация</div>
+      <div class="ss-panel-actions">
+        <button class="icon-btn" type="button" id="ssPanelFullscreenBtn" title="Во весь экран">⛶</button>
+        <button class="icon-btn" type="button" id="ssPanelHideBtn" title="Скрыть">✕</button>
+      </div>
+    </div>
+    <div class="ss-panel-body">
+      <video id="ssRemoteVideo" autoplay playsinline></video>
+    </div>
+  </div>
+
+  <script type="module" src="/static/js/app.js?v=13"></script>
 </body>
 </html>

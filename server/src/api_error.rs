@@ -11,6 +11,7 @@ pub enum ApiError {
     Unauthorized(&'static str),
     Forbidden(&'static str),
     NotFound(&'static str),
+    TooManyRequests(&'static str),
     Internal(&'static str),
 }
 
@@ -26,6 +27,7 @@ impl ApiError {
             ApiError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -36,6 +38,7 @@ impl ApiError {
             | ApiError::Unauthorized(m)
             | ApiError::Forbidden(m)
             | ApiError::NotFound(m)
+            | ApiError::TooManyRequests(m)
             | ApiError::Internal(m) => m,
         }
     }

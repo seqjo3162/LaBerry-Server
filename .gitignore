@@ -1,9 +1,30 @@
-/target
-*.db
-server/messenger.pfx
-/android
-*.ps1
+# Secrets
 server/messenger.key
-server/messenger.crt
+server/messenger.pfx
+*.pfx
+*.key
+
+# Local DB / storage
+server/laberry.db
+server/storage/
+
+# Logs
+server/panic.log
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+/caddy
+*.db
+laberry.db-shm
+laberry.db-wal
+*.ps1
+LaBerry-API.md
+*.patch
+/storage
+/target
+TODO.md
+*.zip
 .cargo/config.toml
-server/src/jni_bridge.rs

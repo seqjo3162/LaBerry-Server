@@ -1,6 +1,3 @@
-// ======================================================
-// 📡 LaBerry Server — main Axum server entry (Debug + Logging Build)
-// ======================================================
 use crate::{
     auth, db,
     ws::{Hub, UserId, VoiceChannelId},
@@ -8,17 +5,19 @@ use crate::{
 
 use axum::{
     extract::{
+        DefaultBodyLimit,
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode, Method, HeaderValue},
     response::IntoResponse,
     routing::get,
     Router,
 };
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
+use dashmap::DashMap;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -32,18 +31,24 @@ use std::{
 use sysinfo::{Disks, System};
 use tokio::{
     sync::oneshot,
+    sync::Notify,
     time::{interval, Duration, Instant},
 };
 use tower_http::{
+    catch_panic::CatchPanicLayer,
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+    set_header::SetResponseHeaderLayer,
     LatencyUnit,
 };
 
-// ======================================================
-// 🧩 Application State
-// ======================================================
+#[derive(Clone)]
+pub struct AdminSession {
+    pub expires_at: i64,
+    pub csrf: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
@@ -51,11 +56,8 @@ pub struct AppState {
     pub connected_ws: Arc<AtomicUsize>,
     pub friends: HashMap<UserId, HashSet<UserId>>,
     pub voice_states: HashMap<UserId, VoiceChannelId>,
+    pub admin_sessions: Arc<DashMap<String, AdminSession>>,
 }
-
-// ======================================================
-// 🚀 Server entry point WITHOUT TLS (оригинальный)
-// ======================================================
 
 pub async fn run_server(
     db_path: &str,
@@ -66,7 +68,10 @@ pub async fn run_server(
 ) -> anyhow::Result<()> {
     println!("[SERVER] Starting...");
     println!("[SERVER] Listening on {}", addr);
-    println!("[SERVER] CWD = {:?}", env::current_dir().unwrap());
+    match env::current_dir() {
+        Ok(dir) => println!("[SERVER] CWD = {:?}", dir),
+        Err(err) => eprintln!("[SERVER] CWD error: {}", err),
+    }
     
     if secret.as_bytes().len() < 32 {
         anyhow::bail!("SECRET_KEY must be at least 32 bytes");
@@ -95,26 +100,90 @@ pub async fn run_server(
         connected_ws: Arc::new(AtomicUsize::new(0)),
         friends: HashMap::new(),
         voice_states: HashMap::new(),
+        admin_sessions: Arc::new(DashMap::new()),
     };
 
-    println!("[SERVER] Building router...");
-    let app = build_router(state);
-    println!("[SERVER] Router built ✅");
+    let shutdown = Arc::new(Notify::new());
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let _ = _shutdown_rx.await;
+            shutdown.notify_waiters();
+        });
+    }
 
-    println!("[SERVER] Binding TCP listener...");
+    println!("[SERVER] Building main router...");
+    let app = build_router(state.clone());
+    println!("[SERVER] Main router built ✅");
+
+    println!("[SERVER] Binding main TCP listener...");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("[SERVER] ✅ Bound to {}", addr);
+    println!("[SERVER] ✅ Main bound to {}", addr);
 
-    println!("[SERVER] 🚀 Serving app...");
-    axum::serve(listener, app).await?;
-    println!("[SERVER] ❌ Server stopped (serve returned)");
+    let shutdown_main = shutdown.clone();
+    let mut main_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_main.notified().await;
+            })
+            .await
+            .map_err(anyhow::Error::from)
+    });
 
-    Ok(())
+    let admin_enabled = env_bool("LB_ENABLE_ADMIN_PANEL", false)
+        || std::env::var("LB_ADMIN_PASSWORD").ok().is_some()
+        || std::env::var("LB_ADMIN_PASSWORD_HASH").ok().is_some();
+    println!("[ADMIN] env LB_ENABLE_ADMIN_PANEL={:?} LB_ADMIN_HOST={:?} LB_ADMIN_PORT={:?} -> enabled={}",
+        std::env::var("LB_ENABLE_ADMIN_PANEL").ok(),
+        std::env::var("LB_ADMIN_HOST").ok(),
+        std::env::var("LB_ADMIN_PORT").ok(),
+        admin_enabled
+    );
+    let mut admin_handle = None;
+
+    if admin_enabled {
+        let admin_addr = admin_bind_addr()?;
+
+        println!("[ADMIN] Building admin router...");
+        let admin_app = build_admin_router(state);
+        println!("[ADMIN] Router built ✅");
+
+        println!("[ADMIN] Binding admin TCP listener...");
+        let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
+        println!("[ADMIN] ✅ Admin bound to {}", admin_addr);
+
+        let shutdown_admin = shutdown.clone();
+        admin_handle = Some(tokio::spawn(async move {
+            axum::serve(admin_listener, admin_app)
+                .with_graceful_shutdown(async move {
+                    shutdown_admin.notified().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
+        }));
+    }
+
+    if let Some(mut ah) = admin_handle {
+        tokio::select! {
+            res = &mut main_handle => {
+                shutdown.notify_waiters();
+                let r = res??;
+                let _ = ah.await;
+                Ok(r)
+            }
+            res = &mut ah => {
+                shutdown.notify_waiters();
+                let r = res??;
+                let _ = main_handle.await;
+                Ok(r)
+            }
+        }
+    } else {
+        let r = main_handle.await??;
+        Ok(r)
+    }
 }
 
-// ======================================================
-// 🧭 Router builder
-// ======================================================
 pub fn build_router(state: AppState) -> Router {
     println!("[ROUTER] Building routes...");
 
@@ -128,6 +197,8 @@ pub fn build_router(state: AppState) -> Router {
     let router = Router::new()
         .route("/", get(crate::routes::pages::index))
         .route("/app", get(crate::routes::pages::app))
+        .route("/admin", get(crate::routes::pages::admin_hint))
+        .route("/admin/", get(crate::routes::pages::admin_hint))
         .route("/health", get(|| async { "OK" }))
         .route("/ws", get(ws_main))
         .route("/ws/health", get(ws_health))
@@ -137,11 +208,18 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/api/friends", crate::routes::friends::router())
         .nest("/api/servers", crate::routes::servers::router())
         .nest("/api/chats", crate::routes::chats::router())
+        .nest("/api/dms", crate::routes::dms::router())
         .nest("/api/presence", crate::routes::presence::router())
+        .nest("/api/sessions", crate::routes::sessions::router())
+        .nest("/api/messages", crate::routes::messages::global_router())
         .nest("/api/files", crate::routes::files::router())
+        .nest("/api/profile-files", crate::routes::profile_files::router())
+        .nest("/api/embeds", crate::routes::embeds::router())
+        .nest("/api/rtc", crate::routes::rtc::router())
         .nest(
             "/files",
             Router::new()
+                .route("/:file_id/raw", get(crate::routes::files::get_file_raw))
                 .route("/:file_id", get(crate::routes::files::get_file))
                 .with_state(state.clone()),
         )
@@ -149,9 +227,68 @@ pub fn build_router(state: AppState) -> Router {
             "/static",
             ServeDir::new(static_dir.clone())
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
-        )
-        .with_state(state)
-        .layer(CorsLayer::permissive())
+        );
+
+    let router = router.with_state(state)
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("geolocation=(), microphone=(self), camera=()"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_str(
+                &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'".to_string())
+    ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
+))
+
+        .layer({
+    let allowed = env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
+    let mut cors = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
+    if !allowed.trim().is_empty() {
+        let a = allowed.trim();
+        if a == "*" {
+            cors = cors.allow_origin(tower_http::cors::Any);
+        } else {
+            let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
+            for o in a.split(',') {
+                let o = o.trim();
+                if o.is_empty() { continue; }
+                if let Ok(v) = o.parse::<axum::http::HeaderValue>() {
+                    origins.push(v);
+                }
+            }
+            if !origins.is_empty() {
+                cors = cors.allow_origin(origins);
+            }
+        }
+    }
+    cors
+})
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().include_headers(false))
@@ -160,16 +297,107 @@ pub fn build_router(state: AppState) -> Router {
                         .include_headers(false)
                         .latency_unit(LatencyUnit::Millis),
                 ),
-        );
+        )
+        .layer(CatchPanicLayer::new());
 
     println!("[ROUTER] ✅ Routes ready");
     router
 }
 
-// ======================================================
-// 💓 WS Health monitor
-// ======================================================
+fn env_bool(key: &str, default: bool) -> bool {
+    env::var(key)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(default)
+}
+
+fn admin_bind_addr() -> anyhow::Result<SocketAddr> {
+    let host = env::var("LB_ADMIN_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = env::var("LB_ADMIN_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(5002);
+
+    let ip: std::net::IpAddr = host.parse()?;
+    if !ip.is_loopback() && !env_bool("LB_ADMIN_ALLOW_NON_LOOPBACK", false) {
+        anyhow::bail!(
+            "Refusing to bind admin panel to non-loopback address {}. Use 127.0.0.1/::1 or set LB_ADMIN_ALLOW_NON_LOOPBACK=1 explicitly.",
+            ip
+        );
+    }
+    Ok(SocketAddr::from((ip, port)))
+}
+
+pub fn build_admin_router(state: AppState) -> Router {
+    use axum::response::Redirect;
+
+    Router::new()
+        .route("/", get(|| async { Redirect::to("/admin/") }))
+        .route("/admin", get(|| async { Redirect::to("/admin/") }))
+        .nest("/admin/", crate::routes::admin_panel::router())
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("geolocation=(), microphone=(self), camera=()"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_str(
+                &env::var("LB_ADMIN_CSP").unwrap_or_else(|_| {
+                    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'".to_string()
+                }),
+            )
+            .unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
+        ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().include_headers(false))
+                .on_response(
+                    DefaultOnResponse::new()
+                        .include_headers(false)
+                        .latency_unit(LatencyUnit::Millis),
+                ),
+        )
+        .layer(CatchPanicLayer::new())
+}
+
 async fn ws_health(ws: WebSocketUpgrade, State(st): State<AppState>) -> impl IntoResponse {
+    let enabled = std::env::var("LB_ENABLE_WS_HEALTH")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+
+    if !enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     println!("[WS_HEALTH] connected");
     ws.on_upgrade(move |socket| async move {
         println!("[WS_HEALTH] upgrade success, entering loop");
@@ -179,17 +407,12 @@ async fn ws_health(ws: WebSocketUpgrade, State(st): State<AppState>) -> impl Int
 }
 
 async fn health_loop(mut socket: WebSocket, st: AppState) {
-    println!("[WS_HEALTH] initializing system monitor...");
     let mut sys = System::new_all();
     let disks = Disks::new_with_refreshed_list();
     let mut ticker = interval(Duration::from_secs(2));
     let start = Instant::now();
-    println!("[WS_HEALTH] loop start");
-
     loop {
         ticker.tick().await;
-        println!("[WS_HEALTH] tick");
-
         sys.refresh_cpu();
         sys.refresh_memory();
 
@@ -215,8 +438,6 @@ async fn health_loop(mut socket: WebSocket, st: AppState) {
             "memory": { "used_mb": mem_used, "total_mb": mem_total },
             "disk": { "used_gb": disk_used, "total_gb": disk_total }
         });
-
-        println!("[WS_HEALTH] sending payload...");
         if let Err(err) = socket.send(Message::Text(payload.to_string())).await {
             println!("[WS_HEALTH] disconnected (err={})", err);
             break;
@@ -224,34 +445,56 @@ async fn health_loop(mut socket: WebSocket, st: AppState) {
     }
 }
 
-// ======================================================
-// 💬 Main chat WebSocket (Stable)
-// ======================================================
 #[derive(Deserialize)]
 struct TokenQuery {
     token: Option<String>,
 }
 
-fn extract_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
-    println!("[WS] Extracting token...");
-    if let Some(t) = &q.token {
-        println!("[WS] token from query");
-        return Some(t.clone());
-    }
+fn ws_debug_enabled() -> bool {
+    std::env::var("LB_DEBUG_WS")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false)
+}
 
-    if let Some(value) = headers.get(header::AUTHORIZATION) {
+fn extract_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
+    let mut token: Option<String> = None;
+
+    if let Some(t) = &q.token {
+        token = Some(t.clone());
+    } else if let Some(value) = headers.get(header::AUTHORIZATION) {
         if let Ok(v) = value.to_str() {
             if let Some(bearer) = v.trim().strip_prefix("Bearer ") {
                 if !bearer.is_empty() {
-                    println!("[WS] token from header");
-                    return Some(bearer.to_string());
+                    token = Some(bearer.to_string());
                 }
             }
         }
     }
 
-    println!("[WS] no token found");
-    None
+    let mut t = token?;
+
+    let t_trim = t.trim();
+    if let Some(rest) = t_trim.strip_prefix("Bearer ") {
+        t = rest.trim().to_string();
+    } else if let Some(rest) = t_trim.strip_prefix("bearer ") {
+        t = rest.trim().to_string();
+    } else {
+        t = t_trim.to_string();
+    }
+
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        t = t.trim_matches('"').to_string();
+    }
+
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
 }
 
 async fn ws_main(
@@ -260,52 +503,115 @@ async fn ws_main(
     Query(q): Query<TokenQuery>,
     State(st): State<AppState>,
 ) -> impl IntoResponse {
-    println!("[WS] upgrade request");
-
-    let Some(token) = extract_token(&headers, &q) else {
-        println!("[WS] ❌ Unauthorized: no token");
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-
-    println!("[WS] token extracted, decoding...");
-    let (username, user_id) = match auth::decode_username(&token) {
-        Ok(v) => {
-            println!("[WS] ✅ decoded user_id={}", v.1);
-            v
-        }
-        Err(err) => {
-            eprintln!("[WS] ❌ Invalid token: {}", err);
-            return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-        }
-    };
-
-    println!("[WS] ✅ AUTH OK user_id={} username={}", user_id, username);
-    println!("[WS] 🚀 Upgrading...");
+    let pre_token = extract_token(&headers, &q);
 
     let db = st.db.clone();
     let hub = Arc::clone(&st.hub);
     let connected = st.connected_ws.clone();
 
-    ws.on_upgrade(move |socket| async move {
+    ws.on_upgrade(move |mut socket| async move {
         let prev = connected.fetch_add(1, Ordering::Relaxed) + 1;
-        println!("[WS] CONNECT user={} (total={})", user_id, prev);
+        if ws_debug_enabled() {
+            println!("[WS] CONNECT (total={})", prev);
+        }
 
-        let db_c = db.clone();
-        let hub_c = Arc::clone(&hub);
-        let username_c = username.clone();
-        let connected_c = connected.clone();
+        let auth_token = if let Some(t) = pre_token {
+            Some(t)
+        } else {
+            match tokio::time::timeout(Duration::from_secs(5), socket.recv()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if v.get("type").and_then(|x| x.as_str()) == Some("auth") {
+                            v.get("token").and_then(|x| x.as_str()).map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
 
-        println!("[WS] spawning handler...");
-        
-        tokio::spawn(async move {
-            println!("[WS] 🧠 handler start");
-            
-            crate::ws::chat::handle_single_ws(socket, db_c, hub_c, user_id, username_c).await;
-            
-            println!("[WS] 🧠 handler end");
-            
-            let after = connected_c.fetch_sub(1, Ordering::Relaxed) - 1;
+        let Some(token) = auth_token else {
+            let _ = socket.send(Message::Text(json!({"type":"error","code":"unauthorized"}).to_string())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
+            if ws_debug_enabled() {
+                println!("[WS] DISCONNECT (unauthorized) (total={})", after);
+            }
+            return;
+        };
+
+        let (username, token_version) = match auth::decode_username(&token) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = socket.send(Message::Text(json!({"type":"error","code":"invalid_token"}).to_string())).await;
+                let _ = socket.send(Message::Close(None)).await;
+                let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
+                if ws_debug_enabled() {
+                    println!("[WS] DISCONNECT (invalid token) (total={})", after);
+                }
+                return;
+            }
+        };
+
+        let row = sqlx::query(
+            r#"
+            SELECT id, token_version, is_banned
+            FROM users
+            WHERE username = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(&username)
+        .fetch_optional(&db)
+        .await;
+
+        let Ok(Some(row)) = row else {
+            let _ = socket.send(Message::Text(json!({"type":"error","code":"user_not_found"}).to_string())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
+            if ws_debug_enabled() {
+                println!("[WS] DISCONNECT (user not found) (total={})", after);
+            }
+            return;
+        };
+
+        let is_banned: i64 = row.get("is_banned");
+        if is_banned != 0 {
+            let _ = socket.send(Message::Text(json!({"type":"error","code":"banned"}).to_string())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
+            if ws_debug_enabled() {
+                println!("[WS] DISCONNECT (banned) (total={})", after);
+            }
+            return;
+        }
+
+        let db_version: i64 = row.get("token_version");
+        if db_version != token_version {
+            let _ = socket.send(Message::Text(json!({"type":"error","code":"token_invalidated"}).to_string())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
+            if ws_debug_enabled() {
+                println!("[WS] DISCONNECT (invalidated) (total={})", after);
+            }
+            return;
+        }
+
+        let user_id: i64 = row.get("id");
+
+        if ws_debug_enabled() {
+            println!("[WS] ✅ AUTH OK user_id={} username={}", user_id, username);
+        }
+
+        crate::ws::chat::handle_single_ws(socket, db.clone(), hub.clone(), user_id, username).await;
+
+        let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
+        if ws_debug_enabled() {
             println!("[WS] DISCONNECT user={} (total={})", user_id, after);
-        });
+        }
     })
 }

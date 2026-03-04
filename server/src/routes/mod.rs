@@ -7,3 +7,11 @@ pub mod presence;
 pub mod files;
 pub mod pages;
 pub mod messages;
+pub mod embeds;
+pub mod dms;
+pub mod sessions;
+pub mod rtc;
+
+pub mod profile_files;
+
+pub mod admin_panel;

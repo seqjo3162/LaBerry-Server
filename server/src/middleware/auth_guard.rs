@@ -32,12 +32,10 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // 1. Если пользователь уже есть в extensions — берём оттуда
         if let Some(user) = parts.extensions.get::<AuthUser>() {
             return Ok(user.clone());
         }
 
-        // 2. Читаем Authorization header
         let auth_header = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -47,6 +45,8 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = auth_header
             .strip_prefix("Bearer ")
             .ok_or(ApiError::Unauthorized("Invalid Authorization scheme"))?;
+
+        let token_hash = auth::sha256_hex(token);
 
         let (username, token_version) =
             auth::decode_username(token)
@@ -85,7 +85,25 @@ impl FromRequestParts<AppState> for AuthUser {
             role: row.get("role"),
         };
 
-        // 3. Кладём в extensions, чтобы не валидировать повторно
+        let now = auth::now_iso();
+
+        if let Ok(Some(revoked_at)) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT revoked_at FROM user_sessions WHERE token_hash = ? LIMIT 1",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&state.db)
+        .await
+        {
+            if revoked_at.is_some() {
+                return Err(ApiError::Unauthorized("Session revoked"));
+            }
+        }
+
+        let _ = sqlx::query("UPDATE user_sessions SET last_seen_at = ? WHERE token_hash = ?")
+            .bind(&now)
+            .bind(&token_hash)
+            .execute(&state.db)
+            .await;
         parts.extensions.insert(user.clone());
 
         Ok(user)

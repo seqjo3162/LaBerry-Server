@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use axum::response::Html;
 
-/// Простой SPA-роутер — возвращает index.html для "/" и "/app"
 pub async fn index() -> Html<String> {
     Html(std::fs::read_to_string(static_path("index.html")).unwrap_or_default())
 }
@@ -10,7 +9,44 @@ pub async fn app() -> Html<String> {
     Html(std::fs::read_to_string(static_path("app.html")).unwrap_or_default())
 }
 
-/// Путь к статическим файлам
+
+pub async fn admin_hint() -> Html<String> {
+    let host = std::env::var("LB_ADMIN_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("LB_ADMIN_PORT").unwrap_or_else(|_| "5002".to_string());
+    let url = format!("http://{}:{}/admin/", host, port);
+
+    Html(format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Admin</title>
+<style>
+body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b0d12; color:#e6e6e6; margin:0; }}
+main {{ padding:18px; max-width:900px; margin:0 auto; }}
+.card {{ background:#121624; border:1px solid #202742; border-radius:16px; padding:14px; margin-top:14px; }}
+a {{ color:#cfe2ff; }}
+code {{ background:#0f1220; padding:2px 6px; border-radius:8px; border:1px solid #202742; }}
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h2>Admin panel</h2>
+    <div>Admin panel is served by a dedicated admin listener (local-only by default).</div>
+    <div style="height:10px"></div>
+    <div>Open: <a href="{url}">{url}</a></div>
+    <div style="height:10px"></div>
+    <div class="small">If you are behind a reverse proxy, forward <code>/admin</code> to the admin listener.</div>
+  </div>
+</main>
+</body>
+</html>"#,
+        url = url
+    ))
+}
+
 fn static_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("static")

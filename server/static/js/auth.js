@@ -11,32 +11,36 @@ document.addEventListener("DOMContentLoaded", async () => {
     return;
   }
 
-  // ==============================
-  // 🧠 AUTO-LOGIN CHECK
-  // ==============================
-  const existingToken = localStorage.getItem("auth_token"); // <-- ИЗМЕНЕНО: "token" → "auth_token"
-  if (existingToken) {
+  const refreshToken = localStorage.getItem("refresh_token");
+  if (refreshToken) {
     try {
-      const verify = await fetch("/api/auth/verify", {
-        headers: { Authorization: `Bearer ${existingToken}` },
+      const refresh = await fetch("/api/auth/refresh", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${refreshToken}` },
       });
-      if (verify.ok) {
-        console.log("✅ Token verified, redirecting to /app");
+
+      if (refresh.ok) {
+        const data = await refresh.json().catch(() => null);
+        if (data?.access_token) {
+          localStorage.setItem("auth_token", data.access_token);
+        }
+        if (data?.refresh_token) {
+          localStorage.setItem("refresh_token", data.refresh_token);
+        }
+        console.log("✅ Session restored, redirecting to /app");
         window.location.href = "/app";
         return;
-      } else {
-        console.warn("Token invalid, clearing localStorage");
-        localStorage.removeItem("auth_token"); // <-- ИЗМЕНЕНО
-        localStorage.removeItem("user_id");
       }
+
+      console.warn("Token invalid, clearing localStorage");
+      localStorage.removeItem("auth_token");
+      localStorage.removeItem("refresh_token");
+      localStorage.removeItem("user_id");
     } catch (err) {
       console.warn("Verification failed:", err);
     }
   }
 
-  // ==============================
-  // MODE SWITCH
-  // ==============================
   let mode = "login";
 
   function showError(msg) {
@@ -59,9 +63,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     return m[code] || "Ошибка авторизации";
   }
 
-  // ==============================
-  // FORM SUBMIT
-  // ==============================
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearError();
@@ -77,7 +78,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     let res, data;
     try {
       if (mode === "login") {
-        // LOGIN → x-www-form-urlencoded
         const body = new URLSearchParams();
         body.append("username", username);
         body.append("password", password);
@@ -88,7 +88,6 @@ document.addEventListener("DOMContentLoaded", async () => {
           body,
         });
       } else {
-        // REGISTER → JSON
         res = await fetch("/api/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -112,16 +111,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       setMode("login");
       return;
     }
-
-    // LOGIN SUCCESS
-    localStorage.setItem("auth_token", data.access_token); // <-- ИЗМЕНЕНО: "token" → "auth_token"
+    localStorage.setItem("auth_token", data.access_token);
+    if (data?.refresh_token) {
+      localStorage.setItem("refresh_token", data.refresh_token);
+    } else {
+      localStorage.removeItem("refresh_token");
+    }
     localStorage.setItem("user_id", data.user_id);
     window.location.href = "/app";
   });
 
-  // ==============================
-  // MODE SWITCH HANDLING
-  // ==============================
   function setMode(next) {
     mode = next;
     clearError();

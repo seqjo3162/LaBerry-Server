@@ -25,7 +25,6 @@ pub async fn handle(
     let conn_id: ConnId = CONN_ID_SEQ.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
 
-    // ===== REGISTER PRESENCE =====
     let was_offline = hub.presence.get(&user_id).is_none();
     hub.presence_join(user_id, conn_id, tx.clone());
 
@@ -42,12 +41,10 @@ pub async fn handle(
         }));
     }
 
-    // ===== MAIN LOOP =====
     let _ = async {
         loop {
             tokio::select! {
 
-                // inbound (client → server)
                 msg = socket.recv() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
@@ -65,7 +62,6 @@ pub async fn handle(
                     }
                 }
 
-                // outbound (server → client)
                 Some(payload) = rx.recv() => {
                     if socket
                         .send(Message::Text(payload.to_string()))
@@ -79,7 +75,6 @@ pub async fn handle(
         }
     }.await;
 
-    // ===== CLEANUP =====
     hub.presence_leave(user_id, conn_id);
 
     let still_online = hub.presence.get(&user_id).is_some();
@@ -91,10 +86,6 @@ pub async fn handle(
         }));
     }
 }
-
-// =======================
-// DB HELPERS
-// =======================
 
 async fn get_user_id(db: &SqlitePool, username: &str) -> Option<UserId> {
     sqlx::query_scalar::<_, i64>(

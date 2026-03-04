@@ -5,7 +5,6 @@ use tokio::sync::RwLock;
 use super::{Hub, UserId};
 
 pub async fn handle_friends_events() {
-    // Реализация обработки событий друзей
     println!("Friends events handler");
 }
 

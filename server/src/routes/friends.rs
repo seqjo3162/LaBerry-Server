@@ -2,12 +2,13 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use crate::{auth, server::AppState};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sqlx::{Row, SqlitePool};
 
 #[derive(Deserialize)]
 pub struct FriendRequestCreate {
@@ -21,6 +22,7 @@ pub struct FriendRequestRow {
     pub receiver_id: i64,
     pub status: String,
     pub created_at: String,
+    pub is_favorite: bool,
 }
 
 #[derive(Serialize)]
@@ -31,6 +33,16 @@ pub struct FriendshipRow {
     pub created_at: String,
 }
 
+#[derive(Serialize)]
+pub struct FriendView {
+    pub id: i64,
+    pub username: String,
+    pub is_online: bool,
+    pub status: String,
+    pub created_at: String,
+    pub is_favorite: bool,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/request", post(request_friend))
@@ -38,11 +50,12 @@ pub fn router() -> Router<AppState> {
         .route("/requests/outgoing", get(outgoing))
         .route("/accept/:request_id", post(accept))
         .route("/decline/:request_id", post(decline))
-        .route("/:friend_id", delete(remove_friend))
+        .route("/cancel/:request_id", post(cancel))
+        .route("/active", get(list_active_friends))
+        .route("/:friend_id/favorite", put(set_favorite))
         .route("/", get(list_friends))
+        .route("/:friend_id", delete(remove_friend))
 }
-
-/* ---------- helpers ---------- */
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
     headers
@@ -77,6 +90,67 @@ async fn current_user_id(st: &AppState, token: &str) -> Result<i64, StatusCode> 
     Ok(row.get("id"))
 }
 
+fn default_settings_json() -> Value {
+    serde_json::json!({
+        "friend_requests": "everyone",
+        "dms": "friends_and_server"
+    })
+}
+
+async fn get_user_settings_json(db: &SqlitePool, user_id: i64) -> Value {
+    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = ? LIMIT 1")
+        .bind(user_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+
+    let Some(r) = row else {
+        return default_settings_json();
+    };
+
+    let raw: String = r.get("settings_json");
+    serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| default_settings_json())
+}
+
+async fn have_mutual_friend(db: &SqlitePool, a: i64, b: i64) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT 1
+        FROM friendships f1
+        JOIN friendships f2 ON f1.friend_id = f2.friend_id
+        WHERE f1.user_id = ? AND f2.user_id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(a)
+    .bind(b)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+async fn share_server(db: &SqlitePool, a: i64, b: i64) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT 1
+        FROM server_members s1
+        JOIN server_members s2 ON s1.server_id = s2.server_id
+        WHERE s1.user_id = ? AND s2.user_id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(a)
+    .bind(b)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
 /* ---------- handlers ---------- */
 
 async fn request_friend(
@@ -93,10 +167,59 @@ async fn request_friend(
         Err(sc) => return sc.into_response(),
     };
 
-    if sender_id == body.receiver_id {
+    let receiver_id = body.receiver_id;
+
+    if sender_id == receiver_id {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "detail": "Cannot add yourself" })),
+        )
+            .into_response();
+    }
+
+    let rec = match sqlx::query("SELECT is_banned FROM users WHERE id = ? LIMIT 1")
+        .bind(receiver_id)
+        .fetch_optional(&st.db)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "detail": "User not found" })),
+            )
+                .into_response()
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    let is_banned: i64 = rec.get(0);
+    if is_banned != 0 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "detail": "User banned" })),
+        )
+            .into_response();
+    }
+
+    let settings = get_user_settings_json(&st.db, receiver_id).await;
+    let mode = settings
+        .get("friend_requests")
+        .and_then(|v| v.as_str())
+        .unwrap_or("everyone")
+        .to_string();
+
+    let allowed = match mode.as_str() {
+        "none" => false,
+        "server_members" => share_server(&st.db, sender_id, receiver_id).await,
+        "friends_of_friends" => have_mutual_friend(&st.db, sender_id, receiver_id).await,
+        _ => true,
+    };
+
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "detail": "Friend requests are restricted by user settings" })),
         )
             .into_response();
     }
@@ -108,8 +231,8 @@ async fn request_friend(
            LIMIT 1"#,
     )
     .bind(sender_id)
-    .bind(body.receiver_id)
-    .bind(body.receiver_id)
+    .bind(receiver_id)
+    .bind(receiver_id)
     .bind(sender_id)
     .fetch_optional(&st.db)
     .await
@@ -119,35 +242,78 @@ async fn request_friend(
 
     if already {
         return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "detail": "Already friends" })),
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "ok", "already_friends": true })),
+        )
+            .into_response();
+    }
+
+    let already_pending = sqlx::query_scalar::<_, i64>(
+        r#"SELECT 1 FROM friend_requests
+           WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'
+           LIMIT 1"#,
+    )
+    .bind(sender_id)
+    .bind(receiver_id)
+    .fetch_optional(&st.db)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    if already_pending {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "ok", "dedup": true })),
+        )
+            .into_response();
+    }
+
+    let incoming_pending = sqlx::query_scalar::<_, i64>(
+        r#"SELECT 1 FROM friend_requests
+           WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'
+           LIMIT 1"#,
+    )
+    .bind(receiver_id)
+    .bind(sender_id)
+    .fetch_optional(&st.db)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    if incoming_pending {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "ok", "incoming_pending": true })),
         )
             .into_response();
     }
 
     let created_at = auth::now_iso();
 
-    if sqlx::query(
-        r#"INSERT INTO friend_requests(sender_id, receiver_id, status, created_at)
+    let inserted = match sqlx::query(
+        r#"INSERT OR IGNORE INTO friend_requests(sender_id, receiver_id, status, created_at)
            VALUES (?, ?, 'pending', ?)"#,
     )
     .bind(sender_id)
-    .bind(body.receiver_id)
+    .bind(receiver_id)
     .bind(created_at)
     .execute(&st.db)
     .await
-    .is_err()
     {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+        Ok(r) => r.rows_affected() > 0,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
 
-    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ok", "inserted": inserted })),
+    )
+        .into_response()
 }
 
-async fn incoming(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn incoming(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let Some(tok) = bearer_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -158,10 +324,18 @@ async fn incoming(
     };
 
     let rows = sqlx::query(
-        r#"SELECT id, sender_id, receiver_id, status, created_at
-           FROM friend_requests
-           WHERE receiver_id = ? AND status = 'pending'
-           ORDER BY id DESC"#,
+        r#"
+        SELECT
+            MAX(id)         AS id,
+            sender_id       AS sender_id,
+            receiver_id     AS receiver_id,
+            status          AS status,
+            MAX(created_at) AS created_at
+        FROM friend_requests
+        WHERE receiver_id = ? AND status = 'pending'
+        GROUP BY sender_id, receiver_id, status
+        ORDER BY MAX(id) DESC
+        "#,
     )
     .bind(me)
     .fetch_all(&st.db)
@@ -176,16 +350,14 @@ async fn incoming(
             receiver_id: r.get("receiver_id"),
             status: r.get("status"),
             created_at: r.get("created_at"),
+            is_favorite: false,
         })
         .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(out)).into_response()
 }
 
-async fn outgoing(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn outgoing(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let Some(tok) = bearer_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -196,10 +368,18 @@ async fn outgoing(
     };
 
     let rows = sqlx::query(
-        r#"SELECT id, sender_id, receiver_id, status, created_at
-           FROM friend_requests
-           WHERE sender_id = ? AND status = 'pending'
-           ORDER BY id DESC"#,
+        r#"
+        SELECT
+            MAX(id)         AS id,
+            sender_id       AS sender_id,
+            receiver_id     AS receiver_id,
+            status          AS status,
+            MAX(created_at) AS created_at
+        FROM friend_requests
+        WHERE sender_id = ? AND status = 'pending'
+        GROUP BY sender_id, receiver_id, status
+        ORDER BY MAX(id) DESC
+        "#,
     )
     .bind(me)
     .fetch_all(&st.db)
@@ -214,6 +394,7 @@ async fn outgoing(
             receiver_id: r.get("receiver_id"),
             status: r.get("status"),
             created_at: r.get("created_at"),
+            is_favorite: false,
         })
         .collect::<Vec<_>>();
 
@@ -256,10 +437,15 @@ async fn accept(
     let sender = rq.get::<i64, _>("sender_id");
     let receiver = rq.get::<i64, _>("receiver_id");
 
-    let _ = sqlx::query("UPDATE friend_requests SET status = 'accepted' WHERE id = ?")
-        .bind(request_id)
-        .execute(&st.db)
-        .await;
+    let _ = sqlx::query(
+        r#"UPDATE friend_requests
+           SET status = 'accepted'
+         WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"#,
+    )
+    .bind(sender)
+    .bind(receiver)
+    .execute(&st.db)
+    .await;
 
     let _ = sqlx::query(
         r#"INSERT OR IGNORE INTO friendships(user_id, friend_id, created_at)
@@ -298,8 +484,54 @@ async fn decline(
         Err(sc) => return sc.into_response(),
     };
 
+    let rq = sqlx::query(r#"SELECT sender_id, receiver_id FROM friend_requests WHERE id = ?"#)
+        .bind(request_id)
+        .fetch_optional(&st.db)
+        .await
+        .ok()
+        .flatten();
+
+    let Some(rq) = rq else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let sender_id = rq.get::<i64, _>("sender_id");
+    let receiver_id = rq.get::<i64, _>("receiver_id");
+
+    if receiver_id != me {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let _ = sqlx::query(
+        r#"UPDATE friend_requests
+           SET status = 'declined'
+         WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"#,
+    )
+    .bind(sender_id)
+    .bind(receiver_id)
+    .execute(&st.db)
+    .await;
+
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+}
+
+async fn cancel(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<i64>,
+) -> impl IntoResponse {
+    let Some(tok) = bearer_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    let me = match current_user_id(&st, &tok).await {
+        Ok(id) => id,
+        Err(sc) => return sc.into_response(),
+    };
+
     let rq = sqlx::query(
-        r#"SELECT receiver_id FROM friend_requests WHERE id = ?"#,
+        r#"SELECT sender_id, receiver_id, status
+           FROM friend_requests WHERE id = ? LIMIT 1"#,
     )
     .bind(request_id)
     .fetch_optional(&st.db)
@@ -307,14 +539,35 @@ async fn decline(
     .ok()
     .flatten();
 
-    if rq.map(|r| r.get::<i64, _>("receiver_id")) != Some(me) {
+    let Some(rq) = rq else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let sender_id = rq.get::<i64, _>("sender_id");
+    let receiver_id = rq.get::<i64, _>("receiver_id");
+    let status = rq.get::<String, _>("status");
+
+    if sender_id != me {
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let _ = sqlx::query("UPDATE friend_requests SET status = 'declined' WHERE id = ?")
-        .bind(request_id)
-        .execute(&st.db)
-        .await;
+    if status != "pending" {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "ok", "already_done": true })),
+        )
+            .into_response();
+    }
+
+    let _ = sqlx::query(
+        r#"UPDATE friend_requests
+           SET status = 'cancelled'
+         WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"#,
+    )
+    .bind(sender_id)
+    .bind(receiver_id)
+    .execute(&st.db)
+    .await;
 
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }
@@ -348,10 +601,7 @@ async fn remove_friend(
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }
 
-async fn list_friends(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn list_friends(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let Some(tok) = bearer_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -362,9 +612,25 @@ async fn list_friends(
     };
 
     let rows = sqlx::query(
-        r#"SELECT id, user_id, friend_id, created_at
-           FROM friendships WHERE user_id = ?
-           ORDER BY id DESC"#,
+        r#"
+        SELECT f.id as fid, f.created_at as created_at, f.is_favorite as is_favorite,
+               u.id as id, u.username as username,
+               CASE
+                 WHEN COALESCE(p.is_online, 0) = 0 THEN 0
+                 WHEN p.status = 'invisible' THEN 0
+                 ELSE 1
+               END as is_online,
+               CASE
+                 WHEN COALESCE(p.is_online, 0) = 0 THEN 'offline'
+                 WHEN p.status = 'invisible' THEN 'offline'
+                 ELSE COALESCE(p.status, 'online')
+               END as status
+        FROM friendships f
+        JOIN users u ON u.id = f.friend_id
+        LEFT JOIN user_presence p ON p.user_id = u.id
+        WHERE f.user_id = ?
+        ORDER BY f.is_favorite DESC, f.id DESC
+        "#,
     )
     .bind(me)
     .fetch_all(&st.db)
@@ -373,13 +639,104 @@ async fn list_friends(
 
     let out = rows
         .into_iter()
-        .map(|r| FriendshipRow {
+        .map(|r| FriendView {
             id: r.get("id"),
-            user_id: r.get("user_id"),
-            friend_id: r.get("friend_id"),
+            username: r.get("username"),
+            is_online: r.get::<i64, _>("is_online") != 0,
+            status: r.get::<String, _>("status"),
             created_at: r.get("created_at"),
+            is_favorite: false,
         })
         .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(out)).into_response()
+}
+
+async fn list_active_friends(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(tok) = bearer_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    let me = match current_user_id(&st, &tok).await {
+        Ok(id) => id,
+        Err(sc) => return sc.into_response(),
+    };
+
+    let rows = sqlx::query(
+        r#"
+        SELECT f.id as fid, f.created_at as created_at,
+               u.id as id, u.username as username,
+               CASE
+                 WHEN COALESCE(p.is_online, 0) = 0 THEN 0
+                 WHEN p.status = 'invisible' THEN 0
+                 ELSE 1
+               END as is_online,
+               CASE
+                 WHEN COALESCE(p.is_online, 0) = 0 THEN 'offline'
+                 WHEN p.status = 'invisible' THEN 'offline'
+                 ELSE COALESCE(p.status, 'online')
+               END as status
+        FROM friendships f
+        JOIN users u ON u.id = f.friend_id
+        LEFT JOIN user_presence p ON p.user_id = u.id
+        WHERE f.user_id = ?
+          AND COALESCE(p.is_online, 0) = 1
+          AND COALESCE(p.status, 'online') != 'invisible'
+        ORDER BY f.is_favorite DESC, u.username ASC
+        "#,
+    )
+    .bind(me)
+    .fetch_all(&st.db)
+    .await
+    .unwrap_or_default();
+
+    let out = rows
+        .into_iter()
+        .map(|r| FriendView {
+            id: r.get("id"),
+            username: r.get("username"),
+            is_online: r.get::<i64, _>("is_online") != 0,
+            status: r.get::<String, _>("status"),
+            created_at: r.get("created_at"),
+            is_favorite: false,
+        })
+        .collect::<Vec<_>>();
+
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SetFavoriteBody {
+    pub favorite: bool,
+}
+
+async fn set_favorite(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(friend_id): Path<i64>,
+    Json(body): Json<SetFavoriteBody>,
+) -> impl IntoResponse {
+    let Some(tok) = bearer_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    let me = match current_user_id(&st, &tok).await {
+        Ok(id) => id,
+        Err(sc) => return sc.into_response(),
+    };
+
+    let q = sqlx::query(
+        "UPDATE friendships SET is_favorite = ? WHERE user_id = ? AND friend_id = ?",
+    )
+    .bind(if body.favorite { 1 } else { 0 })
+    .bind(me)
+    .bind(friend_id)
+    .execute(&st.db)
+    .await;
+
+    if q.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }

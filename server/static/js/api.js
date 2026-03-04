@@ -1,6 +1,3 @@
-// /static/js/api.js
-
-// Если функции log уже определены в app.js - используем их, иначе создаем локальные
 const apiLog = typeof window !== 'undefined' && window._trace ? 
   (...args) => window._trace.add('API_LOG', args.join(' ')) : 
   (...args) => console.log(`[API:${new Date().toISOString()}]`, ...args);
@@ -16,6 +13,51 @@ const apiErr = typeof window !== 'undefined' && window._trace ?
 const apiTraceLog = [];
 let apiRequestCounter = 0;
 
+let refreshPromise = null;
+
+async function refreshAccessToken() {
+  if (refreshPromise) return refreshPromise;
+
+  const refreshToken = localStorage.getItem('refresh_token');
+  if (!refreshToken) return null;
+
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch('/api/auth/refresh', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${refreshToken}`
+        }
+      });
+
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      const next = data?.access_token;
+      if (!next) return null;
+
+      localStorage.setItem('auth_token', next);
+      if (data?.refresh_token) {
+        localStorage.setItem('refresh_token', data.refresh_token);
+      }
+      return next;
+    } catch {
+      return null;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
+function redirectToLogin() {
+  try { localStorage.removeItem('auth_token'); } catch (_) {}
+  try { localStorage.removeItem('refresh_token'); } catch (_) {}
+  try { localStorage.removeItem('user_id'); } catch (_) {}
+  try { sessionStorage.clear(); } catch (_) {}
+  window.location.href = '/';
+}
+
 function apiTrace(step, data) {
   const entry = {
     id: ++apiRequestCounter,
@@ -25,20 +67,19 @@ function apiTrace(step, data) {
   };
   apiTraceLog.push(entry);
   
-  // Логируем и в трейс и в консоль
   const message = `[API-TRACE:${entry.id}:${step}] ${JSON.stringify(data || '')}`;
   apiLog(message);
   
-  // Также сохраняем в глобальный трейс
   if (window._trace) {
     window._trace.add(`API_${step}`, data);
   }
 }
 
-// Основная функция api
 export async function api(path, opts = {}) {
   const requestId = ++apiRequestCounter;
   const startTime = performance.now();
+  const optsForFetch = { ...opts };
+  delete optsForFetch._didRefresh;
   
   apiTrace('REQUEST_START', { 
     url: path, 
@@ -48,15 +89,29 @@ export async function api(path, opts = {}) {
   });
 
   try {
+    let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+    if (!localStorage.getItem('auth_token') && token) {
+      try { localStorage.setItem('auth_token', token); } catch (_) {}
+      try { localStorage.removeItem('token'); } catch (_) {}
+    }
+
+    const headers = {
+      ...(optsForFetch.headers || {}),
+    };
+
+    const hasContentType = Object.keys(headers).some(k => k.toLowerCase() === 'content-type');
+    const isFormData = (typeof FormData !== 'undefined') && (optsForFetch.body instanceof FormData);
+
+    if (!hasContentType && !isFormData) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
     const res = await fetch(path, {
-      ...opts,
-      headers: {
-        "Authorization": localStorage.getItem("auth_token")
-          ? "Bearer " + localStorage.getItem("auth_token")
-          : undefined,
-        "Content-Type": "application/json",
-        ...opts.headers,
-      },
+      ...optsForFetch,
+      headers,
     });
 
     const responseTime = performance.now() - startTime;
@@ -69,10 +124,24 @@ export async function api(path, opts = {}) {
     });
 
     if (res.status === 401) {
-      apiWarn("[API] Unauthorized – token invalid, clearing and reloading...");
-      localStorage.removeItem("auth_token");
-      window.location.href = "/";
-      return [];
+      const canRefresh = !!localStorage.getItem('refresh_token');
+      const alreadyTried = !!opts._didRefresh;
+      const isRefreshCall = path === '/api/auth/refresh';
+
+      if (canRefresh && !alreadyTried && !isRefreshCall) {
+        apiWarn('[API] 401 – trying refresh token...');
+        const next = await refreshAccessToken();
+        if (next) {
+          apiWarn('[API] Token refreshed, retrying request...');
+          return api(path, { ...opts, _didRefresh: true });
+        }
+      }
+
+      apiWarn('[API] Unauthorized – redirecting to login');
+      redirectToLogin();
+      const err = new Error('Unauthorized');
+      err.status = 401;
+      throw err;
     }
 
     if (!res.ok) {
@@ -81,19 +150,22 @@ export async function api(path, opts = {}) {
         url: path, 
         requestId, 
         status: res.status,
-        text: text.substring(0, 200) // Ограничиваем длину
+        text: text.substring(0, 200)
       });
       apiErr(`[API] Request failed ${res.status}: ${text.substring(0, 100)}`);
-      throw new Error(`API error ${res.status}: ${text.substring(0, 100)}`);
+      const err = new Error(`API error ${res.status}: ${text.substring(0, 100)}`);
+      err.status = res.status;
+      throw err;
     }
 
-    const data = await res.json();
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    const data = ct.includes('application/json') ? await res.json() : await res.text();
     const totalTime = performance.now() - startTime;
     apiTrace('REQUEST_COMPLETE', { 
       url: path, 
       requestId, 
       time: totalTime.toFixed(2) + 'ms',
-      dataSize: JSON.stringify(data).length,
+      dataSize: (typeof data === 'string' ? data.length : JSON.stringify(data).length),
       hasData: !!data
     });
 
@@ -112,11 +184,9 @@ export async function api(path, opts = {}) {
   }
 }
 
-// Вспомогательные функции
 export const getFriends = () => api("/api/friends");
 export const getActiveFriends = () => api("/api/friends/active");
 
-// Экспорт для отладки
 if (typeof window !== 'undefined') {
   window._apiTrace = {
     logs: apiTraceLog,
@@ -132,7 +202,6 @@ if (typeof window !== 'undefined') {
   };
 }
 
-// Хук для отслеживания всех fetch запросов
 if (typeof window !== 'undefined' && window.DEBUG_API) {
   const originalFetch = window.fetch;
   window.fetch = function(...args) {

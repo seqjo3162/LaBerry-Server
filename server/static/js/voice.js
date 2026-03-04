@@ -1,0 +1,2054 @@
+// /static/js/voice.js
+// Minimal WebRTC voice UI for LaBerry (website).
+// Uses WS signaling: voice_join/voice_leave + rtc_offer/rtc_answer/rtc_candidate.
+
+export function initVoice({ wsManager, api, getMe }) {
+  if (!wsManager || typeof wsManager.send !== 'function') {
+    console.warn('[VOICE] wsManager is missing');
+    return;
+  }
+  if (typeof api !== 'function') {
+    console.warn('[VOICE] api() is missing');
+    return;
+  }
+
+  const elVoiceBar = document.getElementById('voiceBar');
+  const elChanName = document.getElementById('voiceChannelName');
+  const elStatus = document.getElementById('voiceStatusText');
+  const elPeers = document.getElementById('voicePeersList');
+  const btnMute = document.getElementById('voiceMuteBtn');
+  const btnDeafen = document.getElementById('voiceDeafenBtn');
+  const btnShare = document.getElementById('voiceShareBtn');
+  const btnLeave = document.getElementById('voiceLeaveBtn');
+  const elAudioSink = document.getElementById('voiceAudioSink');
+  const elVideoSink = document.getElementById('voiceVideoSink');
+  const elStreamNotice = document.getElementById('voiceStreamNotice');
+  const elStreamText = document.getElementById('voiceStreamText');
+  const btnStreamWatch = document.getElementById('voiceStreamWatchBtn');
+  const voiceView = document.getElementById('voiceView');
+  const voiceViewChanName = document.getElementById('voiceViewChannelName');
+  const voiceViewState = document.getElementById('voiceViewState');
+  const voiceStage = document.getElementById('voiceStage');
+  const voiceStageVideo = document.getElementById('voiceStageVideo');
+  const voicePeerTile = document.getElementById('voicePeerTile');
+  const voicePeerAva = document.getElementById('voicePeerAva');
+  const voicePeerNameEl = document.getElementById('voicePeerName');
+  const voiceStageTop = document.getElementById('voiceStageTop');
+  const voiceLiveBadge = document.getElementById('voiceLiveBadge');
+  const voiceStageName = document.getElementById('voiceStageName');
+  const voiceStageEmpty = document.getElementById('voiceStageEmpty');
+  const voiceStageWatchBtn = document.getElementById('voiceStageWatchBtn');
+  const voiceStageStrip = document.getElementById('voiceStageStrip');
+  const voiceSelfPreview = document.getElementById('voiceSelfPreview');
+  const voiceSelfVideo = document.getElementById('voiceSelfVideo');
+  const vcMuteBtn = document.getElementById('vcMuteBtn');
+  const vcDeafenBtn = document.getElementById('vcDeafenBtn');
+  const vcShareBtn = document.getElementById('vcShareBtn');
+  const vcLeaveBtn = document.getElementById('vcLeaveBtn');
+  const voicePipBtn = document.getElementById('voicePipBtn');
+  const voiceFullscreenBtn = document.getElementById('voiceFullscreenBtn');
+  const ssOverlay = document.getElementById('screenShareOverlay');
+  const ssCloseBtn = document.getElementById('screenShareCloseBtn');
+  const ssCancelBtn = document.getElementById('screenShareCancelBtn');
+  const ssStartBtn = document.getElementById('screenShareStartBtn');
+  const ssPreviewVideo = document.getElementById('ssPreviewVideo');
+  const ssPreviewHint = document.getElementById('ssPreviewHint');
+  const ssAudioChk = document.getElementById('ssAudioChk');
+  const ssPanel = document.getElementById('ssPanel');
+  const ssPanelTitle = document.getElementById('ssPanelTitle');
+  const ssRemoteVideo = document.getElementById('ssRemoteVideo');
+  const ssPanelHideBtn = document.getElementById('ssPanelHideBtn');
+  const ssPanelFullscreenBtn = document.getElementById('ssPanelFullscreenBtn');
+  const voiceMembersDock = document.getElementById('voiceMembersDock');
+  let voiceMembersGrid = null;
+  let voiceMembersCount = null;
+
+function ensureVoiceMembersSection() {
+  if (!voiceMembersDock) return;
+  if (voiceMembersGrid && voiceMembersCount) return;
+  voiceMembersGrid = document.getElementById('voiceMembersGrid');
+  voiceMembersCount = document.getElementById('voiceMembersCount');
+}
+
+  const pcs = new Map();          // peerId -> RTCPeerConnection
+  const remoteStreams = new Map(); // peerId -> MediaStream
+  const audioEls = new Map();     // peerId -> HTMLAudioElement
+  const remoteVideoStreams = new Map(); // peerId -> MediaStream
+  const videoEls = new Map();     // peerId -> HTMLVideoElement (optional sink)
+  const nameCache = new Map();    // userId -> username
+
+  let meId = null;
+  let meName = null;
+  let iceConfig = null;
+  let localStream = null;
+  let localStreamError = null;
+  let screenStream = null;
+  let ssWatchers = new Set();
+  let liveSharers = new Set();
+  let screenVideoTrack = null;
+  let screenAudioTrack = null;
+  let screenSenders = new Map(); // peerId -> { videoSender, audioSender }
+  let isSharingScreen = false;
+  let ssSelectedSurface = 'monitor';
+  let ssSelectedRes = 720;
+  let ssSelectedFps = 30;
+  let ssIncludeAudio = false;
+  let audioCtx = null;
+  let analyser = null;
+  let lastJoinAttemptChannelId = null;
+  let inChannelId = null;
+  let inChannelName = null;
+  let muted = false;
+  let deafened = false;
+  let joining = false;
+  let remoteShareUserId = null;
+  let remoteShareStream = null;
+  let watchingUserId = null;
+  let watchingStream = null;
+  let focusedUserId = null;
+  let _mediaUnlocked = false;
+  function unlockMediaPlaybackOnce() {
+    if (_mediaUnlocked) return;
+    _mediaUnlocked = true;
+    try {
+      if (audioCtx && audioCtx.state === 'suspended' && typeof audioCtx.resume === 'function') {
+        audioCtx.resume().catch(() => {});
+      }
+    } catch (_) {}
+    try {
+      for (const a of audioEls.values()) {
+        try {
+          const p = a.play?.();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        } catch (_) {}
+      }
+    } catch (_) {}
+    const vids = [voiceStageVideo, ssRemoteVideo, ssPreviewVideo, voiceSelfVideo].filter(Boolean);
+    for (const v of vids) {
+      try {
+        const p = v.play?.();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } catch (_) {}
+    }
+  }
+  try { document.addEventListener('pointerdown', unlockMediaPlaybackOnce, { once: true, passive: true }); } catch (_) {}
+  try { document.addEventListener('touchstart', unlockMediaPlaybackOnce, { once: true, passive: true }); } catch (_) {}
+  try { document.addEventListener('click', unlockMediaPlaybackOnce, { once: true, passive: true }); } catch (_) {}
+
+
+
+  function setBarVisible(v) {
+    if (!elVoiceBar) return;
+    elVoiceBar.hidden = !v;
+    document.body.classList.toggle('voice-muted', !!muted && v);
+    document.body.classList.toggle('voice-deafened', !!deafened && v);
+  }
+
+  function isVoiceViewOpen() {
+    return !!voiceView && !voiceView.hidden;
+  }
+
+  function updateVoiceViewHeader() {
+    if (voiceViewChanName) voiceViewChanName.textContent = (inChannelName || 'Voice').toString();
+    if (!voiceViewState) return;
+    if (!inChannelId) {
+      voiceViewState.textContent = 'Не подключено';
+      return;
+    }
+    const s = (elStatus?.textContent || '').toLowerCase();
+    if (joining || s.includes('подключ')) {
+      voiceViewState.textContent = 'Подключение...';
+    } else {
+      voiceViewState.textContent = 'Подключено';
+    }
+  }
+
+  function setStatus(text) {
+    if (elStatus) elStatus.textContent = text || '';
+    updateVoiceViewHeader();
+  }
+
+  function setChannelName(name) {
+    if (elChanName) elChanName.textContent = name || 'Voice';
+    updateVoiceViewHeader();
+  }
+
+  function setPeersText(text) {
+    if (!elPeers) return;
+    elPeers.textContent = text || '';
+  }
+
+  function markVoiceChannelInList(channelId) {
+    const list = document.getElementById('channels-list');
+    if (!list) return;
+    const items = list.querySelectorAll('.item.channel.voice');
+    items.forEach((it) => {
+      const id = Number(it.dataset.channelId);
+      it.classList.toggle('voice-joined', Number.isFinite(id) && id === channelId);
+    });
+  }
+
+
+  function renderUsersUnderVoiceChannel(channelId, ids) {
+    const list = document.getElementById('channels-list');
+    if (!list) return;
+    try {
+      list.querySelectorAll('.item.channel.voice .voice-users').forEach((el) => {
+        el.innerHTML = '';
+        el.hidden = true;
+      });
+    } catch (_) {}
+
+    const cid = Number(channelId);
+    if (!Number.isFinite(cid) || cid <= 0) return;
+
+    const item = list.querySelector(`.item.channel.voice[data-channel-id="${cid}"]`);
+    const box = item?.querySelector?.('.voice-users');
+    if (!box) return;
+
+    const arr = Array.isArray(ids) ? ids : [];
+    if (!arr.length) {
+      box.innerHTML = '';
+      box.hidden = true;
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const uid of arr) {
+      const name = (nameCache.get(uid) || (uid === meId ? (meName || 'Вы') : `User#${uid}`)).toString();
+      const letter = (name.charAt(0) || 'U').toUpperCase();
+
+      const row = document.createElement('div');
+      row.className = 'voice-user' + (uid === meId ? ' me' : '');
+      row.innerHTML = `<div class="vua">${escapeHtml(letter)}</div><div class="vun" title="${escapeHtml(name)}">${escapeHtml(uid === meId ? 'Вы' : name)}</div>`;
+      frag.appendChild(row);
+    }
+
+    box.innerHTML = '';
+    box.appendChild(frag);
+    box.hidden = false;
+  }
+
+  async function ensureMe() {
+    if (meId && meName) return { id: meId, name: meName };
+
+    try {
+      const m = (typeof getMe === 'function') ? getMe() : null;
+      if (m && typeof m === 'object') {
+        const id = Number(m.id);
+        if (Number.isFinite(id) && id > 0) meId = id;
+        meName = (m.nickname || m.username || '').toString() || null;
+      }
+    } catch (_) {}
+
+    if (!meId) {
+      try {
+        const raw = localStorage.getItem('user_id');
+        const id = raw ? Number(raw) : null;
+        if (Number.isFinite(id) && id > 0) meId = id;
+      } catch (_) {}
+    }
+
+    if (!meId || !meName) {
+      try {
+        const me = await api('/api/users/me');
+        const id = Number(me?.id);
+        if (Number.isFinite(id) && id > 0) meId = id;
+        meName = (me?.nickname || me?.username || '').toString() || meName;
+      } catch (_) {}
+    }
+
+    if (meId && meName) nameCache.set(meId, meName);
+    return { id: meId, name: meName };
+  }
+
+  async function resolveName(userId) {
+    const id = Number(userId);
+    if (!Number.isFinite(id) || id <= 0) return 'Unknown';
+
+    if (nameCache.has(id)) return nameCache.get(id);
+    try {
+      const el = document.querySelector(`.member[data-user-id="${id}"]`);
+      const fromData = el?.dataset?.username;
+      if (fromData) {
+        nameCache.set(id, fromData);
+        return fromData;
+      }
+      const nameEl = el?.querySelector?.('.name');
+      const t = nameEl?.textContent?.trim();
+      if (t) {
+        nameCache.set(id, t);
+        return t;
+      }
+    } catch (_) {}
+    try {
+      const u = await api(`/api/users/${id}`);
+      const name = (u?.username || '').toString() || `User#${id}`;
+      nameCache.set(id, name);
+      return name;
+    } catch (_) {
+      return `User#${id}`;
+    }
+  }
+
+  async function ensureIceConfig() {
+    if (iceConfig) return iceConfig;
+    try {
+      const r = await api('/api/rtc/ice');
+      const servers = r?.iceServers || r?.ice_servers || [];
+      if (Array.isArray(servers) && servers.length) {
+        iceConfig = { iceServers: servers };
+      } else {
+        iceConfig = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
+      }
+    } catch (_) {
+      iceConfig = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
+    }
+    return iceConfig;
+  }
+
+  async function getLocalStreamOptional() {
+  if (localStream) return localStream;
+  if (localStreamError) return null;
+  if (!window.isSecureContext) {
+    localStreamError = new Error('secure_context_required');
+    return null;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    localStreamError = new Error('getUserMedia_not_supported');
+    return null;
+  }
+
+  const constraints = {
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+  };
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(localStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+
+    localStreamError = null;
+    return localStream;
+  } catch (err) {
+    localStreamError = err;
+    return null;
+  }
+}
+
+  function stopLocalStream() {
+    try {
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+      }
+    } catch (_) {}
+
+    try {
+      if (audioCtx) {
+        audioCtx.close();
+      }
+    } catch (_) {}
+    audioCtx = null;
+    analyser = null;
+
+    localStream = null;
+    localStreamError = null;
+  }
+
+  function closePeer(peerId) {
+    const id = Number(peerId);
+    const pc = pcs.get(id);
+    if (pc) {
+      try { pc.onicecandidate = null; } catch (_) {}
+      try { pc.ontrack = null; } catch (_) {}
+      try { pc.onconnectionstatechange = null; } catch (_) {}
+      try { pc.close(); } catch (_) {}
+    }
+    pcs.delete(id);
+
+    const s = remoteStreams.get(id);
+    if (s) {
+      try { s.getTracks().forEach((t) => t.stop()); } catch (_) {}
+    }
+    remoteStreams.delete(id);
+
+    const a = audioEls.get(id);
+    if (a) {
+      try { a.srcObject = null; } catch (_) {}
+      try { a.remove(); } catch (_) {}
+    }
+    audioEls.delete(id);
+
+    const vs = remoteVideoStreams.get(id);
+    if (vs) {
+      try { vs.getTracks().forEach((t) => t.stop()); } catch (_) {}
+    }
+    remoteVideoStreams.delete(id);
+
+    const ve = videoEls.get(id);
+    if (ve) {
+      try { ve.srcObject = null; } catch (_) {}
+      try { ve.remove(); } catch (_) {}
+    }
+    videoEls.delete(id);
+    try {
+      if (remoteShareUserId === id) {
+        hideRemoteViewerPanel();
+      }
+      if (watchingUserId === id) {
+        if (isSharingScreen && screenStream) stageShowSelfShare();
+        else stageShowEmpty();
+      }
+    } catch (_) {}
+  }
+
+  function cleanupAllPeers() {
+    [...pcs.keys()].forEach((id) => closePeer(id));
+  }
+
+function getVoiceDisplayName(uid) {
+  const id = Number(uid);
+  if (!Number.isFinite(id) || id <= 0) return 'Unknown';
+  if (id === meId) return (meName || 'Вы').toString();
+  return (nameCache.get(id) || `User#${id}`).toString();
+}
+
+function getVoiceAvatarInnerHtml(uid, name) {
+  const id = Number(uid);
+  try {
+    const el = document.querySelector(`.member[data-user-id="${id}"] .avatar`);
+    const html = el?.innerHTML;
+    if (html) return html;
+  } catch (_) {}
+
+  const n = (name || getVoiceDisplayName(id)).toString();
+  const letter = (n.charAt(0) || 'U').toUpperCase();
+  return escapeHtml(letter);
+}
+
+function renderVoiceMembersTiles(ids) {
+  ensureVoiceMembersSection();
+  if (!voiceMembersDock || !voiceMembersGrid || !voiceMembersCount) return;
+
+  const arr = Array.isArray(ids) ? ids : [];
+  if (!inChannelId || !arr.length) {
+    voiceMembersGrid.innerHTML = '';
+    voiceMembersDock.hidden = true;
+    if (voiceMembersCount) voiceMembersCount.textContent = '(0)';
+    return;
+  }
+
+  if (arr.length <= 1) {
+    voiceMembersGrid.innerHTML = '';
+    voiceMembersDock.hidden = true;
+    if (voiceMembersCount) voiceMembersCount.textContent = `(${arr.length})`;
+    return;
+  }
+
+  voiceMembersDock.hidden = false;
+  voiceMembersCount.textContent = `(${arr.length})`;
+
+  const frag = document.createDocumentFragment();
+
+  for (const uid of arr) {
+    const id = Number(uid);
+    if (!Number.isFinite(id) || id <= 0) continue;
+
+    const name = getVoiceDisplayName(id);
+    const tile = document.createElement('div');
+    tile.className = 'voice-member-tile' + (id === meId ? ' me' : '') + (focusedUserId === id ? ' focused' : '');
+    tile.dataset.userId = String(id);
+
+    const avaHtml = getVoiceAvatarInnerHtml(id, name);
+    const isLive = (id === meId ? (isSharingScreen && !!screenStream) : liveSharers.has(id));
+
+    tile.innerHTML = `
+      <div class="voice-member-ava">${avaHtml}</div>
+      <div class="voice-member-meta">
+        <div class="voice-member-name" title="${escapeHtml(name)}">${escapeHtml(id === meId ? 'Вы' : name)}</div>
+        <div class="voice-member-sub">${id === meId ? 'Вы' : (isLive ? 'Демонстрация' : 'Участник')}</div>
+      </div>
+      ${isLive ? '<div class="voice-member-live">LIVE</div>' : ''}
+    `;
+
+    tile.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (focusedUserId === id) focusedUserId = null;
+      else focusedUserId = id;
+
+      renderVoiceMembersTiles(arr);
+      applyVoiceFocusToStage();
+    });
+
+    tile.addEventListener('click', (e) => {
+      try {
+        const isLive = (id === meId ? (isSharingScreen && !!screenStream) : liveSharers.has(id));
+        if (isLive && id !== meId) {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleWatchShare(id).catch(() => {});
+          return;
+        }
+      } catch (_) {}
+
+      const fn = window.lbShowUserMenu;
+      if (typeof fn !== 'function') return;
+      if (id === meId) return;
+      const anchor = tile.querySelector('.voice-member-ava') || tile;
+      try {
+        fn({
+          userId: id,
+          username: name,
+          anchorEl: anchor,
+          allowDm: true,
+          allowAddFriend: true,
+          allowRemoveFriend: false,
+        });
+      } catch (_) {}
+    });
+
+    frag.appendChild(tile);
+    if (!nameCache.has(id) && id !== meId) {
+      resolveName(id).then(() => {
+        try {
+          if (!inChannelId) return;
+          renderVoiceMembersTiles(arr);
+        } catch (_) {}
+      }).catch(() => {});
+    }
+  }
+
+  voiceMembersGrid.innerHTML = '';
+  voiceMembersGrid.appendChild(frag);
+}
+
+
+
+  function currentVoiceMemberIds() {
+    const ids = [meId, ...pcs.keys()].filter((n) => Number.isFinite(n) && n > 0);
+    ids.sort((a, b) => a - b);
+    return ids;
+  }
+
+  function ssSend(type, toUserId) {
+    const uid = Number(toUserId);
+    if (!inChannelId) return;
+    if (!Number.isFinite(uid) || uid <= 0) return;
+    try {
+      wsManager.send({
+        type,
+        data: {
+          channel_id: inChannelId,
+          to_user_id: uid,
+        }
+      });
+    } catch (_) {}
+  }
+
+  async function watchShare(userId) {
+    const uid = Number(userId);
+    if (!inChannelId) return;
+    if (!Number.isFinite(uid) || uid <= 0) return;
+    if (uid === meId) return;
+    if (watchingUserId && watchingUserId !== uid) {
+      ssSend('voice_ss_unwatch', watchingUserId);
+      try {
+        if (remoteShareUserId === watchingUserId) hideRemoteScreenShare();
+      } catch (_) {}
+    }
+
+    watchingUserId = uid;
+    focusedUserId = uid;
+
+    ssSend('voice_ss_watch', uid);
+
+    try { renderVoiceMembersTiles(currentVoiceMemberIds()); } catch (_) {}
+    try {
+      if (isVoiceViewOpen() && !(isSharingScreen && screenStream)) {
+        stageShowEmpty();
+        if (voiceStageName) voiceStageName.textContent = 'Подключение...';
+      }
+    } catch (_) {}
+  }
+
+  async function unwatchShare(userId) {
+    const uid = Number(userId);
+    if (!Number.isFinite(uid) || uid <= 0) return;
+
+    ssSend('voice_ss_unwatch', uid);
+
+    if (watchingUserId === uid) watchingUserId = null;
+    if (focusedUserId === uid) focusedUserId = null;
+
+    try {
+      if (remoteShareUserId === uid) hideRemoteScreenShare();
+    } catch (_) {}
+
+    try { renderVoiceMembersTiles(currentVoiceMemberIds()); } catch (_) {}
+
+    if (isVoiceViewOpen()) {
+      if (isSharingScreen && screenStream) stageShowSelfShare();
+      else stageShowEmpty();
+    }
+  }
+
+  async function toggleWatchShare(userId) {
+    const uid = Number(userId);
+    if (!Number.isFinite(uid) || uid <= 0) return;
+    if (watchingUserId === uid) return unwatchShare(uid);
+    return watchShare(uid);
+  }
+
+function applyVoiceFocusToStage() {
+  if (!isVoiceViewOpen()) return;
+
+  let fid = Number(focusedUserId || 0);
+  try {
+    const myId = Number(getMe?.()?.id || 0);
+    if (isSharingScreen && screenStream && (!fid || fid === myId)) {
+      fid = myId;
+      focusedUserId = myId;
+    }
+  } catch (_) {}
+  if (!Number.isFinite(fid) || fid <= 0) {
+    if (isSharingScreen && screenStream) {
+      stageShowSelfShare();
+    } else if (remoteShareStream && remoteShareUserId) {
+      stageShowRemoteShare().catch(() => stageShowEmpty());
+    } else {
+      stageShowEmpty();
+    }
+    return;
+  }
+
+  if (fid === meId && isSharingScreen && screenStream) {
+    stageShowSelfShare();
+    return;
+  }
+
+  const s = remoteVideoStreams.get(fid);
+  if (s) {
+    stageSetStream(s, fid);
+    resolveName(fid)
+      .then((nm) => { if (voiceStageName) voiceStageName.textContent = nm; })
+      .catch(() => { if (voiceStageName) voiceStageName.textContent = `User#${fid}`; });
+    if (voiceStageTop) voiceStageTop.hidden = false;
+    return;
+  }
+
+  if (isSharingScreen && screenStream) {
+    stageShowSelfShare();
+  } else if (remoteShareStream && remoteShareUserId) {
+    stageShowRemoteShare().catch(() => stageShowEmpty());
+  } else {
+    stageShowEmpty();
+  }
+}
+
+
+  function updateVoiceUiPeers() {
+    try {
+      if (elPeers) {
+        elPeers.innerHTML = '';
+        elPeers.style.display = 'none';
+      }
+    } catch (_) {}
+    try {
+      if (voiceStageStrip) {
+        voiceStageStrip.innerHTML = '';
+        voiceStageStrip.style.display = 'none';
+      }
+    } catch (_) {}
+
+    if (!inChannelId) {
+      focusedUserId = null;
+      renderUsersUnderVoiceChannel(null, []);
+      renderVoiceMembersTiles([]);
+      updateVoiceStageLetter();
+      updateStageWatchButtons();
+      applyVoiceFocusToStage();
+      return;
+    }
+
+    const peerIds = [...pcs.keys()].sort((a, b) => a - b);
+    const count = peerIds.length + 1;
+
+    setStatus(`В голосе: ${count}`);
+
+    const ids = [meId, ...peerIds].filter((n) => Number.isFinite(n) && n > 0);
+    renderUsersUnderVoiceChannel(inChannelId, ids);
+    renderVoiceMembersTiles(ids);
+
+    try {
+      if (focusedUserId && !ids.includes(focusedUserId)) focusedUserId = null;
+    } catch (_) {}
+
+    updateVoiceStageLetter();
+    updateStageWatchButtons();
+    applyVoiceFocusToStage();
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function updateVoiceStageLetter() {
+    if (!voiceStageEmpty) return;
+    const n = (meName || inChannelName || 'U').toString().trim();
+    const letter = (n.charAt(0) || 'U').toUpperCase();
+    voiceStageEmpty.dataset.letter = letter;
+  }
+
+  function stageSetStream(stream, ownerUserId) {
+    const hasVideo = !!stream;
+
+    try {
+      if (voiceStageVideo) {
+        if (hasVideo) {
+          voiceStageVideo.hidden = false;
+          voiceStageVideo.srcObject = stream;
+          try {
+            voiceStageVideo.muted = (Number(ownerUserId || 0) === Number(meId || 0));
+          } catch (_) {}
+          const p = voiceStageVideo.play?.();
+          if (p && typeof p.catch === 'function') {
+            p.catch(() => {
+              try { voiceStageVideo.muted = true; } catch (_) {}
+              try { voiceStageVideo.play?.().catch(() => {}); } catch (_) {}
+            });
+          }} else {
+          try { voiceStageVideo.pause?.(); } catch (_) {}
+          voiceStageVideo.srcObject = null;
+          voiceStageVideo.hidden = true;
+        }
+      }
+    } catch (_) {}
+
+    try {
+      if (voicePeerTile) {
+        const uid = hasVideo ? Number(ownerUserId || 0) : Number(meId || 0);
+        const show = uid > 0;
+        voicePeerTile.hidden = !show;
+        if (show) {
+          const cached = nameCache.get(uid);
+          const nm = (uid === meId ? (meName || 'Вы') : (cached || `User#${uid}`)).toString();
+          if (voicePeerNameEl) voicePeerNameEl.textContent = nm;
+          const letter = (nm.trim().charAt(0) || 'U').toUpperCase();
+          if (voicePeerAva) voicePeerAva.textContent = letter;
+        }
+      }
+    } catch (_) {}
+
+    try {
+      if (voiceStage) {
+        voiceStage.classList.toggle('has-stream', hasVideo);
+        voiceStage.classList.toggle('no-stream', !hasVideo);
+      }
+    } catch (_) {}
+
+    try {
+      if (voiceStageEmpty) {
+        const showPlaceholder = !hasVideo;
+        voiceStageEmpty.hidden = !showPlaceholder;
+      }
+    } catch (_) {}
+
+    if (voiceLiveBadge) voiceLiveBadge.hidden = !hasVideo;
+  }
+
+  async function stageShowRemoteShare() {
+    if (!remoteShareStream || !remoteShareUserId) {
+      stageSetStream(null, null);
+      updateStageWatchButtons();
+      return;
+    }
+
+    stageSetStream(remoteShareStream, remoteShareUserId);
+
+    if (voiceStageName) {
+      const nm = await resolveName(remoteShareUserId).catch(() => `User#${remoteShareUserId}`);
+      voiceStageName.textContent = nm;
+      try {
+        if (voicePeerTile && !voicePeerTile.hidden && voicePeerNameEl) voicePeerNameEl.textContent = nm;
+        const letter = (nm.trim().charAt(0) || 'U').toUpperCase();
+        if (voicePeerAva) voicePeerAva.textContent = letter;
+      } catch (_) {}
+    }
+    if (voiceStageTop) voiceStageTop.hidden = false;
+    updateStageWatchButtons();
+  }
+
+function stageShowSelfShare() {
+  try {
+    if (voiceStageVideo && screenStream && typeof screenStream.getVideoTracks === 'function') {
+      const vts = screenStream.getVideoTracks();
+      if (vts && vts.length > 0 && vts[0].readyState === 'live') {
+        voiceStageVideo.hidden = false;
+        voiceStageVideo.srcObject = screenStream;
+        try { voiceStageVideo.muted = true; } catch (_) {}
+        try { voiceStageVideo.style.objectFit = 'contain'; voiceStageVideo.style.width = '100%'; voiceStageVideo.style.height = '100%'; voiceStageVideo.style.display = 'block'; } catch (_) {}
+        const p = voiceStageVideo.play?.();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+    }
+  } catch (_) {}
+  if (!screenStream) return;
+    stageSetStream(screenStream, meId);
+    if (voiceStageName) voiceStageName.textContent = 'Вы транслируете';
+    if (voiceStageTop) voiceStageTop.hidden = false;
+    updateStageWatchButtons();
+  }
+
+  function stageShowEmpty() {
+    stageSetStream(null, null);
+    if (voiceStageName) voiceStageName.textContent = '';
+    if (voiceStageTop) voiceStageTop.hidden = false;
+    updateStageWatchButtons();
+  }
+
+  function updateStageWatchButtons() {
+    const hasRemote = !!remoteShareStream && !!remoteShareUserId;
+    if (elStreamNotice) elStreamNotice.hidden = !hasRemote;
+    if (voiceStageWatchBtn) voiceStageWatchBtn.hidden = true;
+    if (btnStreamWatch) btnStreamWatch.hidden = true;
+  }
+
+  function updateVoiceStageStrip(ids) {
+    if (!voiceStageStrip) return;
+    const arr = Array.isArray(ids) ? ids : [];
+    if (!arr.length) {
+      voiceStageStrip.innerHTML = '';
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const uid of arr) {
+      const name = (nameCache.get(uid) || (uid === meId ? (meName || 'Вы') : `User#${uid}`)).toString();
+      const letter = (name.charAt(0) || 'U').toUpperCase();
+
+      const it = document.createElement('div');
+      it.className = 'voice-strip-item' + (uid === meId ? ' me' : '');
+      it.innerHTML = `<div class="voice-strip-ava">${escapeHtml(letter)}</div><div class="voice-strip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>`;
+      frag.appendChild(it);
+    }
+
+    voiceStageStrip.innerHTML = '';
+    voiceStageStrip.appendChild(frag);
+  }
+
+  function setSharingUi(v) {
+    document.body.classList.toggle('voice-sharing', !!v && !!inChannelId);
+  }
+  function showRemoteViewerPanel() {
+    if (!ssPanel || !ssRemoteVideo) return;
+    if (!remoteShareStream || !remoteShareUserId) return;
+    try { ssRemoteVideo.pause?.(); } catch (_) {}
+    try { ssRemoteVideo.srcObject = remoteShareStream; } catch (_) {}
+    try {
+      try { ssRemoteVideo.muted = false; } catch (_) {}
+      const p = ssRemoteVideo.play?.();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          try { ssRemoteVideo.muted = true; } catch (_) {}
+          try { ssRemoteVideo.play?.().catch(() => {}); } catch (_) {}
+        });
+      }
+    } catch (_) {}
+    try {
+      const title = (elStreamText?.textContent || '').toString().trim();
+      if (ssPanelTitle) ssPanelTitle.textContent = title || 'Демонстрация';
+    } catch (_) {}
+    try { ssPanel.hidden = false; } catch (_) {}
+  }
+
+  function hideRemoteViewerPanel() {
+    try { if (ssPanel) ssPanel.hidden = true; } catch (_) {}
+    try { if (ssRemoteVideo) ssRemoteVideo.srcObject = null; } catch (_) {}
+  }
+
+
+  function hideRemoteScreenShare() {
+    remoteShareUserId = null;
+    remoteShareStream = null;
+
+    if (elStreamText) elStreamText.textContent = 'Демонстрация';
+    if (elStreamNotice) elStreamNotice.hidden = true;
+    if (voiceStageWatchBtn) voiceStageWatchBtn.hidden = true;
+
+    hideRemoteViewerPanel();
+
+    if (isSharingScreen && screenStream) stageShowSelfShare();
+    else stageShowEmpty();
+  }
+
+  async function showRemoteScreenShare(fromUserId, stream) {
+    const uid = Number(fromUserId);
+    if (!Number.isFinite(uid) || uid <= 0) return;
+
+    remoteShareUserId = uid;
+    remoteShareStream = stream;
+
+    const name = await resolveName(uid).catch(() => `User#${uid}`);
+    if (elStreamText) elStreamText.textContent = `Демонстрация: ${name}`;
+    if (elStreamNotice) elStreamNotice.hidden = false;
+    try { if (ssRemoteVideo) ssRemoteVideo.srcObject = stream; } catch (_) {}
+    if (isVoiceViewOpen() && !(isSharingScreen && screenStream)) {
+      await stageShowRemoteShare();
+    } else {
+      updateStageWatchButtons();
+    }
+  }
+
+  function ssOverlayVisible(v) {
+    if (!ssOverlay) return;
+    ssOverlay.hidden = !v;
+    document.body.classList.toggle('modal-open', !!v);
+  }
+
+  function ssReadUiSelections() {
+    try {
+      const surfaceBtn = ssOverlay?.querySelector?.('.ss-tab.active');
+      const surface = (surfaceBtn?.dataset?.surface || 'monitor').toString();
+      ssSelectedSurface = surface;
+    } catch (_) {}
+
+    try {
+      const res = Number(ssOverlay?.querySelector?.('input[name="ssRes"]:checked')?.value || 720);
+      if (Number.isFinite(res)) ssSelectedRes = res;
+    } catch (_) {}
+
+    try {
+      const fps = Number(ssOverlay?.querySelector?.('input[name="ssFps"]:checked')?.value || 30);
+      if (Number.isFinite(fps)) ssSelectedFps = fps;
+    } catch (_) {}
+
+    try {
+      ssIncludeAudio = !!ssAudioChk?.checked;
+    } catch (_) {}
+  }
+
+  function ssResToDims(res) {
+    const r = Number(res);
+    if (r === 480) return { width: 854, height: 480 };
+    if (r === 1080) return { width: 1920, height: 1080 };
+    return { width: 1280, height: 720 };
+  }
+
+
+function ssMaxBitrateKbps(res, fps) {
+  const r = Number(res) || 720;
+  const f = Math.max(1, Math.min(60, Number(fps) || 30));
+  if (r >= 1080) return 6000;
+  if (r >= 720) return (f >= 60 ? 4500 : 3000);
+  return (f >= 60 ? 2500 : 1500);
+}
+
+async function ssApplySenderBitrate(sender, res, fps) {
+  if (!sender || typeof sender.getParameters !== 'function' || typeof sender.setParameters !== 'function') return;
+  const maxKbps = ssMaxBitrateKbps(res, fps);
+  const maxBps = Math.max(1, Math.floor(maxKbps * 1000));
+
+  try {
+    const p = sender.getParameters() || {};
+    if (!p.encodings) p.encodings = [{}];
+    if (!Array.isArray(p.encodings) || p.encodings.length === 0) p.encodings = [{}];
+
+    p.encodings[0].maxBitrate = maxBps;
+    p.encodings[0].maxFramerate = Math.max(1, Math.min(60, Number(fps) || 30));
+
+    if (!p.degradationPreference) p.degradationPreference = 'maintain-resolution';
+
+    await sender.setParameters(p);
+  } catch (e) {}
+}
+
+async function ssApplyBitrateToAllPeers() {
+  if (!isSharingScreen) return;
+  ssReadUiSelections();
+  const res = ssSelectedRes;
+  const fps = ssSelectedFps;
+
+  for (const entry of screenSenders.values()) {
+    if (entry?.videoSender) {
+      await ssApplySenderBitrate(entry.videoSender, res, fps);
+    }
+  }
+}
+
+  function ssBuildDisplayConstraints() {
+    ssReadUiSelections();
+    const dims = ssResToDims(ssSelectedRes);
+    const fps = Math.max(1, Math.min(60, Number(ssSelectedFps) || 30));
+    const surface = (ssSelectedSurface || 'monitor').toString();
+    const includeAudio = !!ssIncludeAudio;
+    const constraints = {
+      video: {
+        width: { ideal: dims.width },
+        height: { ideal: dims.height },
+        frameRate: { ideal: fps, max: fps },
+        displaySurface: surface,
+      },
+      audio: includeAudio ? true : false,
+      surfaceSwitching: 'include',
+      monitorTypeSurfaces: 'include',
+      systemAudio: includeAudio ? 'include' : 'exclude',
+      selfBrowserSurface: surface === 'browser' ? 'include' : 'exclude',
+    };
+
+    if (surface === 'browser') {
+      constraints.preferCurrentTab = true;
+    }
+
+    return constraints;
+  }
+
+  function ssSetPreview(stream) {
+    if (!ssPreviewVideo) return;
+    try {
+      ssPreviewVideo.srcObject = stream;
+      ssPreviewVideo.autoplay = true;
+      ssPreviewVideo.playsInline = true;
+      ssPreviewVideo.muted = true;
+      ssPreviewVideo.play?.().catch(() => {});
+    } catch (_) {}
+
+    if (ssPreviewHint) ssPreviewHint.style.display = stream ? 'none' : '';
+  }
+
+  function ssClearPreview() {
+    if (!ssPreviewVideo) return;
+    try { ssPreviewVideo.pause?.(); } catch (_) {}
+    try { ssPreviewVideo.srcObject = null; } catch (_) {}
+    if (ssPreviewHint) ssPreviewHint.style.display = '';
+  }
+
+  async function ssRequestRenegotiation(peerId) {
+    const pid = Number(peerId);
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    if (!inChannelId) return;
+
+    if (shouldInitiate(pid)) {
+      setTimeout(() => { sendOffer(pid).catch((e) => console.warn('[SS] sendOffer failed', e)); }, 20);
+      return;
+    }
+
+    wsManager.send({
+      type: 'rtc_negotiate',
+      data: {
+        channel_id: inChannelId,
+        to_user_id: pid,
+      }
+    });
+  }
+
+  async function ssAttachToPeer(peerId) {
+    const pid = Number(peerId);
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    const pc = pcs.get(pid);
+    if (!pc) return;
+
+    const prev = screenSenders.get(pid) || { videoSender: null, audioSender: null };
+    if (screenVideoTrack) {
+      const already = pc.getSenders().find((s) => s && s.track && s.track.kind === 'video' && s.track === screenVideoTrack);
+      if (!already) {
+        try {
+          prev.videoSender = pc.addTrack(screenVideoTrack, screenStream);
+          try { await ssApplySenderBitrate(prev.videoSender, ssSelectedRes, ssSelectedFps); } catch (_) {}
+        } catch (e) {
+          console.warn('[SS] addTrack(video) failed', e);
+        }
+      }
+    }
+
+    if (screenAudioTrack) {
+      const alreadyA = pc.getSenders().find((s) => s && s.track && s.track.kind === 'audio' && s.track === screenAudioTrack);
+      if (!alreadyA) {
+        try {
+          prev.audioSender = pc.addTrack(screenAudioTrack, screenStream);
+        } catch (e) {
+          console.warn('[SS] addTrack(audio) failed', e);
+        }
+      }
+    }
+
+    screenSenders.set(pid, prev);
+    await ssRequestRenegotiation(pid);
+  }
+
+  async function ssDetachFromPeer(peerId) {
+    const pid = Number(peerId);
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    const pc = pcs.get(pid);
+    if (!pc) return;
+
+    const entry = screenSenders.get(pid);
+    if (entry?.videoSender) {
+      try { pc.removeTrack(entry.videoSender); } catch (_) {}
+      try { entry.videoSender.replaceTrack?.(null); } catch (_) {}
+    }
+    if (entry?.audioSender) {
+      try { pc.removeTrack(entry.audioSender); } catch (_) {}
+      try { entry.audioSender.replaceTrack?.(null); } catch (_) {}
+    }
+    screenSenders.delete(pid);
+
+    await ssRequestRenegotiation(pid);
+  }
+
+  async function startScreenShare() {
+    if (!inChannelId) {
+      setStatus('Нужно зайти в голосовой канал');
+      return;
+    }
+    if (isSharingScreen) return;
+
+    if (!window.isSecureContext) {
+      setStatus('Демонстрация экрана требует HTTPS (secure context).');
+      return;
+    }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setStatus('getDisplayMedia не поддерживается браузером');
+      return;
+    }
+
+    const constraints = ssBuildDisplayConstraints();
+
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia(constraints);
+    } catch (e) {
+      console.warn('[SS] getDisplayMedia failed', e);
+      setStatus('Демонстрация не запущена');
+      return;
+    }
+
+    screenVideoTrack = screenStream.getVideoTracks()[0] || null;
+    screenAudioTrack = screenStream.getAudioTracks()[0] || null;
+
+    if (!screenVideoTrack) {
+      try { screenStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+      screenStream = null;
+      setStatus('Нет видео-трека (отказано?)');
+      return;
+    }
+
+    ssSetPreview(screenStream);
+
+    try {
+      screenVideoTrack.onended = () => {
+        stopScreenShare().catch(() => {});
+      };
+    } catch (_) {}
+
+    isSharingScreen = true;
+    setSharingUi(true);
+    openVoiceViewAndShowStage();
+
+    try {
+      if (voiceSelfPreview && voiceSelfVideo) {
+        voiceSelfVideo.srcObject = screenStream;
+        voiceSelfVideo.muted = true;
+        voiceSelfVideo.play?.().catch(() => {});
+        voiceSelfPreview.hidden = false;
+      }
+    } catch (_) {}
+
+    if (isVoiceViewOpen()) {
+      stageShowSelfShare();
+    } else {
+      updateStageWatchButtons();
+    }
+
+    try { wsManager.send({ type: 'voice_ss_start', data: { channel_id: inChannelId } }); } catch (_) {}
+    try { if (meId) liveSharers.add(meId); } catch (_) {}
+    updateVoiceUiPeers();
+    ssOverlayVisible(false);
+  }
+
+  async function stopScreenShare() {
+    if (!isSharingScreen) return;
+
+    const peerIds = [...screenSenders.keys()];
+    for (const pid of peerIds) {
+      await ssDetachFromPeer(pid);
+    }
+    ssWatchers = new Set();
+
+    try { screenVideoTrack && (screenVideoTrack.onended = null); } catch (_) {}
+
+    try {
+      if (screenStream) {
+        screenStream.getTracks().forEach((t) => t.stop());
+      }
+    } catch (_) {}
+
+    screenStream = null;
+    screenVideoTrack = null;
+    screenAudioTrack = null;
+    screenSenders = new Map();
+    isSharingScreen = false;
+    setSharingUi(false);
+
+    try { wsManager.send({ type: 'voice_ss_stop', data: { channel_id: inChannelId } }); } catch (_) {}
+    try { if (meId) liveSharers.delete(meId); } catch (_) {}
+    updateVoiceUiPeers();
+
+    try {
+      if (voiceSelfPreview) voiceSelfPreview.hidden = true;
+      if (voiceSelfVideo) voiceSelfVideo.srcObject = null;
+    } catch (_) {}
+
+    if (isVoiceViewOpen()) {
+      if (remoteShareStream && remoteShareUserId) {
+        stageShowRemoteShare().catch(() => stageShowEmpty());
+      } else {
+        stageShowEmpty();
+      }
+    } else {
+      updateStageWatchButtons();
+    }
+
+    ssClearPreview();
+  }
+
+  async function ssApplyQualityIfSharing() {
+    if (!isSharingScreen || !screenVideoTrack) return;
+    ssReadUiSelections();
+    const dims = ssResToDims(ssSelectedRes);
+    const fps = Math.max(1, Math.min(60, Number(ssSelectedFps) || 30));
+
+    try {
+      await screenVideoTrack.applyConstraints({
+        width: { ideal: dims.width },
+        height: { ideal: dims.height },
+        frameRate: { ideal: fps, max: fps },
+      });
+    } catch (e) {
+      console.warn('[SS] applyConstraints failed', e);
+    }
+
+    await ssApplyBitrateToAllPeers();
+
+    const peerIds = [...pcs.keys()];
+    for (const pid of peerIds) {
+      await ssRequestRenegotiation(pid);
+    }
+  }
+
+  function setDeafened(v) {
+    deafened = !!v;
+
+    for (const a of audioEls.values()) {
+      try { a.muted = deafened; } catch (_) {}
+    }
+
+    document.body.classList.toggle('voice-deafened', deafened && !!inChannelId);
+  }
+
+  function setMuted(v) {
+    muted = !!v;
+    if (localStream) {
+      localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+    }
+    document.body.classList.toggle('voice-muted', muted && !!inChannelId);
+  }
+
+  function shouldInitiate(peerId) {
+    const p = Number(peerId);
+    if (!Number.isFinite(p) || p <= 0) return false;
+    if (!meId) return false;
+    return meId < p;
+  }
+
+  async function ensurePeerConnection(peerId) {
+    const id = Number(peerId);
+    if (!Number.isFinite(id) || id <= 0) return null;
+
+    if (pcs.has(id)) return pcs.get(id);
+
+    const config = await ensureIceConfig();
+    const pc = new RTCPeerConnection(config);
+
+    pcs.set(id, pc);
+
+    try {
+      pc.addTransceiver('video', { direction: 'recvonly' });
+    } catch (_) {}
+
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      if (!inChannelId) return;
+
+      wsManager.send({
+        type: 'rtc_candidate',
+        data: {
+          channel_id: inChannelId,
+          to_user_id: id,
+          candidate: ev.candidate
+        }
+      });
+    };
+
+    pc.ontrack = (ev) => {
+      const stream = ev.streams && ev.streams[0] ? ev.streams[0] : null;
+      if (!stream) return;
+
+      const kind = ev.track && ev.track.kind ? String(ev.track.kind) : '';
+
+      if (kind === 'video') {
+        remoteVideoStreams.set(id, stream);
+        try {
+          ev.track.onended = () => {
+            try {
+              if (remoteShareUserId === id) hideRemoteScreenShare();
+            } catch (_) {}
+          };
+        } catch (_) {}
+
+        if (watchingUserId === id) {
+          showRemoteScreenShare(id, stream);
+        }
+        return;
+      }
+
+      remoteStreams.set(id, stream);
+
+      let a = audioEls.get(id);
+      if (!a) {
+        a = document.createElement('audio');
+        a.autoplay = true;
+        a.playsInline = true;
+        a.muted = deafened;
+        audioEls.set(id, a);
+        if (elAudioSink) elAudioSink.appendChild(a);
+        else document.body.appendChild(a);
+      }
+      a.srcObject = stream;
+
+      updateVoiceUiPeers();
+    };
+
+    pc.onconnectionstatechange = () => {updateVoiceUiPeers();};
+    pc.oniceconnectionstatechange = () => {
+      try {
+        const st = pc.iceConnectionState;
+        if (st === 'failed') {
+          try { pc.restartIce?.(); } catch (_) {}
+          if (shouldInitiate(id)) {
+            setTimeout(() => { sendOffer(id).catch(() => {}); }, 50);
+          }
+        }
+      } catch (_) {}
+    };
+
+    const ls = await getLocalStreamOptional();
+    if (ls) {
+      for (const track of ls.getTracks()) {
+        pc.addTrack(track, ls);
+      }
+    }
+
+    resolveName(id).then((n) => {
+      nameCache.set(id, n);
+      updateVoiceUiPeers();
+    }).catch(() => {});
+
+    updateVoiceUiPeers();
+
+    return pc;
+  }
+
+  async function sendOffer(peerId) {
+    const pc = await ensurePeerConnection(peerId);
+    if (!pc || !inChannelId) return;
+
+    if (pc.signalingState !== 'stable') return;
+
+    const offer = await pc.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
+    });
+
+    await pc.setLocalDescription(offer);
+
+    wsManager.send({
+      type: 'rtc_offer',
+      data: {
+        channel_id: inChannelId,
+        to_user_id: Number(peerId),
+        sdp: pc.localDescription
+      }
+    });
+  }
+
+  async function handleOffer(fromUserId, sdp) {
+    const pc = await ensurePeerConnection(fromUserId);
+    if (!pc) return;
+    if (pc.signalingState !== 'stable') {
+      console.warn('[VOICE] glare detected, ignoring offer', { fromUserId, state: pc.signalingState });
+      return;
+    }
+
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    wsManager.send({
+      type: 'rtc_answer',
+      data: {
+        channel_id: inChannelId,
+        to_user_id: Number(fromUserId),
+        sdp: pc.localDescription
+      }
+    });
+  }
+
+  async function handleAnswer(fromUserId, sdp) {
+    const id = Number(fromUserId);
+    const pc = pcs.get(id);
+    if (!pc) return;
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  }
+
+  async function handleCandidate(fromUserId, candidate) {
+    const id = Number(fromUserId);
+    const pc = pcs.get(id);
+    if (!pc) return;
+
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (e) {
+      console.warn('[VOICE] addIceCandidate failed', e);
+    }
+  }
+
+  async function tryConnectWs() {
+    if (wsManager.isConnected) return true;
+    if (typeof wsManager.connect !== 'function') return false;
+    const token = localStorage.getItem('auth_token');
+    if (!token) return false;
+    try {
+      await wsManager.connect(token);
+      return wsManager.isConnected;
+    } catch (e) {
+      console.warn('[VOICE] ws connect failed', e);
+      return false;
+    }
+  }
+
+async function join(channelId, channelName) {
+  if (!channelId) return;
+  if (joining) return;
+  unlockMediaPlaybackOnce();
+  if (inChannelId === channelId) {
+    if (channelName) inChannelName = channelName || inChannelName;
+    setBarVisible(true);
+    setChannelName(inChannelName || channelName || 'Voice');
+    updateVoiceViewHeader();
+    return;
+  }
+
+  joining = true;
+  try {
+    if (inChannelId && inChannelId !== channelId) {
+      await leave();
+    }
+
+    await ensureMe();
+
+    lastJoinAttemptChannelId = channelId;
+    inChannelId = channelId;
+    inChannelName = channelName || 'Voice';
+    markVoiceChannelInList(channelId);
+    setBarVisible(true);
+    setStatus('Подключение…');
+    updateVoiceStageLetter();
+    stageShowEmpty();
+    updateVoiceViewHeader();
+    await ensureIceConfig();
+    const wsOk = await tryConnectWs();
+    if (!wsOk) {
+      setStatus('WS не подключен (проверь /ws и токен)');
+      return;
+    }
+
+    const ls = await getLocalStreamOptional();
+    if (!ls) {
+      if (!window.isSecureContext) {
+        setStatus('Микрофон требует HTTPS (secure context). Можно только слушать.');
+      } else if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus('getUserMedia не поддерживается. Можно только слушать.');
+      } else {
+        setStatus('Нет доступа к микрофону. Можно только слушать.');
+      }
+    }
+
+    wsManager.send({ type: 'voice_join', data: { channel_id: inChannelId } });
+  } catch (e) {
+    console.error('[VOICE] join failed', e);
+    setStatus('Ошибка подключения');
+  } finally {
+    joining = false;
+  }
+}
+  async function leave() {
+    if (!inChannelId) return;
+
+    try {
+      wsManager.send({
+        type: 'voice_leave',
+        data: { channel_id: inChannelId }
+      });
+    } catch (_) {}
+
+    localLeaveCleanup();
+  }
+
+  function localLeaveCleanup() {
+    const prevChannelId = inChannelId;
+    cleanupAllPeers();
+    stopLocalStream();
+    stopScreenShare().catch(() => {});
+    hideRemoteScreenShare();
+    liveSharers = new Set();
+    ssWatchers = new Set();
+    watchingUserId = null;
+    inChannelId = null;
+    inChannelName = null;
+    lastJoinAttemptChannelId = null;
+    setChannelName('Voice');
+    setStatus('');
+    setPeersText('');
+    setBarVisible(false);
+    markVoiceChannelInList(null);
+    setSharingUi(false);
+
+    try { if (prevChannelId) renderUsersUnderVoiceChannel(prevChannelId, []); } catch (_) {}
+    try { renderVoiceMembersTiles([]); } catch (_) {}
+    try {
+      if (prevChannelId) {
+        document.dispatchEvent(new CustomEvent('lb:voiceLeft', { detail: { channel_id: prevChannelId } }));
+      }
+    } catch (_) {}
+
+    try {
+      if (voiceSelfPreview) voiceSelfPreview.hidden = true;
+      if (voiceSelfVideo) voiceSelfVideo.srcObject = null;
+    } catch (_) {}
+
+    stageShowEmpty();
+    updateVoiceViewHeader();
+  }
+
+  async function onVoiceEvent(msg) {
+    if (!msg || typeof msg.type !== 'string') return;
+
+    const t = msg.type;
+
+    if (t === 'voice_joined') {
+      const ch = Number(msg.channel_id);
+      if (!Number.isFinite(ch) || ch <= 0) return;
+      if (ch !== Number(inChannelId || 0) && ch !== Number(lastJoinAttemptChannelId || 0)) {
+        return;
+      }
+
+      inChannelId = ch;
+      if (!inChannelName) inChannelName = `Voice #${ch}`;
+
+      setBarVisible(true);
+      setChannelName(inChannelName);
+      markVoiceChannelInList(inChannelId);
+
+      try {
+        document.dispatchEvent(new CustomEvent('lb:voiceJoined', { detail: { channel_id: inChannelId, channel_name: inChannelName || '' } }));
+      } catch (_) {}
+
+      const peers = Array.isArray(msg.peers) ? msg.peers : [];
+      const shares = Array.isArray(msg.screen_shares) ? msg.screen_shares : [];
+      try {
+        liveSharers = new Set(shares.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0));
+        if (isSharingScreen && meId) liveSharers.add(meId);
+      } catch (_) {
+        liveSharers = new Set();
+      }
+
+      setStatus(`В голосе: ${peers.length + 1}`);
+
+      updateVoiceStageLetter();
+      if (!(isSharingScreen && screenStream)) stageShowEmpty();
+      updateVoiceViewHeader();
+
+      if (meId && meName) nameCache.set(meId, meName);
+
+      for (const pid of peers) {
+        const peerId = Number(pid);
+        if (!Number.isFinite(peerId) || peerId <= 0) continue;
+        if (peerId === meId) continue;
+
+        await ensurePeerConnection(peerId);
+      }
+
+      for (const pid of peers) {
+        const peerId = Number(pid);
+        if (!Number.isFinite(peerId) || peerId <= 0) continue;
+        if (peerId === meId) continue;
+        if (shouldInitiate(peerId)) {
+          setTimeout(() => { sendOffer(peerId).catch((e) => console.warn('[VOICE] sendOffer failed', e)); }, 40);
+        }
+      }
+
+      const allIds = [meId, ...peers.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)];
+      for (const id of allIds) {
+        if (!id) continue;
+        resolveName(id).then((n) => {
+          nameCache.set(id, n);
+          updateVoiceUiPeers();
+        }).catch(() => {});
+      }
+
+      updateVoiceUiPeers();
+      return;
+    }
+
+    if (t === 'voice_peer_joined') {
+      const ch = Number(msg.channel_id);
+      const uid = Number(msg.user_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      if (!Number.isFinite(uid) || uid <= 0) return;
+      if (uid === meId) return;
+
+      await ensurePeerConnection(uid);
+
+      if (shouldInitiate(uid)) {
+        setTimeout(() => { sendOffer(uid).catch((e) => console.warn('[VOICE] sendOffer failed', e)); }, 40);
+      }
+
+      resolveName(uid).then((n) => {
+        nameCache.set(uid, n);
+        updateVoiceUiPeers();
+      }).catch(() => {});
+
+      updateVoiceUiPeers();
+      return;
+    }
+
+    if (t === 'voice_peer_left') {
+      const ch = Number(msg.channel_id);
+      const uid = Number(msg.user_id);
+      if (!inChannelId || ch !== inChannelId) return;
+
+      closePeer(uid);
+      updateVoiceUiPeers();
+      return;
+    }
+
+    if (t === 'voice_left') {
+      localLeaveCleanup();
+      return;
+    }
+
+    if (t === 'rtc_offer') {
+      const ch = Number(msg.channel_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      const from = Number(msg.from_user_id);
+      const sdp = msg.sdp;
+      if (!from || !sdp) return;
+
+      await handleOffer(from, sdp);
+      return;
+    }
+
+    if (t === 'rtc_answer') {
+      const ch = Number(msg.channel_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      const from = Number(msg.from_user_id);
+      const sdp = msg.sdp;
+      if (!from || !sdp) return;
+
+      await handleAnswer(from, sdp);
+      return;
+    }
+
+    if (t === 'rtc_candidate') {
+      const ch = Number(msg.channel_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      const from = Number(msg.from_user_id);
+      const cand = msg.candidate;
+      if (!from || !cand) return;
+
+      await handleCandidate(from, cand);
+      return;
+    }
+
+    if (t === 'rtc_negotiate') {
+      const ch = Number(msg.channel_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      const from = Number(msg.from_user_id);
+      if (!from) return;
+      if (shouldInitiate(from)) {
+        setTimeout(() => { sendOffer(from).catch((e) => console.warn('[SS] renegotiate sendOffer failed', e)); }, 20);
+      }
+      return;
+    }
+
+
+    if (t === 'voice_ss_started') {
+      const ch = Number(msg.channel_id);
+      const uid = Number(msg.user_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      if (!Number.isFinite(uid) || uid <= 0) return;
+      try { liveSharers.add(uid); } catch (_) {}
+      updateVoiceUiPeers();
+      return;
+    }
+
+    if (t === 'voice_ss_stopped') {
+      const ch = Number(msg.channel_id);
+      const uid = Number(msg.user_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      if (!Number.isFinite(uid) || uid <= 0) return;
+      try { liveSharers.delete(uid); } catch (_) {}
+      if (watchingUserId === uid) {
+        watchingUserId = null;
+        focusedUserId = null;
+        try { if (remoteShareUserId === uid) hideRemoteScreenShare(); } catch (_) {}
+        if (isVoiceViewOpen()) {
+          if (isSharingScreen && screenStream) stageShowSelfShare();
+          else stageShowEmpty();
+        }
+      }
+
+      updateVoiceUiPeers();
+      return;
+    }
+
+    if (t === 'voice_ss_watch') {
+      const ch = Number(msg.channel_id);
+      const from = Number(msg.from_user_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      if (!Number.isFinite(from) || from <= 0) return;
+      if (isSharingScreen && screenStream && screenVideoTrack) {
+        try { ssWatchers.add(from); } catch (_) {}
+        ensurePeerConnection(from).then(() => {
+          ssAttachToPeer(from).catch(() => {});
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    if (t === 'voice_ss_unwatch') {
+      const ch = Number(msg.channel_id);
+      const from = Number(msg.from_user_id);
+      if (!inChannelId || ch !== inChannelId) return;
+      if (!Number.isFinite(from) || from <= 0) return;
+
+      try { ssWatchers.delete(from); } catch (_) {}
+      ssDetachFromPeer(from).catch(() => {});
+      return;
+    }
+
+    if (t === 'error') {
+      const code = (msg && msg.code) ? String(msg.code) : '';
+      const ch = Number(msg && msg.channel_id);
+
+      if (!Number.isFinite(ch) || ch <= 0) return;
+      if (inChannelId && ch !== inChannelId && ch !== lastJoinAttemptChannelId) return;
+      if (!inChannelId && lastJoinAttemptChannelId && ch !== lastJoinAttemptChannelId) return;
+
+      console.warn('[VOICE] server error', msg);
+
+      if (code === 'not_voice_channel') setStatus('Это не голосовой канал');
+      else if (code === 'not_member') setStatus('Нет доступа к голосовому каналу');
+      else if (code === 'not_in_voice') setStatus('Вы не в голосовом канале');
+      else setStatus('Ошибка голосового канала');
+    }
+  }
+
+  if (btnMute) {
+    btnMute.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setMuted(!muted);
+    });
+  }
+
+  if (btnDeafen) {
+    btnDeafen.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDeafened(!deafened);
+    });
+  }
+
+  if (btnLeave) {
+    btnLeave.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      leave().catch(() => {});
+    });
+  }
+
+  function openVoiceViewForChannel() {
+    if (!inChannelId) return;
+    try {
+      document.dispatchEvent(new CustomEvent('lb:openVoiceView', {
+        detail: {
+          channel_id: inChannelId,
+          channel_name: inChannelName || 'Voice'
+        }
+      }));
+    } catch (_) {}
+  }
+
+  function openVoiceViewAndShowStage() {
+    if (!inChannelId) return;
+
+    openVoiceViewForChannel();
+    setTimeout(() => {
+      if (remoteShareStream && remoteShareUserId) {
+        stageShowRemoteShare().catch(() => {});
+      } else if (isSharingScreen && screenStream) {
+        stageShowSelfShare();
+      } else {
+        stageShowEmpty();
+      }
+    }, 60);
+  }
+
+  if (btnStreamWatch) {
+    btnStreamWatch.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openVoiceViewAndShowStage();
+    });
+  }
+
+  if (voiceStageWatchBtn) {
+    voiceStageWatchBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openVoiceViewAndShowStage();
+    });
+  }
+
+  try {
+    const main = elVoiceBar?.querySelector?.('.voicebar-main') || elVoiceBar;
+    if (main) {
+      main.addEventListener('click', (e) => {
+        if (e?.target?.closest?.('.voicebar-actions')) return;
+        openVoiceViewAndShowStage();
+      });
+    }
+  } catch (_) {}
+
+  if (vcMuteBtn) {
+    vcMuteBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setMuted(!muted);
+    });
+  }
+  if (vcDeafenBtn) {
+    vcDeafenBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDeafened(!deafened);
+    });
+  }
+  if (vcShareBtn) {
+    vcShareBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openScreenShareModal();
+    });
+  }
+  if (vcLeaveBtn) {
+    vcLeaveBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      leave().catch(() => {});
+    });
+  }
+
+  if (voicePipBtn) {
+    voicePipBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const v = voiceStageVideo;
+      if (!v || !v.srcObject) return;
+      try {
+        if (document.pictureInPictureElement) {
+          await document.exitPictureInPicture();
+        } else if (v.requestPictureInPicture) {
+          await v.requestPictureInPicture();
+        }
+      } catch (_) {}
+    });
+  }
+
+  if (voiceFullscreenBtn) {
+    voiceFullscreenBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const el = voiceStage || voiceStageVideo;
+      if (!el) return;
+      try {
+        if (document.fullscreenElement) document.exitFullscreen?.();
+        else el.requestFullscreen?.();
+      } catch (_) {}
+    });
+  }
+
+  function openScreenShareModal() {
+    if (!ssOverlay) return;
+    if (isSharingScreen) {
+      if (ssStartBtn) ssStartBtn.textContent = 'Остановить';
+      if (ssCancelBtn) ssCancelBtn.textContent = 'Закрыть';
+      if (ssPreviewHint) ssPreviewHint.textContent = 'Идёт демонстрация. Можно поменять качество или остановить.';
+      if (screenStream) ssSetPreview(screenStream);
+      else ssSetPreview(null);
+    } else {
+      if (ssStartBtn) ssStartBtn.textContent = 'Начать';
+      if (ssCancelBtn) ssCancelBtn.textContent = 'Отмена';
+      if (ssPreviewHint) ssPreviewHint.textContent = 'Нажми «Начать», затем выбери экран/окно/вкладку.';
+      ssClearPreview();
+    }
+
+    ssOverlayVisible(true);
+  }
+
+  if (btnShare) {
+    btnShare.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openScreenShareModal();
+    });
+  }
+
+  try {
+    const tabs = ssOverlay?.querySelectorAll?.('.ss-tab') || [];
+    tabs.forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        tabs.forEach((x) => x.classList.remove('active'));
+        b.classList.add('active');
+        ssSelectedSurface = (b.dataset.surface || 'monitor').toString();
+      });
+    });
+  } catch (_) {}
+
+  try {
+    const radios = ssOverlay?.querySelectorAll?.('input[name="ssRes"], input[name="ssFps"], #ssAudioChk') || [];
+    radios.forEach((el) => {
+      el.addEventListener('change', () => {
+        ssApplyQualityIfSharing().catch(() => {});
+      });
+    });
+  } catch (_) {}
+
+  function closeSsModal() {
+    ssOverlayVisible(false);
+  }
+
+  if (ssCloseBtn) {
+    ssCloseBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSsModal();
+    });
+  }
+  if (ssCancelBtn) {
+    ssCancelBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSsModal();
+    });
+  }
+
+  if (ssOverlay) {
+    ssOverlay.addEventListener('click', (e) => {
+      if (e.target === ssOverlay) {
+        closeSsModal();
+      }
+    });
+  }
+
+  if (ssStartBtn) {
+    ssStartBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (isSharingScreen) {
+        stopScreenShare().catch(() => {});
+        closeSsModal();
+      } else {
+        startScreenShare().catch(() => {});
+      }
+    });
+  }
+
+  if (ssPanelHideBtn) {
+    ssPanelHideBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      hideRemoteViewerPanel();
+    });
+  }
+  if (ssPanelFullscreenBtn && ssRemoteVideo) {
+    ssPanelFullscreenBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        const el = ssRemoteVideo;
+        if (el.requestFullscreen) el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      } catch (_) {}
+    });
+  }
+
+  window.addEventListener('beforeunload', () => {
+    try { if (isSharingScreen) stopScreenShare().catch(() => {}); } catch (_) {}
+    try { if (inChannelId) wsManager.send({ type: 'voice_leave', data: { channel_id: inChannelId } }); } catch (_) {}
+  });
+
+  const prev = window.onVoiceEvent;
+  window.onVoiceEvent = (msg) => {
+    try { if (typeof prev === 'function') prev(msg); } catch (_) {}
+    onVoiceEvent(msg).catch((e) => console.warn('[VOICE] onVoiceEvent error', e));
+  };
+
+  window.lbVoice = {
+    join,
+    leave,
+    toggle: join,
+    setMuted,
+    setDeafened,
+    getState: () => ({
+      channel_id: inChannelId,
+      channel_name: inChannelName,
+      muted,
+      deafened,
+      peers: [...pcs.keys()]
+    })
+  };
+
+  setBarVisible(false);
+  updateVoiceStageLetter();
+  stageShowEmpty();
+  updateStageWatchButtons();
+  updateVoiceViewHeader();
+}
