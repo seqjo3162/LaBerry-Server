@@ -25,7 +25,7 @@ const THUMB_MAX_H: u32 = 800;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/:file_id/link", get(get_file_link))
-        .route("/:file_id/preview", get(get_preview))
+.route("/:file_id/preview", get(get_preview))
         .route("/:file_id/archive", get(get_archive))
         .route("/:file_id/raw", get(get_file_raw))
         .route("/", post(upload_file))
@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Deserialize, Default)]
 pub(crate) struct DlQuery {
+    /// short-lived signed token for downloads/previews without Authorization header
     dl: Option<String>,
 }
 
@@ -47,6 +48,7 @@ fn inline_safe(mime: &str) -> bool {
     if m.starts_with("video/") || m.starts_with("audio/") {
         return true;
     }
+    // allow plain text previews (not html)
     if m == "text/plain" {
         return true;
     }
@@ -114,6 +116,7 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
 
     let kind = chat.kind.unwrap_or_else(|| "text".to_string());
 
+    // For voice chats: allow only while user is actually in this voice channel
     if kind == "voice" {
         if st.hub.voice_get_user_channel(user_id) != Some(chat_id) {
             return false;
@@ -180,8 +183,10 @@ async fn ensure_thumbnail(original_path: &FsPath, stored_filename: &str, mime_ty
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    // CPU-heavy decode/resize/encode -> blocking
     let orig = original_path.to_path_buf();
     let out_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, StatusCode> {
+        // Quick header check: dimensions + megapixels limit
         let (w, h) = image::image_dimensions(&orig)
             .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
         let pixels = (w as u64).saturating_mul(h as u64);
@@ -210,6 +215,8 @@ async fn ensure_thumbnail(original_path: &FsPath, stored_filename: &str, mime_ty
 }
 
 fn sanitize_filename(input: &str) -> String {
+    // Минимальная безопасная санация для Content-Disposition.
+    // Оставляем ASCII буквы/цифры и ._- ; всё остальное заменяем на '_'.
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         let ok = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
@@ -314,13 +321,17 @@ async fn upload_file(
             return StatusCode::BAD_REQUEST.into_response();
         }
     };
+    // Проверка доступа: приватный чат -> chat_participants; серверный канал -> server_members
+    // + voice chat: only while user is in this voice channel
     if !can_access_chat_by_user_id(&st, me.id, chat_id).await {
         let _ = fs::remove_file(&path).await;
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    // Защита от DoS картинками: ограничиваем мегапиксели + делаем превью.
     if let Err(code) = ensure_thumbnail(&path, &stored_filename, &mime_type).await {
         let _ = fs::remove_file(&path).await;
+        // если уже успели сделать thumb (не должно) - удалим тоже
         let _ = fs::remove_file(thumb_path_for(&stored_filename)).await;
         return code.into_response();
     }
@@ -341,7 +352,7 @@ async fn upload_file(
     .bind(file_size)
     .bind(&mime_type)
     .bind(path.to_string_lossy().to_string())
-    .bind(me.id) 
+    .bind(me.id)  // Исправлено: было me.user.id, теперь me.id
     .bind(chat_id)
     .bind(&created_at)
     .execute(&st.db)
@@ -387,6 +398,7 @@ async fn get_file_link(
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    // include current token_version to invalidate on logout/password change
     let tv: i64 = sqlx::query_scalar("SELECT token_version FROM users WHERE id = ? LIMIT 1")
         .bind(me.id)
         .fetch_optional(&st.db)
@@ -535,6 +547,8 @@ async fn serve_file_with_range(
 
     let accept_ranges = (header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     let nosniff = (header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
+
+    // Range: bytes=start-end
     let mut start: u64 = 0;
     let mut end: u64 = total.saturating_sub(1);
     let mut partial = false;
@@ -551,6 +565,7 @@ async fn serve_file_with_range(
                         partial = true;
                     }
                 } else if !b.is_empty() {
+                    // suffix range: bytes=-N
                     if let Ok(v) = b.parse::<u64>() {
                         if v > 0 {
                             let v = v.min(total);
@@ -681,6 +696,7 @@ async fn get_archive(
         return StatusCode::NOT_FOUND.into_response();
     };
 
+    // Access check (DM -> chat_participants; server chat -> server_members)
     #[derive(sqlx::FromRow)]
     struct ChatInfo {
         server_id: Option<i64>,
@@ -759,7 +775,10 @@ async fn get_archive(
                 continue;
             }
 
+            // normalize separators for the UI tree
             p = p.replace(bs, "/");
+
+            // prevent pathological names
             if p.len() > 512 {
                 p.truncate(512);
             }
@@ -827,6 +846,7 @@ pub(crate) async fn get_preview(
 
     let thumb_path = thumb_path_for(&f.filename);
     if fs::metadata(&thumb_path).await.is_err() {
+        // legacy / missing thumb -> best-effort generate on demand
         let orig = PathBuf::from(&f.storage_path);
         let _ = ensure_thumbnail(&orig, &f.filename, &f.mime_type).await;
     }

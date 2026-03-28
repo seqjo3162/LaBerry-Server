@@ -78,6 +78,7 @@ async fn resolve_and_validate_host(host: &str, port: u16) -> Result<(), StatusCo
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    // If host is already an IP literal, validate it directly
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_disallowed_ip(ip) {
             return Err(StatusCode::BAD_REQUEST);
@@ -242,6 +243,7 @@ async fn get_preview(
         .to_ascii_lowercase();
 
     if !(ct.starts_with("text/html") || ct.starts_with("application/xhtml+xml") || ct.is_empty()) {
+        // not HTML -> no preview
         let body = axum::Json(PreviewResponse {
             url: url_str.clone(),
             title: host.to_string(),

@@ -76,8 +76,10 @@ fn turn_rest_credential(secret: &str, username: &str) -> String {
 }
 
 async fn ice(State(_st): State<AppState>, me: AuthUser) -> impl IntoResponse {
+    // NOTE: `me` is used to ensure auth (and to produce per-user TURN usernames when needed).
     let mut out: Vec<IceServer> = Vec::new();
 
+    // STUN
     let mut stun_urls = env_csv("LB_STUN_URLS");
     if stun_urls.is_empty() {
         stun_urls = default_stun_urls();
@@ -90,6 +92,7 @@ async fn ice(State(_st): State<AppState>, me: AuthUser) -> impl IntoResponse {
         });
     }
 
+    // TURN
     if !env_bool("LB_TURN_DISABLE") {
         let turn_urls = env_csv("LB_TURN_URLS");
         let turn_username = std::env::var("LB_TURN_USERNAME").ok();
@@ -98,9 +101,14 @@ async fn ice(State(_st): State<AppState>, me: AuthUser) -> impl IntoResponse {
         let ttl_sec = env_i64("LB_TURN_TTL_SEC", 3600).max(60);
 
         if !turn_urls.is_empty() {
+            // Priority:
+            // 1) TURN REST API (secret-based)
+            // 2) static username/password
+            // 3) no credentials (not recommended, but allow if user wants it)
             let (u, c) = if let Some(secret) = turn_secret {
                 let now = chrono::Utc::now().timestamp();
                 let exp = now + ttl_sec;
+                // coturn expects "timestamp:userid" style username (timestamp alone is ok).
                 let username = format!("{}:{}", exp, me.id);
                 let credential = turn_rest_credential(&secret, &username);
                 (Some(username), Some(credential))

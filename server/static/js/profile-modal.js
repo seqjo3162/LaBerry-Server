@@ -1,4 +1,4 @@
-import { api as defaultApi } from "./api.js?v=7";
+import { api as defaultApi } from "./api.js?v=10";
 import { openAvatarCropper } from "./avatar-cropper.js?v=7";
 
 export function initProfileModal({ api, getMe } = {}) {
@@ -19,6 +19,12 @@ export function initProfileModal({ api, getMe } = {}) {
     }
     const letter = String(usernameFallback || '?').trim().charAt(0).toUpperCase() || '?';
     return escapeHtml(letter);
+  }
+
+  function isAnimatedGifFile(file) {
+    const type = (file?.type || '').toString().toLowerCase();
+    const name = (file?.name || '').toString().toLowerCase();
+    return type === 'image/gif' || name.endsWith('.gif');
   }
 
   let overlay = document.getElementById('profileOverlay');
@@ -90,50 +96,61 @@ export function initProfileModal({ api, getMe } = {}) {
       titleEl.textContent = display;
 
       bodyEl.innerHTML = `
-        <div class="profile-head">
-          <div class="profile-avatar" id="profileAvatar">${avatarInnerHtml(avatarFileId, display)}</div>
-          <div class="profile-meta">
-            <div class="profile-name">${escapeHtml(display)}</div>
-            <div class="profile-username">@${escapeHtml(username)}</div>
-          </div>
-        </div>
-
-        ${isMe ? `
-          <div class="profile-section">
-            <div class="profile-label">Аватар</div>
-            <div class="profile-avatar-row">
-              <input class="file-input" id="profileAvatarFile" type="file" accept="image/*" />
-              <button type="button" class="btn" id="profileAvatarPickBtn">Изменить</button>
-              <span class="muted" id="profileAvatarHint" style="display:none;">Готово</span>
+        <div class="profile-shell">
+          <div class="profile-head">
+            <div class="profile-avatar-wrap">
+              <div class="profile-avatar" id="profileAvatar">${avatarInnerHtml(avatarFileId, display)}</div>
+              <div class="profile-status-pill">${statusText ? escapeHtml(statusText) : 'Без статуса'}</div>
             </div>
-            <div class="muted" style="margin-top:6px; font-size:12px;">PNG/JPG/WEBP/GIF до 12MB. После выбора откроется обрезка под круг.</div>
+            <div class="profile-meta">
+              <div class="profile-name-row">
+                <div class="profile-name">${escapeHtml(display)}</div>
+                ${isMe ? '<span class="profile-chip">Это вы</span>' : ''}
+              </div>
+              <div class="profile-username">@${escapeHtml(username)}</div>
+              <div class="profile-id">ID ${escapeHtml(uid)}</div>
+            </div>
           </div>
-        ` : ''}
 
-        <div class="profile-section">
-          <div class="profile-label">Статус</div>
-          ${isMe ? `
-            <input class="inp" id="profileStatusInp" placeholder="Например: занят" value="${escapeAttr(statusText)}" />
-          ` : `
-            <div class="profile-text">${statusText ? escapeHtml(statusText) : '<span class="muted">—</span>'}</div>
-          `}
-        </div>
+          <div class="profile-grid">
+            ${isMe ? `
+              <div class="profile-card">
+                <div class="profile-label">Аватар</div>
+                <div class="profile-avatar-row">
+                  <input class="file-input" id="profileAvatarFile" type="file" accept="image/*" />
+                  <button type="button" class="btn" id="profileAvatarPickBtn">Изменить</button>
+                  <span class="muted" id="profileAvatarHint" style="display:none;">Готово</span>
+                </div>
+                <div class="muted" style="margin-top:8px; font-size:12px;">PNG/JPG/WEBP/GIF до 12MB. GIF загружается без обрезки, чтобы сохранить анимацию.</div>
+              </div>
+            ` : ''}
 
-        <div class="profile-section">
-          <div class="profile-label">О себе</div>
-          ${isMe ? `
-            <textarea class="inp" id="profileAboutInp" rows="4" placeholder="Коротко о себе">${escapeHtml(about)}</textarea>
-          ` : `
-            <div class="profile-text">${about ? escapeHtml(about) : '<span class="muted">—</span>'}</div>
-          `}
-        </div>
+            <div class="profile-card">
+              <div class="profile-label">Статус</div>
+              ${isMe ? `
+                <input class="inp" id="profileStatusInp" placeholder="Например: занят" value="${escapeAttr(statusText)}" />
+              ` : `
+                <div class="profile-text${statusText ? '' : ' empty'}">${statusText ? escapeHtml(statusText) : 'Пусто'}</div>
+              `}
+            </div>
 
-        ${isMe ? `
-          <div class="profile-actions">
-            <button type="button" class="btn btn-primary" id="profileSaveBtn">Сохранить</button>
-            <div class="muted" id="profileSaveHint" style="display:none;">Сохранено</div>
+            <div class="profile-card">
+              <div class="profile-label">О себе</div>
+              ${isMe ? `
+                <textarea class="inp" id="profileAboutInp" rows="4" placeholder="Коротко о себе">${escapeHtml(about)}</textarea>
+              ` : `
+                <div class="profile-text${about ? '' : ' empty'}">${about ? escapeHtml(about) : 'Пользователь ничего не рассказал о себе'}</div>
+              `}
+            </div>
           </div>
-        ` : ''}
+
+          ${isMe ? `
+            <div class="profile-actions">
+              <div class="muted" id="profileSaveHint" style="display:none;">Сохранено</div>
+              <button type="button" class="btn btn-primary" id="profileSaveBtn">Сохранить</button>
+            </div>
+          ` : ''}
+        </div>
       `;
 
       if (isMe) {
@@ -142,10 +159,13 @@ export function initProfileModal({ api, getMe } = {}) {
         const avatarHint = bodyEl.querySelector('#profileAvatarHint');
         const avatarBox = bodyEl.querySelector('#profileAvatar');
 
-        const uploadAvatarBlob = async (blob) => {
-          if (!blob) return;
+        const uploadAvatarFile = async (fileOrBlob, fallbackName = 'avatar.png', fallbackType = 'image/png') => {
+          if (!fileOrBlob) return;
           const fd = new FormData();
-          fd.append('file', blob, 'avatar.png');
+          const safeName = (fileOrBlob?.name || fallbackName || 'avatar.png').toString();
+          const safeType = (fileOrBlob?.type || fallbackType || 'image/png').toString();
+          const payload = fileOrBlob instanceof File ? fileOrBlob : new File([fileOrBlob], safeName, { type: safeType });
+          fd.append('file', payload, safeName);
 
           const uploaded = await apiFn('/api/profile-files', { method: 'POST', body: fd });
           const fileId = Number(uploaded?.id);
@@ -181,9 +201,13 @@ export function initProfileModal({ api, getMe } = {}) {
           if (!f) return;
           if (pickBtn) pickBtn.disabled = true;
           try {
+            if (isAnimatedGifFile(f)) {
+              await uploadAvatarFile(f, f.name || 'avatar.gif', f.type || 'image/gif');
+              return;
+            }
             const blob = await openAvatarCropper(f, { title: 'Настройка аватара' });
             if (!blob) return;
-            await uploadAvatarBlob(blob);
+            await uploadAvatarFile(blob, 'avatar.png', 'image/png');
           } catch (e) {
             console.warn('[PROFILE] avatar upload failed', e);
             alert('Не удалось обновить аватар');
@@ -231,6 +255,7 @@ export function initProfileModal({ api, getMe } = {}) {
     open();
   });
 
+  // self open helper
   window.lbOpenMyProfile = () => {
     const me = getMeFn() || {};
     if (me?.id) {

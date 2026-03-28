@@ -6,9 +6,13 @@ use crate::auth;
 
 static BUCKETS: Lazy<DashMap<String, VecDeque<i64>>> = Lazy::new(DashMap::new);
 
+/// Simple in-memory sliding-window rate limiter.
+/// Returns true if allowed.
 pub fn allow(key: &str, max: usize, window_secs: i64) -> bool {
     let now = auth::now_unix();
     let mut entry = BUCKETS.entry(key.to_string()).or_insert_with(VecDeque::new);
+
+    // prune
     while let Some(&t) = entry.front() {
         if now.saturating_sub(t) > window_secs {
             entry.pop_front();
@@ -26,6 +30,7 @@ pub fn allow(key: &str, max: usize, window_secs: i64) -> bool {
 }
 
 pub fn extract_ip(headers: &axum::http::HeaderMap) -> Option<String> {
+    // Prefer first IP from X-Forwarded-For
     if let Some(v) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
         if let Some(first) = v.split(',').next() {
             let ip = first.trim();

@@ -1,4 +1,4 @@
-import { api } from "./api.js?v=7";
+import { api } from "./api.js?v=10";
 
 let backdropEl = null;
 let menuEl = null;
@@ -55,6 +55,7 @@ function clamp(n, a, b) {
 function placeMenuAt(x, y) {
   if (!menuEl) return;
 
+  // show first to measure
   menuEl.style.left = "0px";
   menuEl.style.top = "0px";
   menuEl.hidden = false;
@@ -62,8 +63,10 @@ function placeMenuAt(x, y) {
   const pad = 8;
   const w = menuEl.offsetWidth || 240;
   const h = menuEl.offsetHeight || 180;
+
   const maxX = window.innerWidth - w - pad;
   const maxY = window.innerHeight - h - pad;
+
   const px = clamp(x, pad, Math.max(pad, maxX));
   const py = clamp(y, pad, Math.max(pad, maxY));
 
@@ -77,6 +80,7 @@ export function showUserMenu(opts) {
   const userId = Number(opts?.userId);
   const username = (opts?.username || "Unknown").toString();
   const anchorEl = opts?.anchorEl || null;
+
   const allowDm = opts?.allowDm !== false;
   const allowAddFriend = opts?.allowAddFriend !== false;
   const allowRemoveFriend = !!opts?.allowRemoveFriend;
@@ -96,6 +100,7 @@ export function showUserMenu(opts) {
   }
 
   items.push({ key: "profile", label: "👤 Профиль" });
+
   items.push({ key: "sep" });
   items.push({ key: "copy", label: "📋 Копировать ID" });
 

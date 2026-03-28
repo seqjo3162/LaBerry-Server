@@ -1,1 +1,3 @@
-export function initRouter() {}
+export function initRouter() {
+  // пока пусто, но файл нужен для import
+}

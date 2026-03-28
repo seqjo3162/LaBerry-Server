@@ -28,14 +28,26 @@ pub struct UserSettings {
     pub show_header_status: bool,
     pub compact_mode: bool,
     pub show_timestamps: bool,
+
+    // values: 0.8..1.3
     pub font_scale: f32,
+
+    // connections shown on profile (Discord-like)
     pub connections: Vec<UserConnection>,
+
+    // discord-like privacy
+    // values: everyone | friends_of_friends | server_members | none
     pub friend_requests: String,
+    // values: friends_only | friends_and_server | everyone
     pub dms: String,
+
+    // notifications
     pub notify_desktop: bool,
     pub notify_sounds: bool,
     pub notify_dms: bool,
     pub notify_mentions: bool,
+
+    // misc
     pub developer_mode: bool,
 }
 
@@ -82,6 +94,7 @@ fn sanitize_theme(s: &str) -> String {
 }
 
 fn sanitize_locale(s: &str) -> String {
+    // пока только ru/en, остальное = ru
     match s.to_ascii_lowercase().as_str() {
         "en" => "en".to_string(),
         _ => "ru".to_string(),
@@ -132,6 +145,7 @@ fn sanitize_connection_url(url: &str) -> Option<String> {
     if out.len() > 2048 {
         out.truncate(2048);
     }
+    // basic sanity: must have scheme and at least one dot or localhost
     if !(out.starts_with("http://") || out.starts_with("https://")) {
         return None;
     }
@@ -281,6 +295,7 @@ fn sanitize_email(s: &str) -> Option<String> {
     if e.len() > 254 {
         return None;
     }
+    // very basic sanity (UI can do stricter)
     if !e.contains('@') || !e.contains('.') {
         return None;
     }
@@ -290,12 +305,14 @@ fn sanitize_email(s: &str) -> Option<String> {
 #[derive(Deserialize)]
 pub struct RequestEmailCodeBody {
     pub email: String,
+    /// verify_email | change_email
     pub purpose: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct RequestEmailCodeResp {
     pub ok: bool,
+    /// stub: in prod should be omitted
     pub debug_code: Option<String>,
     pub expires_in_sec: i64,
 }
@@ -303,6 +320,7 @@ pub struct RequestEmailCodeResp {
 #[derive(Deserialize)]
 pub struct ConfirmEmailCodeBody {
     pub code: String,
+    /// verify_email | change_email
     pub purpose: Option<String>,
 }
 
@@ -435,6 +453,7 @@ async fn change_password(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
+    // bump token_version -> logout all sessions
     let q = sqlx::query(
         r#"
         UPDATE users
@@ -476,6 +495,7 @@ async fn my_status(
         return (StatusCode::OK, Json(MyStatus { status, is_online, updated_at })).into_response();
     }
 
+    // ensure row exists
     let now = auth::now_iso();
     let _ = sqlx::query(
         "INSERT INTO user_presence(user_id, is_online, status, updated_at) VALUES(?, 0, 'online', ?)",
@@ -567,6 +587,8 @@ async fn update_me(
     Json(body): Json<UpdateMeBody>,
 ) -> impl IntoResponse {
     let db = &st.db;
+
+    // email меняем только через email codes (чтобы фронт мог сделать подтверждение)
     if let Some(email_raw) = body.email {
         let Some(email) = sanitize_email(&email_raw) else {
             return (
@@ -623,6 +645,7 @@ async fn request_email_code(
             .into_response();
     };
 
+    // cannot take someone else's verified email
     let taken = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM users WHERE email = ? AND id != ? LIMIT 1",
     )
@@ -642,15 +665,19 @@ async fn request_email_code(
     }
 
     let purpose = sanitize_email_purpose(body.purpose);
-    let rl_key = format!("email_code:{}:{}", me.id, purpose);
-    if !rate_limit::allow(&rl_key, 5, 3600) {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({"detail":"Too many requests"})),
-        )
-            .into_response();
-    }
 
+
+// rate limit: 5 codes / hour per user+purpose
+let rl_key = format!("email_code:{}:{}", me.id, purpose);
+if !rate_limit::allow(&rl_key, 5, 3600) {
+    return (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({"detail":"Too many requests"})),
+    )
+        .into_response();
+}
+
+    // store pending email always (even for verify_email)
     let q = sqlx::query("UPDATE users SET email_pending = ?, email_verified = 0 WHERE id = ?")
         .bind(&email)
         .bind(me.id)
@@ -660,6 +687,7 @@ async fn request_email_code(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    // invalidate previous codes
     let now = auth::now_unix();
     let now_s = now.to_string();
     let _ = sqlx::query(
@@ -694,18 +722,20 @@ async fn request_email_code(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    let debug = std::env::var("LB_DEBUG_EMAIL_CODES")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false);
+    // STUB: тут должен быть реальный SMTP send.
+    // Пока возвращаем debug_code, чтобы фронт можно было допилить.
+let debug = std::env::var("LB_DEBUG_EMAIL_CODES")
+    .ok()
+    .map(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        v == "1" || v == "true" || v == "yes" || v == "on"
+    })
+    .unwrap_or(false);
 
-    let resp = RequestEmailCodeResp {
-        ok: true,
-        debug_code: if debug { Some(code) } else { None },
-        expires_in_sec: 10 * 60,
+let resp = RequestEmailCodeResp {
+    ok: true,
+    debug_code: if debug { Some(code) } else { None },
+    expires_in_sec: 10 * 60,
 };
     (StatusCode::OK, Json(resp)).into_response()
 }
@@ -726,6 +756,7 @@ async fn confirm_email_code(
     }
     let purpose = sanitize_email_purpose(body.purpose);
 
+// rate limit: 10 attempts / hour per user+purpose
 let rl_key = format!("email_confirm:{}:{}", me.id, purpose);
 if !rate_limit::allow(&rl_key, 10, 3600) {
     return (
@@ -736,6 +767,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
 }
 
 
+// rate limit: 5 codes / hour per user+purpose
 let rl_key = format!("email_code:{}:{}", me.id, purpose);
 if !rate_limit::allow(&rl_key, 5, 3600) {
     return (
@@ -747,6 +779,8 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
     let now = auth::now_unix();
     let now_s = now.to_string();
     let want_hash = auth::sha256_hex(&format!("{}:{}:{}", me.id, &purpose, code));
+
+    // latest unconsumed and unexpired
     let row = sqlx::query(
         r#"
         SELECT id, code_hash, expires_at
@@ -801,12 +835,16 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
         .bind(code_id)
         .execute(db)
         .await;
-    let pending: Option<String> = sqlx::query_scalar("SELECT email_pending FROM users WHERE id = ? LIMIT 1",)
-        .bind(me.id)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
+
+    // apply pending email
+    let pending: Option<String> = sqlx::query_scalar(
+        "SELECT email_pending FROM users WHERE id = ? LIMIT 1",
+    )
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
 
     let Some(pending_email) = pending.and_then(|x| sanitize_email(&x)) else {
         return (
@@ -816,7 +854,10 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
             .into_response();
     };
 
-    let taken = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE email = ? AND id != ? LIMIT 1",)
+    // check again for conflicts
+    let taken = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM users WHERE email = ? AND id != ? LIMIT 1",
+    )
     .bind(&pending_email)
     .bind(me.id)
     .fetch_optional(db)
@@ -832,7 +873,9 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
             .into_response();
     }
 
-    let q = sqlx::query("UPDATE users SET email = ?, email_verified = 1, email_pending = NULL WHERE id = ?",)
+    let q = sqlx::query(
+        "UPDATE users SET email = ?, email_verified = 1, email_pending = NULL WHERE id = ?",
+    )
     .bind(&pending_email)
     .bind(me.id)
     .execute(db)
@@ -1066,10 +1109,15 @@ async fn update_my_profile(
     Json(body): Json<UpdateProfileBody>,
 ) -> impl IntoResponse {
     let db = &st.db;
+
     let existing = get_or_create_profile(db, me.id).await;
+
     let now = auth::now_iso();
+
+    // Preserve existing profile fields when request omits them (None).
     let avatar_file_id = body.avatar_file_id.or(existing.avatar_file_id);
     let banner_file_id = body.banner_file_id.or(existing.banner_file_id);
+
     let accent_color = match body.accent_color {
         Some(v) => sanitize_color(Some(v)),
         None => existing.accent_color.clone(),
@@ -1082,6 +1130,7 @@ async fn update_my_profile(
         Some(v) => sanitize_status_text(Some(v)),
         None => existing.status_text.clone(),
     };
+
     let integrations_json = if let Some(v) = body.integrations {
         let s = serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string());
         if s.len() > 4096 { "{}".to_string() } else { s }
@@ -1089,6 +1138,7 @@ async fn update_my_profile(
         let s = serde_json::to_string(&existing.integrations).unwrap_or_else(|_| "{}".to_string());
         if s.len() > 4096 { "{}".to_string() } else { s }
     };
+
     let q = sqlx::query(
         r#"
         UPDATE user_profile
@@ -1252,11 +1302,13 @@ async fn delete_me(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
+    // revoke sessions
     let _ = sqlx::query("DELETE FROM user_sessions WHERE user_id = ?")
         .bind(me.id)
         .execute(&mut *tx)
         .await;
 
+    // remove friendships + requests
     let _ = sqlx::query("DELETE FROM friendships WHERE user_id = ? OR friend_id = ?")
         .bind(me.id)
         .bind(me.id)
@@ -1269,11 +1321,13 @@ async fn delete_me(
         .execute(&mut *tx)
         .await;
 
+    // leave servers
     let _ = sqlx::query("DELETE FROM server_members WHERE user_id = ?")
         .bind(me.id)
         .execute(&mut *tx)
         .await;
 
+    // anonymize profile
     let new_username = format!("deleted_{}", me.id);
     let new_pwd = format!("deleted:{}", uuid::Uuid::new_v4());
 

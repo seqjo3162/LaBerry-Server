@@ -427,8 +427,10 @@ async fn list_messages(
             reactions: None,
         });
     }
-    
+
     out.reverse();
+
+    // attach reactions summary
     if !out.is_empty() {
         let ids = out.iter().map(|m| m.id).collect::<Vec<_>>();
 

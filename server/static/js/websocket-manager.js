@@ -1,4 +1,6 @@
 console.log('[WS] websocket-manager loaded (v2026-02-18)');
+
+// NOTE: do NOT log full tokens/URLs (tokens in query are sensitive).
 function _lbDecodeJwtPayload(token) {
     try {
         const parts = String(token || '').split('.');
@@ -15,10 +17,12 @@ function _lbDecodeJwtPayload(token) {
 function _lbIsJwtExpired(token, skewSec = 15) {
     const p = _lbDecodeJwtPayload(token);
     const exp = p && typeof p.exp === 'number' ? p.exp : null;
-    if (!exp) return false;
+    if (!exp) return false; // can't determine -> don't block
     const nowSec = Math.floor(Date.now() / 1000);
     return exp <= (nowSec + skewSec);
 }
+
+// /static/js/websocket-manager.js
 
 class WebSocketManager {
     constructor() {
@@ -32,6 +36,8 @@ class WebSocketManager {
         this.connectionId = 0;
         this.pendingMessages = [];
         this.isAuthenticated = false;
+        
+        // Статистика для отладки
         this.stats = {
             created: 0,
             connected: 0,
@@ -39,10 +45,12 @@ class WebSocketManager {
         };
     }
     
+    // Основной метод подключения с защитой от гонки
     async connect(token) {
         this.stats.created++;
         const currentConnectionId = ++this.connectionId;
 
+        // stop immediately if token is missing/expired (prevents spam reconnect + ExpiredSignature logs)
         if (!token) {
             console.warn(`[WS ${currentConnectionId}] No token, aborting`);
             return;
@@ -56,11 +64,13 @@ class WebSocketManager {
         
         console.log(`[WS ${currentConnectionId}] Connect requested`);
         
+        // Если страница выгружается - не подключаемся
         if (this.isDisconnecting) {
             console.log(`[WS ${currentConnectionId}] Page is unloading, skipping connection`);
             return;
         }
         
+        // Если уже подключаемся - ждем
         if (this.isConnecting) {
             console.log(`[WS ${currentConnectionId}] Already connecting, waiting...`);
             await new Promise(resolve => setTimeout(resolve, 100));
@@ -86,6 +96,7 @@ class WebSocketManager {
     }
     
     async _connectInternal(token, connectionId) {
+        // Закрываем предыдущее соединение
         if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
             console.log(`[WS ${connectionId}] Closing previous connection`);
             this.ws.onclose = null;
@@ -94,6 +105,7 @@ class WebSocketManager {
         }
         
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        // Всегда подключаемся к текущему хосту (чтобы работало с доменом/проксированием)
         const host = window.location.host;
         const url = `${protocol}//${host}/ws`;
         const safeUrl = `${protocol}//${host}/ws`;
@@ -109,6 +121,7 @@ class WebSocketManager {
             ws.onopen = () => {
                 clearTimeout(timeout);
                 
+                // Проверяем, не устарело ли соединение
                 if (connectionId !== this.connectionId) {
                     console.log(`[WS ${connectionId}] Stale connection, closing`);
                     ws.close(1000, 'Stale connection');
@@ -119,12 +132,16 @@ class WebSocketManager {
                 console.log(`[WS ${connectionId}] ✅ Connected`);
                 this.ws = ws;
                 this.reconnectAttempts = 0;
+                
+                // Настраиваем обработчики
                 this._setupHandlers(connectionId);
                 
+                // Authenticate (token sent as WS message, avoids URL log exposure)
                 try {
                     ws.send(JSON.stringify({ type: 'auth', token }));
                 } catch (_) {}
 
+                // Запускаем ping
                 this._startPing();
                 
                 resolve();
@@ -163,10 +180,12 @@ class WebSocketManager {
     }
     
     _handleMessage(data) {
+        // Обработка welcome-сообщения
         if (data.type === 'connected') {
             console.log(`[WS] ✅ Connection established, connection_id: ${data.connection_id}, user_id: ${data.user_id}`);
             this.isAuthenticated = true;
             
+            // Отправляем все ожидающие сообщения
             if (this.pendingMessages.length > 0) {
                 console.log(`[WS] Sending ${this.pendingMessages.length} pending messages`);
                 this.pendingMessages.forEach(msg => {
@@ -177,35 +196,55 @@ class WebSocketManager {
             return;
         }
         
+        // Обработка pong (ответ на наш ping)
         if (data.type === 'pong') {
             console.log(`[WS] Received pong, latency: ${Date.now() - data.t}ms`);
             return;
         }
+
+        if (data.type === 'force_logout' || data.type === 'token_invalidated') {
+            console.warn('[WS] Session ended:', data.reason || data.code || data.type);
+            try { localStorage.removeItem('auth_token'); } catch (_) {}
+            try { localStorage.removeItem('refresh_token'); } catch (_) {}
+            this.disconnect('Session ended');
+            if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+                window.location.href = '/';
+            }
+            return;
+        }
         
+        // Обработка takeover уведомления
         if (data.type === 'connection_taken_over') {
             console.log(`[WS] Connection taken over by new connection ${data.new_connection_id}`);
             this.disconnect('Connection taken over');
             return;
         }
         
+        // Обработка join подтверждения
         if (data.type === 'joined') {
             console.log(`[WS] Joined room:`, data.room);
+            // Здесь нужно вызвать колбэк для UI
             if (window.onChatJoined) {
                 window.onChatJoined(data);
             }
             return;
         }
         
+        // Обработка обычных сообщений + событий чата
         if (data.type === 'message' || data.type === 'chat_message' || data.type === 'reaction' || data.type === 'message_deleted') {
             console.log(`[WS] Message received:`, data);
+            // Здесь нужно вызвать колбэк для UI
             if (window.onChatMessage) {
                 window.onChatMessage(data);
             }
             return;
         }
         
+        // Обработка ошибок
         if (data.type === 'error') {
             console.error(`[WS] Server error: ${data.code}`, data);
+
+            // Forward to optional handlers (voice/chat may need to react on errors)
             if (window.onWsError) {
                 try { window.onWsError(data); } catch (e) { console.error('[WS] onWsError error', e); }
             }
@@ -218,8 +257,10 @@ class WebSocketManager {
             return;
         }
         
+        // Обработка ping от сервера
         if (data.type === 'ping') {
             console.log('[WS] Received ping from server');
+            // Отвечаем pong
             this.send({
                 type: 'pong',
                 t: Date.now()
@@ -227,6 +268,7 @@ class WebSocketManager {
             return;
         }
         
+        // DM call events
         if (data && typeof data.type === 'string' && data.type.startsWith('dm_call_')) {
             if (window.onDmCallEvent) {
                 try { window.onDmCallEvent(data); } catch (e) { console.error('[WS] onDmCallEvent error', e); }
@@ -238,6 +280,7 @@ class WebSocketManager {
             return;
         }
 
+        // Voice/WebRTC events
         if (data && typeof data.type === 'string' && (data.type.startsWith('voice_') || data.type.startsWith('rtc_'))) {
             if (window.onVoiceEvent) {
                 try { window.onVoiceEvent(data); } catch (e) { console.error('[WS] onVoiceEvent error', e); }
@@ -247,6 +290,7 @@ class WebSocketManager {
             return;
         }
 
+        // Global fallback hook (for future features)
         if (window.onWsMessage) {
             try { window.onWsMessage(data); } catch (e) { console.error('[WS] onWsMessage error', e); }
             return;
@@ -261,13 +305,16 @@ class WebSocketManager {
             return;
         }
         
+        // Сбрасываем флаги
         this.isAuthenticated = false;
         
+        // Очищаем интервалы
         if (this.pingInterval) {
             clearInterval(this.pingInterval);
             this.pingInterval = null;
         }
 
+        // Fatal auth/permission close codes (server may close with Policy Violation).
         if (event.code === 1008 || event.code === 4001) {
             console.warn('[WS] Fatal close, stopping reconnect:', event.code, event.reason);
             try { localStorage.removeItem('auth_token'); } catch (_) {}
@@ -275,6 +322,7 @@ class WebSocketManager {
             return;
         }
         
+        // Если это не было ручное закрытие и страница не выгружается
         if (event.code !== 1000 && !this.isDisconnecting) {
             this._scheduleReconnect();
         }
@@ -294,7 +342,9 @@ class WebSocketManager {
         this.reconnectTimer = setTimeout(() => {
             const token = localStorage.getItem('auth_token');
             if (token && !_lbIsJwtExpired(token)) {
-                this.connect(token).catch(() => {});
+                this.connect(token).catch(() => {
+                    // Ошибка будет обработана в connect
+                });
             } else {
                 if (token) {
                     console.warn('[WS] Token expired, stopping reconnect');
@@ -321,14 +371,17 @@ class WebSocketManager {
     }
     
     send(data) {
+        // Если соединение не установлено или не аутентифицировано
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             console.log('[WS] Cannot send - WebSocket not connected');
+            // Сохраняем сообщение в очередь, кроме ping
             if (data.type !== 'ping') {
                 this.pendingMessages.push(data);
             }
             return false;
         }
         
+        // Если не аутентифицированы, откладываем сообщения (кроме ping)
         if (!this.isAuthenticated && data.type !== 'ping') {
             console.log('[WS] Not authenticated yet, queuing message');
             this.pendingMessages.push(data);
@@ -370,6 +423,7 @@ class WebSocketManager {
         this.isDisconnecting = true;
         this.isAuthenticated = false;
         
+        // Очищаем таймеры
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
@@ -380,6 +434,7 @@ class WebSocketManager {
             this.pingInterval = null;
         }
         
+        // Закрываем соединение
         if (this.ws) {
             this.ws.onclose = null;
             if (this.ws.readyState === WebSocket.OPEN) {
@@ -388,7 +443,8 @@ class WebSocketManager {
             this.ws = null;
         }
     }
-
+    
+    // Утилита для проверки состояния
     getStatus() {
         return {
             connected: this.ws && this.ws.readyState === WebSocket.OPEN,
@@ -398,11 +454,14 @@ class WebSocketManager {
         };
     }
 
+    // Для совместимости с app.js (там ожидается property)
     get isConnected() {
         return !!(this.ws && this.ws.readyState === WebSocket.OPEN);
     }
 }
 
+// Экспортируем синглтон
 export const wsManager = new WebSocketManager();
 
+// Глобальный хук для приложения
 window.wsManager = wsManager;

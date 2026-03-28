@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use axum::response::Html;
 
+/// Простой SPA-роутер — возвращает index.html для "/" и "/app"
 pub async fn index() -> Html<String> {
     Html(std::fs::read_to_string(static_path("index.html")).unwrap_or_default())
 }
@@ -47,6 +48,7 @@ code {{ background:#0f1220; padding:2px 6px; border-radius:8px; border:1px solid
     ))
 }
 
+/// Путь к статическим файлам
 fn static_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("static")

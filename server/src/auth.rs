@@ -9,26 +9,44 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// JWT claims (access token).
+///
+/// Важно: любые изменения полей здесь — это изменения контракта токена.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
+    /// Subject: username
     pub sub: String,
+    /// Token invalidation version stored in DB
     pub token_version: i64,
+    /// Issued at (unix seconds)
     pub iat: i64,
+    /// Expiration time (unix seconds)
     pub exp: i64,
+    /// Issuer
     pub iss: String,
 }
 
+
+/// JWT claims (refresh token).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RefreshClaims {
+    /// Subject: username
     pub sub: String,
+    /// Token invalidation version stored in DB
     pub token_version: i64,
+    /// Issued at (unix seconds)
     pub iat: i64,
+    /// Expiration time (unix seconds)
     pub exp: i64,
+    /// Issuer
     pub iss: String,
+    /// Token type: must be "refresh"
     pub typ: String,
+    /// Session id (rotation / revocation)
     pub jti: String,
 }
 
+/// Short-lived signed token to download/preview a конкретный file_id without Authorization header.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileDlClaims {
     pub uid: i64,
@@ -37,7 +55,7 @@ pub struct FileDlClaims {
     pub iat: i64,
     pub exp: i64,
     pub iss: String,
-    pub typ: String,
+    pub typ: String, // "file"
 }
 
 pub fn now_unix() -> i64 {
@@ -47,15 +65,18 @@ pub fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+/// Unix time (seconds) as string — подходит для SQLite TEXT.
 pub fn now_iso() -> String {
     now_unix().to_string()
 }
 
 fn issuer() -> String {
+    // issuer не критичен для совместимости, поэтому допустим дефолт
     std::env::var("JWT_ISSUER").unwrap_or_else(|_| "laberry".to_string())
 }
 
 fn access_ttl_secs() -> i64 {
+    // TTL можно конфигурировать, но дефолт стабильный
     std::env::var("ACCESS_TOKEN_TTL_SECS")
         .ok()
         .and_then(|v| v.parse::<i64>().ok())
@@ -82,6 +103,7 @@ fn file_dl_ttl_secs() -> i64 {
 
 fn secret_key_bytes() -> anyhow::Result<Vec<u8>> {
     let key = std::env::var("SECRET_KEY").context("SECRET_KEY env var is required")?;
+    // Минимально разумная длина для HMAC ключа
     if key.as_bytes().len() < 32 {
         anyhow::bail!("SECRET_KEY must be at least 32 bytes long");
     }
@@ -107,12 +129,16 @@ pub fn create_access_token(username: &str, token_version: i64) -> anyhow::Result
     )?)
 }
 
+/// Decode + validate access token.
+/// Returns (username, token_version).
 pub fn decode_username(token: &str) -> anyhow::Result<(String, i64)> {
     let key = secret_key_bytes()?;
 
     let mut v = Validation::new(Algorithm::HS256);
+    // exp включён по умолчанию, но оставим явно
     v.validate_exp = true;
 
+    // issuer — валидируем (JWT_ISSUER или дефолт "laberry")
     let iss = issuer();
     v.set_issuer(&[iss.as_str()]);
 
@@ -120,6 +146,10 @@ pub fn decode_username(token: &str) -> anyhow::Result<(String, i64)> {
     Ok((data.claims.sub, data.claims.token_version))
 }
 
+/// Decode token and validate signature + issuer, but **do not** validate exp.
+///
+/// Нужно для мягкого продления сессии (refresh), чтобы пользователь не
+/// вылетал на логин при долгом афк.
 pub fn decode_claims_allow_expired(token: &str) -> anyhow::Result<Claims> {
     let key = secret_key_bytes()?;
 

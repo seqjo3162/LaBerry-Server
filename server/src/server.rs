@@ -1,3 +1,6 @@
+// ======================================================
+// 📡 LaBerry Server — main Axum server entry (Debug + Logging Build)
+// ======================================================
 use crate::{
     auth, db,
     ws::{Hub, UserId, VoiceChannelId},
@@ -43,12 +46,15 @@ use tower_http::{
     LatencyUnit,
 };
 
+// ======================================================
+// 🧩 Application State
 #[derive(Clone)]
 pub struct AdminSession {
     pub expires_at: i64,
     pub csrf: String,
 }
 
+// ======================================================
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
@@ -58,6 +64,10 @@ pub struct AppState {
     pub voice_states: HashMap<UserId, VoiceChannelId>,
     pub admin_sessions: Arc<DashMap<String, AdminSession>>,
 }
+
+// ======================================================
+// 🚀 Server entry point WITHOUT TLS (оригинальный)
+// ======================================================
 
 pub async fn run_server(
     db_path: &str,
@@ -103,6 +113,7 @@ pub async fn run_server(
         admin_sessions: Arc::new(DashMap::new()),
     };
 
+    // One shutdown signal for both servers.
     let shutdown = Arc::new(Notify::new());
     {
         let shutdown = shutdown.clone();
@@ -112,6 +123,9 @@ pub async fn run_server(
         });
     }
 
+    // ------------------------------
+    // Main (public) server
+    // ------------------------------
     println!("[SERVER] Building main router...");
     let app = build_router(state.clone());
     println!("[SERVER] Main router built ✅");
@@ -130,6 +144,9 @@ pub async fn run_server(
             .map_err(anyhow::Error::from)
     });
 
+    // ------------------------------
+    // Admin server (local-only)
+    // ------------------------------
     let admin_enabled = env_bool("LB_ENABLE_ADMIN_PANEL", false)
         || std::env::var("LB_ADMIN_PASSWORD").ok().is_some()
         || std::env::var("LB_ADMIN_PASSWORD_HASH").ok().is_some();
@@ -163,6 +180,7 @@ pub async fn run_server(
         }));
     }
 
+    // Wait until one of servers stops, then stop the other.
     if let Some(mut ah) = admin_handle {
         tokio::select! {
             res = &mut main_handle => {
@@ -184,6 +202,9 @@ pub async fn run_server(
     }
 }
 
+// ======================================================
+// 🧭 Router builder
+// ======================================================
 pub fn build_router(state: AppState) -> Router {
     println!("[ROUTER] Building routes...");
 
@@ -227,43 +248,50 @@ pub fn build_router(state: AppState) -> Router {
             "/static",
             ServeDir::new(static_dir.clone())
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
-        );
+        )
+        ;
+
+    // Admin panel is NOT exposed on the public server.
+    // It is served by a dedicated local-only listener (see run_server).
 
     let router = router.with_state(state)
+        // Protect server from huge request bodies (uploads, etc.)
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
 
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("x-content-type-options"),
-            HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("x-frame-options"),
-            HeaderValue::from_static("DENY"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("referrer-policy"),
-            HeaderValue::from_static("no-referrer"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("permissions-policy"),
-            HeaderValue::from_static("geolocation=(), microphone=(self), camera=()"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
-            HeaderValue::from_static("same-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("cross-origin-resource-policy"),
-            HeaderValue::from_static("same-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("content-security-policy"),
-            HeaderValue::from_str(
-                &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'".to_string())
+// Basic security headers (can be customized via env)
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("x-content-type-options"),
+    HeaderValue::from_static("nosniff"),
+))
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("x-frame-options"),
+    HeaderValue::from_static("DENY"),
+))
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("referrer-policy"),
+    HeaderValue::from_static("no-referrer"),
+))
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("permissions-policy"),
+    HeaderValue::from_static("geolocation=(), microphone=(self), camera=()"),
+))
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
+    HeaderValue::from_static("same-origin"),
+))
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+    HeaderValue::from_static("same-origin"),
+))
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("content-security-policy"),
+    HeaderValue::from_str(
+        &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'".to_string())
     ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
 ))
 
         .layer({
+    // CORS: deny-by-default. Configure explicit origins via CORS_ALLOWED_ORIGINS env (comma-separated) or "*".
     let allowed = env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
     let mut cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
@@ -304,6 +332,10 @@ pub fn build_router(state: AppState) -> Router {
     router
 }
 
+// ======================================================
+// 🔐 Admin server (local-only)
+// ======================================================
+
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .ok()
@@ -335,11 +367,15 @@ pub fn build_admin_router(state: AppState) -> Router {
     use axum::response::Redirect;
 
     Router::new()
+        // convenience: open http://127.0.0.1:<LB_ADMIN_PORT>/ and land in /admin/
+        // NOTE: axum route matching is strict about trailing slashes, so we handle both
+        // /admin and /admin/ explicitly.
         .route("/", get(|| async { Redirect::to("/admin/") }))
         .route("/admin", get(|| async { Redirect::to("/admin/") }))
         .nest("/admin/", crate::routes::admin_panel::router())
         .with_state(state)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        // Security headers
         .layer(SetResponseHeaderLayer::if_not_present(
             axum::http::header::HeaderName::from_static("x-content-type-options"),
             HeaderValue::from_static("nosniff"),
@@ -384,7 +420,9 @@ pub fn build_admin_router(state: AppState) -> Router {
         )
         .layer(CatchPanicLayer::new())
 }
-
+// ======================================================
+// 💓 WS Health monitor
+// ======================================================
 async fn ws_health(ws: WebSocketUpgrade, State(st): State<AppState>) -> impl IntoResponse {
     let enabled = std::env::var("LB_ENABLE_WS_HEALTH")
         .ok()
@@ -445,6 +483,9 @@ async fn health_loop(mut socket: WebSocket, st: AppState) {
     }
 }
 
+// ======================================================
+// 💬 Main chat WebSocket (Stable)
+// ======================================================
 #[derive(Deserialize)]
 struct TokenQuery {
     token: Option<String>,
@@ -467,6 +508,7 @@ fn extract_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
         token = Some(t.clone());
     } else if let Some(value) = headers.get(header::AUTHORIZATION) {
         if let Ok(v) = value.to_str() {
+            // Typical: "Bearer <jwt>"
             if let Some(bearer) = v.trim().strip_prefix("Bearer ") {
                 if !bearer.is_empty() {
                     token = Some(bearer.to_string());
@@ -477,6 +519,7 @@ fn extract_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
 
     let mut t = token?;
 
+    // Some clients may accidentally pass "Bearer <jwt>" via query.
     let t_trim = t.trim();
     if let Some(rest) = t_trim.strip_prefix("Bearer ") {
         t = rest.trim().to_string();
@@ -486,6 +529,7 @@ fn extract_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
         t = t_trim.to_string();
     }
 
+    // Strip accidental surrounding quotes.
     if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
         t = t.trim_matches('"').to_string();
     }
@@ -503,6 +547,7 @@ async fn ws_main(
     Query(q): Query<TokenQuery>,
     State(st): State<AppState>,
 ) -> impl IntoResponse {
+    // Token can be provided in query/header (legacy) OR via first WS message (preferred).
     let pre_token = extract_token(&headers, &q);
 
     let db = st.db.clone();
@@ -515,9 +560,11 @@ async fn ws_main(
             println!("[WS] CONNECT (total={})", prev);
         }
 
+        // Authenticate
         let auth_token = if let Some(t) = pre_token {
             Some(t)
         } else {
+            // wait for {type:\"auth\", token:\"...\"}
             match tokio::time::timeout(Duration::from_secs(5), socket.recv()).await {
                 Ok(Some(Ok(Message::Text(text)))) => {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {

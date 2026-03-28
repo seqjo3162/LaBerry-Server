@@ -55,9 +55,10 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list).post(send))
 }
 
+// /api/messages/* (global endpoints)
 pub fn global_router() -> Router<AppState> {
     Router::new()
-        .route("/:message_id", get(get_one))
+        .route("/:message_id", get(get_one).delete(delete_message))
         .route("/:message_id/reactions", get(get_reactions))
         .route("/:message_id/pin", put(pin_message).delete(unpin_message))
         .route(
@@ -99,12 +100,13 @@ async fn get_one(
             m.chat_id,
             m.sender_id,
             u.username AS sender_username,
-            u.avatar_file_id AS sender_avatar_file_id,
+            up.avatar_file_id AS sender_avatar_file_id,
             m.content,
             m.timestamp,
-            m.reply_to_id
+            m.reply_to_message_id AS reply_to_id
         FROM messages m
         JOIN users u ON u.id = m.sender_id
+        LEFT JOIN user_profile up ON up.user_id = u.id
         WHERE m.id = ?
         LIMIT 1
         "#,
@@ -182,23 +184,37 @@ async fn can_access_message(
         .fetch_optional(db)
         .await?
         .is_some()
-    } else if is_private != 0 {
-        sqlx::query_scalar::<_, i64>(
+    } else {
+        // Support both current and legacy DM/private chat rows.
+        let in_participants = sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
         )
         .bind(chat_id)
         .bind(user_id)
         .fetch_optional(db)
         .await?
-        .is_some()
-    } else {
-        false
+        .is_some();
+
+        if in_participants {
+            true
+        } else {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
+            )
+            .bind(chat_id)
+            .bind(user_id)
+            .bind(user_id)
+            .fetch_optional(db)
+            .await?
+            .is_some()
+        }
     };
 
     if !allowed {
         return Ok(None);
     }
 
+    // voice text: visible only while user is in this voice channel
     if kind == "voice" {
         if st.hub.voice_get_user_channel(user_id) != Some(chat_id) {
             return Ok(None);
@@ -206,6 +222,131 @@ async fn can_access_message(
     }
 
     Ok(Some((chat_id, kind)))
+}
+
+async fn delete_message(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(message_id): Path<i64>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let Ok(access) = can_access_message(&st, me.id, message_id).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Some((chat_id, kind)) = access else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+
+    let owner = sqlx::query(
+        r#"
+        SELECT sender_id
+        FROM messages
+        WHERE id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(message_id)
+    .fetch_optional(db)
+    .await;
+
+    let Some(owner_row) = owner.ok().flatten() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let sender_id: i64 = owner_row.get("sender_id");
+    if sender_id != me.id {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let file_rows = sqlx::query("SELECT storage_path FROM files WHERE message_id = ?")
+        .bind(message_id)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+
+    let storage_paths = file_rows
+        .into_iter()
+        .filter_map(|r| r.try_get::<String, _>("storage_path").ok())
+        .collect::<Vec<_>>();
+
+    let mut tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    if sqlx::query("DELETE FROM message_reactions WHERE message_id = ?")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    {
+        let _ = tx.rollback().await;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    if sqlx::query("DELETE FROM pinned_messages WHERE message_id = ?")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    {
+        let _ = tx.rollback().await;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    if sqlx::query("DELETE FROM files WHERE message_id = ?")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    {
+        let _ = tx.rollback().await;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let deleted = match sqlx::query("DELETE FROM messages WHERE id = ?")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(done) => done.rows_affected(),
+        Err(_) => {
+            let _ = tx.rollback().await;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    if deleted == 0 {
+        let _ = tx.rollback().await;
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if tx.commit().await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    for path in storage_paths {
+        if path.trim().is_empty() {
+            continue;
+        }
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    let out = serde_json::json!({
+        "type": "message_deleted",
+        "id": message_id,
+        "message_id": message_id,
+        "room_id": chat_id,
+    });
+    let room = if kind == "voice" {
+        RoomId::Voice(chat_id)
+    } else {
+        RoomId::Channel(chat_id)
+    };
+    st.hub.broadcast_room(&room, &out);
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn get_reactions(
@@ -289,6 +430,7 @@ async fn add_reaction(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    // notify room (clients will refresh reaction list for this message)
     let out = serde_json::json!({
         "type": "reaction",
         "room_id": chat_id,
@@ -336,6 +478,7 @@ async fn remove_reaction(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    // notify room
     let out = serde_json::json!({
         "type": "reaction",
         "room_id": chat_id,
@@ -361,6 +504,8 @@ pub async fn list(
     Query(q): Query<ListQuery>,
 ) -> impl IntoResponse {
     let db = &st.db;
+
+    // проверка: пользователь состоит в сервере
     let member = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
     )
@@ -376,6 +521,7 @@ pub async fn list(
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    // ensure chat belongs to this server + get kind
     let meta = sqlx::query("SELECT server_id, is_private, COALESCE(kind,'text') AS kind FROM chats WHERE id = ? LIMIT 1")
         .bind(chat_id)
         .fetch_optional(db)
@@ -524,10 +670,14 @@ pub async fn list(
         });
     }
 
+    // отдаём по возрастанию id (как в UI)
     messages.reverse();
+
+    // attach reactions summary for this page
     if !messages.is_empty() {
         let ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
 
+        // counts per message
         let mut qb = QueryBuilder::<sqlx::Sqlite>::new(
             "SELECT message_id, emoji, COUNT(*) as cnt FROM message_reactions WHERE message_id IN (",
         );
@@ -548,6 +698,7 @@ pub async fn list(
             counts.entry(mid).or_default().push((emoji, cnt));
         }
 
+        // my reactions for this page
         let mut qb2 = QueryBuilder::<sqlx::Sqlite>::new(
             "SELECT message_id, emoji FROM message_reactions WHERE user_id = ",
         );
@@ -587,6 +738,7 @@ pub async fn list(
         }
     }
 
+    // mark as read when opening the latest page (before_id not set)
     if q.before_id.is_none() {
         if let Some(last) = messages.last() {
             let now = auth::now_iso();
@@ -624,6 +776,8 @@ pub async fn send(
         return StatusCode::BAD_REQUEST.into_response();
     }
     let content = content_trimmed.to_string();
+
+    // проверка: пользователь состоит в сервере
     let member = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
     )
@@ -639,6 +793,7 @@ pub async fn send(
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    // ensure chat belongs to this server + get kind
     let meta = sqlx::query("SELECT server_id, is_private, COALESCE(kind,'text') AS kind FROM chats WHERE id = ? LIMIT 1")
         .bind(chat_id)
         .fetch_optional(db)
@@ -686,6 +841,7 @@ pub async fn send(
 
     let message_id = r.last_insert_rowid();
 
+    // привязка загруженных файлов к этому сообщению (если есть маркеры)
     if let Ok(re) = Regex::new(r"\[\[file:(\d+)\|") {
         let mut file_ids: Vec<i64> = re
             .captures_iter(&content)
@@ -714,6 +870,7 @@ pub async fn send(
         }
     }
 
+    // WS broadcast
     let sender_avatar_file_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT avatar_file_id FROM user_profile WHERE user_id = ? LIMIT 1",
     )

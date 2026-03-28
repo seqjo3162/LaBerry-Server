@@ -57,6 +57,8 @@ pub fn router() -> Router<AppState> {
         .route("/:friend_id", delete(remove_friend))
 }
 
+/* ---------- helpers ---------- */
+
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::AUTHORIZATION)?

@@ -23,6 +23,7 @@ async fn try_add_column(
         .execute(db)
         .await?;
 
+    // migrate: chats.kind (text/voice)
     let _ = sqlx::query("ALTER TABLE chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
         .execute(db)
         .await;
@@ -31,10 +32,12 @@ async fn try_add_column(
 }
 
 pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
+    // perf + надёжность
     sqlx::query("PRAGMA journal_mode=WAL;").execute(db).await?;
     sqlx::query("PRAGMA synchronous=NORMAL;").execute(db).await?;
     sqlx::query("PRAGMA foreign_keys=ON;").execute(db).await?;
 
+    // users
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS users (
@@ -57,10 +60,12 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     .execute(db)
     .await?;
 
+    // migrate legacy dbs
     try_add_column(db, "users", "email_verified INTEGER NOT NULL DEFAULT 0", "email_verified")
         .await?;
     try_add_column(db, "users", "email_pending TEXT", "email_pending").await?;
 
+    // servers
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS servers (
@@ -77,6 +82,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_server_owner_id ON servers(owner_id);"#)
         .execute(db)
         .await?;
+
+    // server_members
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS server_members (
@@ -94,6 +101,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_server_members_user_id ON server_members(user_id);"#)
         .execute(db)
         .await?;
+
+    // chats
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS chats (
@@ -112,6 +121,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_chat_server_id ON chats(server_id);"#)
         .execute(db)
         .await?;
+
+    // chat_participants
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS chat_participants (
@@ -128,6 +139,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_chat_participants_user_id ON chat_participants(user_id);"#)
         .execute(db)
         .await?;
+
+    // messages
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS messages (
@@ -146,8 +159,12 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_messages_chat_id ON messages(chat_id);"#)
         .execute(db)
         .await?;
+
+    // reply + edit columns
     try_add_column(db, "messages", "reply_to_message_id INTEGER", "reply_to_message_id").await?;
     try_add_column(db, "messages", "edited_at TEXT", "edited_at").await?;
+
+    // files
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS files (
@@ -172,6 +189,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_files_chat_id ON files(chat_id);"#)
         .execute(db)
         .await?;
+
+    // friendships
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS friendships (
@@ -190,6 +209,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_friendships_user_id ON friendships(user_id);"#)
         .execute(db)
         .await?;
+
+    // friend_requests
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS friend_requests (
@@ -208,6 +229,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_friend_requests_receiver_id ON friend_requests(receiver_id);"#)
         .execute(db)
         .await?;
+
+    // cleanup duplicates + unique pending index
     sqlx::query(
         r#"
         DELETE FROM friend_requests
@@ -234,6 +257,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_friend_requests_sender_id ON friend_requests(sender_id);"#)
         .execute(db)
         .await?;
+
+    // user_presence
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS user_presence (
@@ -246,6 +271,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     )
     .execute(db)
     .await?;
+
+    // user_settings
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS user_settings (
@@ -258,9 +285,13 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     )
     .execute(db)
     .await?;
+
+    // reset presence on startup
     sqlx::query(r#"UPDATE user_presence SET is_online = 0;"#)
         .execute(db)
         .await?;
+
+    // dm_chats
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS dm_chats (
@@ -283,6 +314,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_dm_chats_user_b ON dm_chats(user_b);"#)
         .execute(db)
         .await?;
+
+    // user_blocks
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS user_blocks (
@@ -300,6 +333,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_blocks_blocker ON user_blocks(blocker_id);"#)
         .execute(db)
         .await?;
+
+    // message_reactions
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS message_reactions (
@@ -318,6 +353,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_message_reactions_message ON message_reactions(message_id);"#)
         .execute(db)
         .await?;
+
+    // user_sessions
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS user_sessions (
@@ -340,6 +377,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
         .execute(db)
         .await?;
 
+
+// refresh_sessions (long-lived refresh tokens, rotated)
 sqlx::query(
     r#"
     CREATE TABLE IF NOT EXISTS refresh_sessions (
@@ -362,6 +401,9 @@ sqlx::query(
 sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh_sessions(user_id);"#)
     .execute(db)
     .await?;
+
+
+    // email_codes (stubs)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS email_codes (
@@ -382,6 +424,8 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_email_codes_user_purpose ON email_codes(user_id, purpose);"#)
         .execute(db)
         .await?;
+
+    // user_profile
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS user_profile (
@@ -399,6 +443,11 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
     )
     .execute(db)
     .await?;
+
+
+    
+
+    // chat_reads (unread counters)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS chat_reads (
@@ -417,6 +466,8 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_chat_reads_user ON chat_reads(user_id);"#)
         .execute(db)
         .await?;
+
+    // pinned_messages
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS pinned_messages (
@@ -436,7 +487,11 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_pins_chat ON pinned_messages(chat_id);"#)
         .execute(db)
         .await?;
+
+    // friendships: favorites
     try_add_column(db, "friendships", "is_favorite INTEGER NOT NULL DEFAULT 0", "is_favorite").await?;
+
+    // profile_files (avatars/banners)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS profile_files (
@@ -457,6 +512,8 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_profile_files_uploader ON profile_files(uploaded_by);"#)
         .execute(db)
         .await?;
+
+    // migrate: chats.kind (text/voice)
     let _ = sqlx::query("ALTER TABLE chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
         .execute(db)
         .await;

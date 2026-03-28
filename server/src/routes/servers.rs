@@ -39,6 +39,8 @@ pub struct ChatRow {
     pub server_id: Option<i64>,
     pub is_private: i64,
     pub created_at: String,
+
+    // UI helpers
     pub unread_count: i64,
     pub last_message_id: Option<i64>,
     pub last_message_sender: Option<String>,
@@ -47,6 +49,9 @@ pub struct ChatRow {
 
 
 async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
+    // Cleanup duplicate channels (same name + kind) safely.
+    // If a duplicate has no real data (messages/files/pins), we can merge
+    // read-state/participants into the kept channel and delete the duplicate.
 
     let rows = sqlx::query(
         r#"
@@ -76,10 +81,11 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
             continue;
         }
 
+        // Pick keep_id: most messages, then smallest id
         let mut keep_id: i64 = ids[0];
         let mut keep_msgs: i64 = -1;
 
-        let mut stats: Vec<(i64, i64, i64, i64)> = Vec::with_capacity(ids.len());
+        let mut stats: Vec<(i64, i64, i64, i64)> = Vec::with_capacity(ids.len()); // (id, msgs, files, pins)
         for cid in &ids {
             let msgs = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM messages WHERE chat_id = ?")
                 .bind(*cid)
@@ -114,10 +120,12 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
                 continue;
             }
 
+            // If there is real data in the duplicate, do NOT touch it.
             if msgs != 0 || files != 0 || pins != 0 {
                 continue;
             }
-            
+
+            // Merge chat_reads into keep_id (max last_read_message_id)
             let read_rows = sqlx::query(
                 "SELECT user_id, last_read_message_id FROM chat_reads WHERE chat_id = ?",
             )
@@ -156,6 +164,7 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
                 .execute(db)
                 .await;
 
+            // Merge chat_participants into keep_id
             let _ = sqlx::query(
                 r#"
                 INSERT INTO chat_participants (chat_id, user_id)
@@ -174,6 +183,8 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
                 .bind(cid)
                 .execute(db)
                 .await;
+
+            // Safety: remove any other empty references
             let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = ?")
                 .bind(cid)
                 .execute(db)
@@ -182,6 +193,7 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
                 .bind(cid)
                 .execute(db)
                 .await;
+
             let _ = sqlx::query("DELETE FROM chats WHERE id = ?")
                 .bind(cid)
                 .execute(db)
@@ -191,6 +203,9 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
 }
 
 async fn ensure_default_channels(db: &sqlx::SqlitePool, server_id: i64) {
+    // Требование: у сервера по дефолту должен быть 1 текстовый и 1 голосовой канал.
+    // Плюс это чинит старые сервера, созданные до добавления voice.
+
     let has_text = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM chats WHERE server_id = ? AND LOWER(TRIM(COALESCE(kind,'text'))) = 'text' LIMIT 1",
     )
@@ -240,6 +255,7 @@ async fn ensure_default_channels(db: &sqlx::SqlitePool, server_id: i64) {
 
 
 async fn can_manage_channels(db: &sqlx::SqlitePool, server_id: i64, user_id: i64) -> bool {
+    // Server owner OR role=admin
     let owner = sqlx::query_scalar::<_, i64>("SELECT owner_id FROM servers WHERE id = ? LIMIT 1")
         .bind(server_id)
         .fetch_optional(db)
@@ -272,6 +288,8 @@ async fn create_chat(
     Json(body): Json<CreateChannelBody>,
 ) -> impl IntoResponse {
     let db = &st.db;
+
+    // membership check
     let member = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
     )
@@ -303,6 +321,7 @@ async fn create_chat(
     let kind = body.kind.trim().to_lowercase();
     let kind = if kind == "voice" { "voice" } else { "text" };
 
+    // prevent exact duplicates (name+kind) to avoid UI confusion
     if let Some(existing_id) = sqlx::query_scalar::<_, i64>(
         r#"SELECT id FROM chats
            WHERE server_id = ? AND is_private = 0
@@ -355,6 +374,7 @@ async fn delete_chat(
 ) -> impl IntoResponse {
     let db = &st.db;
 
+    // membership check
     let member = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
     )
@@ -391,6 +411,8 @@ async fn delete_chat(
     let kind: String = r.get("kind");
     let kind_l = kind.trim().to_lowercase();
     let kind_l = if kind_l == "voice" { "voice" } else { "text" };
+
+    // forbid deleting the last channel of this kind
     let cnt = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(1) FROM chats WHERE server_id = ? AND is_private = 0 AND LOWER(TRIM(COALESCE(kind,'text'))) = ?",
     )
@@ -408,6 +430,7 @@ async fn delete_chat(
             .into_response();
     }
 
+    // delete reactions first (no cascade)
     let _ = sqlx::query(
         r#"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?)"#,
     )
@@ -445,6 +468,7 @@ async fn delete_chat(
         .execute(db)
         .await;
 
+    // keep invariant
     ensure_default_channels(db, server_id).await;
 
     (StatusCode::OK, Json(serde_json::json!({"status":"ok"}))).into_response()
@@ -503,6 +527,7 @@ async fn create(
     .execute(db)
     .await;
 
+    // default channels
 	ensure_default_channels(db, server_id).await;
 
     (StatusCode::OK, Json(serde_json::json!({ "id": server_id }))).into_response()
@@ -599,6 +624,7 @@ async fn list_chats(
         return StatusCode::FORBIDDEN.into_response();
     }
 
+	// гарантируем дефолтные каналы (и для серверов, созданных до voice)
 	ensure_default_channels(db, server_id).await;
 
     let rows = sqlx::query(
@@ -679,6 +705,8 @@ async fn list_members(
     Path(server_id): Path<i64>,
 ) -> impl IntoResponse {
     let db = &st.db;
+
+    // membership check
     let member = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
     )
@@ -768,6 +796,7 @@ async fn delete_server(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
+    // collect chats
     let chat_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM chats WHERE server_id = ?")
         .bind(server_id)
         .fetch_all(&mut *tx)

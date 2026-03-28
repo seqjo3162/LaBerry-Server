@@ -50,6 +50,29 @@ async function refreshAccessToken() {
   return refreshPromise;
 }
 
+
+export async function ensureSession(options = {}) {
+  const { forceRefresh = false, redirectOnFail = false } = options;
+
+  let token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+  if (!localStorage.getItem('auth_token') && token) {
+    try { localStorage.setItem('auth_token', token); } catch (_) {}
+    try { localStorage.removeItem('token'); } catch (_) {}
+  }
+
+  if (token && !forceRefresh) {
+    return token;
+  }
+
+  const next = await refreshAccessToken();
+  if (next) return next;
+
+  if (redirectOnFail) {
+    redirectToLogin();
+  }
+  return null;
+}
+
 function redirectToLogin() {
   try { localStorage.removeItem('auth_token'); } catch (_) {}
   try { localStorage.removeItem('refresh_token'); } catch (_) {}
@@ -78,6 +101,8 @@ function apiTrace(step, data) {
 export async function api(path, opts = {}) {
   const requestId = ++apiRequestCounter;
   const startTime = performance.now();
+
+  // внутренний флаг, чтобы не уезжал в fetch опции
   const optsForFetch = { ...opts };
   delete optsForFetch._didRefresh;
   
@@ -102,6 +127,8 @@ export async function api(path, opts = {}) {
     const hasContentType = Object.keys(headers).some(k => k.toLowerCase() === 'content-type');
     const isFormData = (typeof FormData !== 'undefined') && (optsForFetch.body instanceof FormData);
 
+    // For JSON we set content-type automatically.
+    // For FormData let the browser set the multipart boundary.
     if (!hasContentType && !isFormData) {
       headers['Content-Type'] = 'application/json';
     }
@@ -124,6 +151,8 @@ export async function api(path, opts = {}) {
     });
 
     if (res.status === 401) {
+      // Мягкое продление сессии: пытаемся обновить токен один раз и повторить запрос.
+      // Это убирает вылет на / при долгом афк.
       const canRefresh = !!localStorage.getItem('refresh_token');
       const alreadyTried = !!opts._didRefresh;
       const isRefreshCall = path === '/api/auth/refresh';

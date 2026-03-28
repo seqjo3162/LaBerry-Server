@@ -24,9 +24,12 @@ pub async fn handle_single_ws(
     let conn_id: ConnId = CONN_ID_SEQ.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
 
+    // multi-device: allow several WS connections per user
 
     hub.presence_join(user_id, conn_id, tx.clone());
+    let became_online = hub.user_conn_ids(user_id).len() == 1;
 
+    // db presence upsert
     let now = auth::now_iso();
     let _ = sqlx::query(
         r#"
@@ -41,6 +44,14 @@ pub async fn handle_single_ws(
     .bind(&now)
     .execute(&db)
     .await;
+
+    if became_online {
+        hub.broadcast_presence(&json!({
+            "type": "user_online",
+            "user_id": user_id,
+            "timestamp": chrono::Utc::now().timestamp_millis()
+        }));
+    }
 
     for room in get_accessible_rooms(&db, user_id).await {
         hub.room_join(room, user_id, conn_id, tx.clone());
@@ -59,12 +70,27 @@ pub async fn handle_single_ws(
     'main: loop {
         tokio::select! {
             Some(payload) = rx.recv() => {
+                let should_close = payload
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == "force_logout")
+                    .unwrap_or(false);
+
                 if socket.send(Message::Text(payload.to_string())).await.is_err() {
+                    break 'main;
+                }
+
+                if should_close {
                     break 'main;
                 }
             }
 
             _ = heartbeat.tick() => {
+                if !hub.is_conn_active(conn_id) {
+                    break 'main;
+                }
+
+                // WS ping frame (не JSON)
                 if socket.send(Message::Ping(Vec::new())).await.is_err() {
                     break 'main;
                 }
@@ -83,6 +109,7 @@ pub async fn handle_single_ws(
                             break 'main;
                         }
 
+                        // клиентский JSON ping: {type:"ping", t|timestamp:number}
                         if let Ok(v) = serde_json::from_str::<Value>(&text) {
                             if v.get("type").and_then(|t| t.as_str()) == Some("ping") {
                                 let t = v.get("t")
@@ -112,11 +139,15 @@ pub async fn handle_single_ws(
         }
     }
 
-    let should_set_offline = hub.get_active_conn(user_id).map(|id| id == conn_id).unwrap_or(false);
-
     hub.cleanup_conn(user_id, conn_id).await;
 
-    if should_set_offline {
+    let still_online = hub
+        .presence
+        .get(&user_id)
+        .map(|conns| !conns.is_empty())
+        .unwrap_or(false);
+
+    if !still_online {
         let now = auth::now_iso();
         let _ = sqlx::query(
             "UPDATE user_presence SET is_online = 0, updated_at = ? WHERE user_id = ?",
@@ -125,6 +156,12 @@ pub async fn handle_single_ws(
         .bind(user_id)
         .execute(&db)
         .await;
+
+        hub.broadcast_presence(&json!({
+            "type": "user_offline",
+            "user_id": user_id,
+            "timestamp": chrono::Utc::now().timestamp_millis()
+        }));
     }
     let _ = socket.send(Message::Close(None)).await;
 }
@@ -142,6 +179,11 @@ async fn handle_incoming_message(
     let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
 
     match typ {
+        // =====================
+        // TYPING / UPLOAD STATE (UI indicators)
+        // client -> {type:"typing", data:{chat_id:number, state:"start"|"stop", activity:"text"|"image"|"video"|"file"}}
+        // client -> {type:"upload_state", data:{chat_id:number, state:"start"|"stop", activity:"image"|"video"|"file"}}
+        // =====================
         "typing" | "upload_state" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
                 return;
@@ -153,6 +195,8 @@ async fn handle_incoming_message(
 
             let state = v.get("data").and_then(|d| d.get("state")).and_then(|x| x.as_str()).unwrap_or("start");
             let activity = v.get("data").and_then(|d| d.get("activity")).and_then(|x| x.as_str()).unwrap_or("text");
+
+            // broadcast to the chat room; sender gets no echo
             let payload = json!({
                 "type": typ,
                 "chat_id": chat_id,
@@ -163,6 +207,7 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             });
 
+            // voice text should be visible only for connections that are actually in this voice channel
             let is_voice = chat_is_voice(db, chat_id).await;
             if is_voice {
                 if hub.voice_get_conn_channel(conn_id) != Some(chat_id) {
@@ -174,6 +219,10 @@ async fn handle_incoming_message(
             }
         }
 
+
+        // =====================
+        // DM CALLS (ring + accept/decline)
+        // =====================
         "dm_call_invite" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
                 let _ = tx.send(json!({"type":"error","code":"bad_request"}));
@@ -315,6 +364,9 @@ async fn handle_incoming_message(
             let _ = tx.send(json!({"type":"dm_call_end_sent","chat_id": chat_id}));
         }
 
+        // =====================
+        // VOICE (WebRTC signaling)
+        // =====================
         "voice_join" => {
             let Some(channel_id) = v.get("data").and_then(|d| d.get("channel_id")).and_then(|x| x.as_i64()) else {
                 let _ = tx.send(json!({"type":"error","code":"bad_request"}));
@@ -343,16 +395,21 @@ async fn handle_incoming_message(
                 return;
             }
 
+            // If user already in some voice channel -> leave it first
             if let Some(prev) = hub.voice_get_user_channel(user_id) {
                 if prev != channel_id {
                     voice_leave_internal(hub, user_id, conn_id, tx, prev, true);
                 }
             }
 
+            // Join voice room
             hub.room_join(RoomId::Voice(channel_id), user_id, conn_id, tx.clone());
             hub.voice_set(user_id, conn_id, channel_id);
 
+            // Peers list (excluding self)
             let peers = voice_peers(hub, channel_id, Some(user_id));
+
+            // Ack to self
             let _ = tx.send(json!({
                 "type": "voice_joined",
                 "channel_id": channel_id,
@@ -360,6 +417,8 @@ async fn handle_incoming_message(
                 "screen_shares": hub.ss_list(channel_id),
                     "timestamp": chrono::Utc::now().timestamp_millis()
             }));
+
+            // Notify others
             let payload = json!({
                 "type": "voice_peer_joined",
                 "channel_id": channel_id,
@@ -395,6 +454,7 @@ async fn handle_incoming_message(
             let Some(channel_id) = data.get("channel_id").and_then(|x| x.as_i64()) else { return; };
             let Some(to_user_id) = data.get("to_user_id").and_then(|x| x.as_i64()) else { return; };
 
+            // Only allow signaling inside the same voice channel
             if hub.voice_get_user_channel(user_id) != Some(channel_id) {
                 let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
@@ -429,13 +489,19 @@ async fn handle_incoming_message(
                         return;
                     }
                 }
-                "rtc_negotiate" => {}
+                "rtc_negotiate" => {
+                    // no payload, just a renegotiation request
+                }
                 _ => {}
             }
 
+            // Send directly to peer
             hub.send_to_user(to_user_id, &out);
         }
 
+        // =====================
+        // VOICE SCREEN SHARE (signaling + presence)
+        // =====================
         "voice_ss_start" => {
             let Some(channel_id) = v.get("data").and_then(|d| d.get("channel_id")).and_then(|x| x.as_i64()) else {
                 let _ = tx.send(json!({"type":"error","code":"bad_request"}));
@@ -447,8 +513,10 @@ async fn handle_incoming_message(
                 return;
             }
 
+            // set state
             hub.ss_set(channel_id, user_id, true);
 
+            // ack to self
             let _ = tx.send(json!({
                 "type": "voice_ss_started",
                 "channel_id": channel_id,
@@ -456,6 +524,7 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             }));
 
+            // notify others
             let payload = json!({
                 "type": "voice_ss_started",
                 "channel_id": channel_id,
@@ -476,8 +545,10 @@ async fn handle_incoming_message(
                 return;
             }
 
+            // clear state
             hub.ss_set(channel_id, user_id, false);
 
+            // ack to self
             let _ = tx.send(json!({
                 "type": "voice_ss_stopped",
                 "channel_id": channel_id,
@@ -485,6 +556,7 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             }));
 
+            // notify others
             let payload = json!({
                 "type": "voice_ss_stopped",
                 "channel_id": channel_id,
@@ -499,6 +571,7 @@ async fn handle_incoming_message(
             let Some(channel_id) = data.get("channel_id").and_then(|x| x.as_i64()) else { return; };
             let Some(to_user_id) = data.get("to_user_id").and_then(|x| x.as_i64()) else { return; };
 
+            // Only allow inside same voice channel
             if hub.voice_get_user_channel(user_id) != Some(channel_id) {
                 let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
@@ -519,6 +592,7 @@ async fn handle_incoming_message(
             hub.send_to_user(to_user_id, &out);
         }
 
+        // v2
         "join_chat" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
                 let _ = tx.send(json!({"type":"error","code":"bad_request"}));
@@ -600,6 +674,7 @@ async fn handle_incoming_message(
             }
         }
 
+        // legacy: {type:"join", room:{kind:"channel"|"dm", id}, ...}
         "join" => {
             let Some((kind, id)) = parse_legacy_room(&v) else { return; };
             let chat_id = id;
@@ -624,6 +699,7 @@ async fn handle_incoming_message(
             }
         }
 
+        // legacy: {type:"message", room:{kind,id}, text:"..."}
         "message" => {
             let Some((_kind, id)) = parse_legacy_room(&v) else { return; };
             let Some(content) = v.get("text").and_then(|x| x.as_str()) else { return; };
@@ -707,6 +783,7 @@ fn voice_leave_internal(
     hub.room_leave(&RoomId::Voice(channel_id), user_id, conn_id);
     hub.voice_clear(user_id, conn_id);
 
+    // If user was sharing screen in this voice channel — clear and notify
     if hub.ss_is_on(channel_id, user_id) {
         hub.ss_set(channel_id, user_id, false);
         let payload = json!({
@@ -735,6 +812,11 @@ fn voice_leave_internal(
 }
 
 async fn is_voice_allowed(db: &SqlitePool, chat_id: i64) -> bool {
+    // Allowed:
+    // 1) real voice channel (kind=voice)
+    // 2) DM chat (is_private=1 and server_id IS NULL)
+    // This enables calls in DMs without creating separate voice chats in DB.
+
     let row = sqlx::query("SELECT COALESCE(kind, 'text') AS kind, is_private, server_id FROM chats WHERE id = ?")
         .bind(chat_id)
         .fetch_optional(db)
@@ -769,6 +851,7 @@ async fn persist_message(db: &SqlitePool, chat_id: i64, user_id: UserId, content
 }
 
 async fn dm_peer_user_id(db: &SqlitePool, chat_id: i64, me: UserId) -> Option<UserId> {
+    // Only for DM chats: is_private=1 AND server_id IS NULL.
     let meta = sqlx::query_as::<_, (Option<i64>, i64)>(
         "SELECT server_id, is_private FROM chats WHERE id = ? LIMIT 1",
     )

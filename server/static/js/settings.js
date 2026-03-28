@@ -1,5 +1,6 @@
 import { api } from "./api.js?v=7";
 import { openAvatarCropper } from "./avatar-cropper.js?v=7";
+import { wsManager } from "./websocket-manager.js?v=11";
 
 const $ = (id) => document.getElementById(id);
 
@@ -9,14 +10,21 @@ const DEFAULT_SETTINGS = {
     show_header_status: false,
     compact_mode: false,
     show_timestamps: true,
+
+    // 0.8..1.3
     font_scale: 1.0,
+
+    // [{ kind, url, label? }]
     connections: [],
+
     friend_requests: 'everyone',
     dms: 'friends_and_server',
+
     notify_desktop: true,
     notify_sounds: true,
     notify_dms: true,
     notify_mentions: true,
+
     developer_mode: false,
 };
 
@@ -31,22 +39,27 @@ function normalizeSettings(s) {
 
     const dm = (v.dms || 'friends_and_server').toString().toLowerCase();
     v.dms = ['friends_only', 'friends_and_server', 'everyone'].includes(dm) ? dm : 'friends_and_server';
+
     v.show_header_status = !!v.show_header_status;
     v.compact_mode = !!v.compact_mode;
     v.show_timestamps = !!v.show_timestamps;
+
     v.notify_desktop = !!v.notify_desktop;
     v.notify_sounds = !!v.notify_sounds;
     v.notify_dms = !!v.notify_dms;
     v.notify_mentions = !!v.notify_mentions;
+
     v.developer_mode = !!v.developer_mode;
 
 
+    // ui scale
     let fs = Number(v.font_scale);
     if (Number.isNaN(fs) || !Number.isFinite(fs)) fs = 1.0;
     if (fs < 0.8) fs = 0.8;
     if (fs > 1.3) fs = 1.3;
     v.font_scale = fs;
 
+    // connections
     const rawConns = Array.isArray(v.connections) ? v.connections : [];
     v.connections = rawConns
         .filter(Boolean)
@@ -92,6 +105,7 @@ function applyUiSettings(settings, applyТема) {
     document.body.classList.toggle('compact-mode', !!s.compact_mode);
     document.body.classList.toggle('hide-timestamps', !s.show_timestamps);
 
+    // ui scale (like Discord zoom)
     try {
         document.documentElement.style.setProperty('--ui-scale', String(s.font_scale || 1));
     } catch (_) {}
@@ -99,6 +113,8 @@ function applyUiSettings(settings, applyТема) {
     const __scaled = Number.isFinite(__sc) && Math.abs(__sc - 1) > 0.001;
     try { document.documentElement.classList.toggle('ui-scaled', __scaled); } catch (_) {}
     try { document.body.classList.toggle('ui-scaled', __scaled); } catch (_) {}
+    try { document.getElementById('appRoot')?.classList?.toggle?.('ui-scaled-root', __scaled); } catch (_) {}
+    // keep in localStorage for fast first paint
     try { localStorage.setItem('ui_scale', String(s.font_scale || 1)); } catch (_) {}
 
 }
@@ -110,6 +126,12 @@ function escapeHtml(s) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function isAnimatedGifFile(file) {
+    const type = (file?.type || '').toString().toLowerCase();
+    const name = (file?.name || '').toString().toLowerCase();
+    return type === 'image/gif' || name.endsWith('.gif');
 }
 
 function mountOverlay() {
@@ -138,8 +160,11 @@ function mountOverlay() {
         </div>
         <div class="settings-content">
           <div class="settings-topbar">
-            <div>
-              <div class="settings-title" id="settingsTitle">Настройки</div>
+            <div class="settings-topbar-main">
+              <button class="settings-sections-btn" id="settingsSectionsBtn" type="button">Разделы</button>
+              <div>
+                <div class="settings-title" id="settingsTitle">Настройки</div>
+              </div>
             </div>
             <button class="settings-close" id="settingsCloseBtn" type="button" title="Закрыть">✕</button>
           </div>
@@ -166,29 +191,59 @@ export function createSettingsUI(opts = {}) {
     let currentSettings = { ...DEFAULT_SETTINGS };
     let saveTimer = null;
 
+    const closeSections = () => {
+        const modal = overlay?.querySelector('.settings-modal');
+        if (modal) modal.classList.remove('show-sections');
+    };
+
+    const toggleSections = () => {
+        const modal = overlay?.querySelector('.settings-modal');
+        if (modal) modal.classList.toggle('show-sections');
+    };
+
     const close = () => {
         if (!overlay) return;
         overlay.classList.add('hidden');
+        closeSections();
         document.removeEventListener('keydown', onEsc);
     };
 
-    const open = async () => {
-        overlay = mountOverlay();
-        overlay.classList.remove('hidden');
+    const bindOverlay = () => {
+        if (!overlay || overlay.dataset.bound === '1') return;
 
         overlay.addEventListener('click', (e) => {
             if (e.target === overlay) close();
         });
 
-        overlay.querySelector('#settingsCloseBtn')?.addEventListener('click', close);
+        const closeBtn = overlay.querySelector('#settingsCloseBtn');
+        if (closeBtn) closeBtn.onclick = close;
+
+        const sectionsBtn = overlay.querySelector('#settingsSectionsBtn');
+        if (sectionsBtn) {
+            sectionsBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                toggleSections();
+            };
+        }
 
         overlay.querySelectorAll('.settings-nav-item').forEach(btn => {
-            btn.addEventListener('click', async () => {
+            btn.onclick = async () => {
                 const sec = btn.getAttribute('data-section');
                 if (!sec) return;
+                closeSections();
                 await navigate(sec);
-            });
+            };
         });
+
+        overlay.dataset.bound = '1';
+    };
+
+    const open = async () => {
+        overlay = mountOverlay();
+        bindOverlay();
+        overlay.classList.remove('hidden');
+        closeSections();
 
         document.addEventListener('keydown', onEsc);
 
@@ -323,8 +378,9 @@ export function createSettingsUI(opts = {}) {
             await api('/api/auth/logout', { method: 'POST' });
         } catch (_) {}
 
+        try { wsManager.disconnect('Logout'); } catch (_) {}
         localStorage.removeItem('auth_token');
-            localStorage.removeItem('refresh_token');
+        localStorage.removeItem('refresh_token');
         sessionStorage.clear();
         window.location.href = '/';
     };
@@ -371,7 +427,7 @@ export function createSettingsUI(opts = {}) {
                   </div>
                   <div class="avatar-actions-row">
                     <button class="btn btn-small" id="settingsAvatarUploadBtn" type="button" disabled>Загрузить</button>
-                    <div class="avatar-file-hint">PNG/JPG/WEBP/GIF до 12MB.</div>
+                    <div class="avatar-file-hint">PNG/JPG/WEBP/GIF до 12MB. GIF без обрезки.</div>
                   </div>
                 </div>
               </div>
@@ -430,6 +486,7 @@ export function createSettingsUI(opts = {}) {
                 <button class="btn btn-ghost" id="logoutAll" type="button">Выйти со всех устройств</button>
               </div>
               <div class="muted" style="margin-top:8px; font-size:12px;">Смена пароля сбрасывает все активные сессии.</div>
+            </div>
 
             <div class="settings-card">
               <h4>Удаление аккаунта</h4>
@@ -442,11 +499,10 @@ export function createSettingsUI(opts = {}) {
                 <button class="btn btn-danger" id="deleteMeBtn" type="button" disabled>Удалить аккаунт</button>
               </div>
             </div>
-
-            </div>
           </div>
         `);
 
+        // AVATAR: file selection + crop + upload
         let selectedFile = null;
 
         const fileInput = overlay.querySelector('#settingsAvatarFile');
@@ -476,14 +532,18 @@ export function createSettingsUI(opts = {}) {
         uploadBtn?.addEventListener('click', async () => {
             if (!selectedFile) return;
 
-            const cropped = await openAvatarCropper(selectedFile, { title: 'Обрезка аватара' });
-            if (!cropped) {
-                return;
-            }
-
             try {
                 const fd = new FormData();
-                const outFile = new File([cropped], 'avatar.png', { type: 'image/png' });
+                let outFile = selectedFile;
+
+                if (!isAnimatedGifFile(selectedFile)) {
+                    const cropped = await openAvatarCropper(selectedFile, { title: 'Обрезка аватара' });
+                    if (!cropped) {
+                        return;
+                    }
+                    outFile = new File([cropped], 'avatar.png', { type: 'image/png' });
+                }
+
                 fd.append('file', outFile);
 
                 const up = await api('/api/profile-files', { method: 'POST', body: fd });
@@ -499,6 +559,7 @@ export function createSettingsUI(opts = {}) {
                     body: JSON.stringify({ avatar_file_id: fileId }),
                 });
 
+                // update preview
                 const img = overlay.querySelector('#settingsAvatarImg');
                 const letter = overlay.querySelector('#settingsAvatarLetter');
                 if (img) {
@@ -509,6 +570,8 @@ export function createSettingsUI(opts = {}) {
 
                 setFileUi(null);
                 try { fileInput.value = ''; } catch (_) {}
+
+                // notify app UI
                 try {
                     window.dispatchEvent(new CustomEvent('laberry:avatar-updated', { detail: { avatar_file_id: fileId } }));
                 } catch (_) {}
@@ -582,9 +645,12 @@ export function createSettingsUI(opts = {}) {
             await doLogout();
         });
 
+
+        // DELETE ME (confirm username)
         const delInp = overlay.querySelector('#deleteMeConfirm');
         const delBtn = overlay.querySelector('#deleteMeBtn');
         const myU = (me?.username || '').toString();
+
         const syncDelBtn = () => {
             const v = (delInp?.value || '').toString().trim();
             if (delBtn) delBtn.disabled = !(v && myU && v === myU);
@@ -614,6 +680,9 @@ export function createSettingsUI(opts = {}) {
                 else showInline('err', 'Не удалось удалить аккаунт');
             }
         });
+
+        // keep UI toggles visible even in account section
+        // (discord-like: some settings apply instantly)
         applyUiSettings(s, applyТема);
     };
 
@@ -781,7 +850,7 @@ export function createSettingsUI(opts = {}) {
     };
 
     const renderAppearance = async () => {
-        setHeader('Внешний вид', 'Тема, плотность, таймстемпы');
+        setHeader('Внешний вид');
 
         const s = normalizeSettings(currentSettings);
 
@@ -790,7 +859,7 @@ export function createSettingsUI(opts = {}) {
             <div class="settings-card">
               <h4>Тема</h4>
               <div class="setting-row">
-                <div>
+                <div class="setting-copy">
                   <div class="setting-title">Цветовая схема</div>
                 </div>
                 <select class="inp" id="themeSel">
@@ -799,7 +868,7 @@ export function createSettingsUI(opts = {}) {
                 </select>
               </div>
               <div class="setting-row">
-                <div>
+                <div class="setting-copy">
                   <div class="setting-title">Показывать статус в шапке</div>
                 </div>
                 <label class="switch">
@@ -807,11 +876,12 @@ export function createSettingsUI(opts = {}) {
                   <span class="slider"></span>
                 </label>
               </div>
-            
+            </div>
+
             <div class="settings-card">
               <h4>Интерфейс</h4>
-              <div class="setting-row">
-                <div>
+              <div class="setting-row setting-row-range">
+                <div class="setting-copy">
                   <div class="setting-title">Масштаб интерфейса</div>
                   <div class="setting-desc">80% — больше помещается, 130% — крупнее</div>
                 </div>
@@ -822,12 +892,10 @@ export function createSettingsUI(opts = {}) {
               </div>
             </div>
 
-</div>
-
             <div class="settings-card">
               <h4>Сообщения</h4>
               <div class="setting-row">
-                <div>
+                <div class="setting-copy">
                   <div class="setting-title">Компактный режим</div>
                 </div>
                 <label class="switch">
@@ -836,7 +904,7 @@ export function createSettingsUI(opts = {}) {
                 </label>
               </div>
               <div class="setting-row">
-                <div>
+                <div class="setting-copy">
                   <div class="setting-title">Показывать время</div>
                 </div>
                 <label class="switch">

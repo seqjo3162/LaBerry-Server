@@ -60,6 +60,7 @@ hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
 
+# ТОЛЬКО ОДНА СЕКЦИЯ ДЛЯ НЕ-ANDROID!
 [target.'cfg(not(target_os = "android"))'.dependencies]
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
@@ -68,6 +69,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "time"
 ] }
 
+# ТОЛЬКО ОДНА СЕКЦИЯ ДЛЯ ANDROID!
 [target.'cfg(target_os = "android")'.dependencies]
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",

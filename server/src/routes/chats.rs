@@ -27,7 +27,11 @@ pub struct ChatRow {
     pub server_id: Option<i64>,
     pub is_private: i64,
     pub created_at: String,
+
+    // text/voice
     pub kind: String,
+
+    // computed for list
     pub unread_count: i64,
     pub last_message_id: Option<i64>,
     pub last_message_preview: Option<String>,
@@ -40,7 +44,7 @@ pub fn router() -> Router<AppState> {
         .route("/:chat_id", get(get_one))
         .route("/:chat_id/join", post(join))
         .route("/:chat_id/read", post(mark_read))
-        .route("/:chat_id/pins", get(list_pins))
+        .route("/:chat_id/pins", get(list_pins))// join теперь безопасный
 }
 
 fn default_settings_json() -> Value {
@@ -114,6 +118,7 @@ async fn create(
     let created_at = auth::now_iso();
     let is_private = body.is_private.unwrap_or(false);
 
+    // privacy: private chats (DMs)
     if is_private {
         if let Some(ids) = body.participant_ids.as_ref() {
             for uid in ids.iter().copied() {
@@ -121,6 +126,7 @@ async fn create(
                     continue;
                 }
 
+                // ensure user exists & not banned (also avoids leaking)
                 let ok_user = sqlx::query_scalar::<_, i64>(
                     "SELECT 1 FROM users WHERE id = ? AND is_banned = 0 LIMIT 1",
                 )
@@ -155,6 +161,7 @@ async fn create(
         }
     }
 
+    // server chat: creator MUST be server member
     if let Some(server_id) = body.server_id {
         let member = sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
@@ -190,6 +197,8 @@ async fn create(
     };
 
     let chat_id = r.last_insert_rowid();
+
+    // creator is always participant
     let _ = sqlx::query(
         r#"INSERT INTO chat_participants(chat_id, user_id)
            VALUES(?, ?)"#,
@@ -199,13 +208,16 @@ async fn create(
     .execute(db)
     .await;
 
+    // private chat: explicitly listed participants only
     if is_private {
         if let Some(ids) = body.participant_ids {
             for uid in ids {
+                // skip creator duplication
                 if uid == me.id {
                     continue;
                 }
 
+                // ensure user exists & not banned
                 let ok = sqlx::query_scalar::<_, i64>(
                     "SELECT 1 FROM users WHERE id = ? AND is_banned = 0 LIMIT 1",
                 )
@@ -256,10 +268,12 @@ async fn join(
     let is_private: i64 = r.get("is_private");
     let server_id: Option<i64> = r.get("server_id");
 
+    // ❌ private chats cannot be joined
     if is_private == 1 {
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    // server chat: must be server member
     if let Some(sid) = server_id {
         let member = sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
@@ -314,6 +328,8 @@ async fn get_one(
     };
 
     let kind = meta.kind.unwrap_or_else(|| "text".to_string());
+
+    // access: private -> participants; server public -> server_members
     let member = if meta.is_private != 0 {
         sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
@@ -344,6 +360,7 @@ async fn get_one(
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    // voice text: only while user is in this voice channel
     if kind == "voice" {
         if st.hub.voice_get_user_channel(me.id) != Some(chat_id) {
             return StatusCode::FORBIDDEN.into_response();
@@ -392,6 +409,11 @@ pub struct PinnedItem {
     pub pinned_by: i64,
     pub pinned_by_username: String,
     pub pinned_at: String,
+    pub message_exists: bool,
+    pub sender_id: Option<i64>,
+    pub sender_username: Option<String>,
+    pub sender_avatar_file_id: Option<i64>,
+    pub content: Option<String>,
 }
 
 async fn list_pins(
@@ -400,7 +422,10 @@ async fn list_pins(
     Path(chat_id): Path<i64>,
 ) -> impl IntoResponse {
     let db = &st.db;
-    
+
+    // Access rules must match the rest of the API:
+    // - server chat -> server_members
+    // - private chat -> chat_participants
     #[derive(sqlx::FromRow)]
     struct ChatInfo {
         server_id: Option<i64>,
@@ -418,18 +443,7 @@ async fn list_pins(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let allowed = if chat.is_private != 0 {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
-        )
-        .bind(chat_id)
-        .bind(me.id)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
-    } else if let Some(server_id) = chat.server_id {
+    let allowed = if let Some(server_id) = chat.server_id {
         sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
         )
@@ -441,7 +455,33 @@ async fn list_pins(
         .flatten()
         .is_some()
     } else {
-        false
+        // Support both current and legacy DM/private chat rows.
+        let in_participants = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+        )
+        .bind(chat_id)
+        .bind(me.id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+        if in_participants {
+            true
+        } else {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
+            )
+            .bind(chat_id)
+            .bind(me.id)
+            .bind(me.id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        }
     };
 
     if !allowed {
@@ -450,9 +490,21 @@ async fn list_pins(
 
     let rows = sqlx::query(
         r#"
-        SELECT pm.message_id, pm.pinned_by, u.username AS pinned_by_username, pm.pinned_at
+        SELECT
+            pm.message_id,
+            pm.pinned_by,
+            pu.username AS pinned_by_username,
+            pm.pinned_at,
+            m.id AS message_exists_id,
+            m.sender_id,
+            su.username AS sender_username,
+            sup.avatar_file_id AS sender_avatar_file_id,
+            m.content
         FROM pinned_messages pm
-        JOIN users u ON u.id = pm.pinned_by
+        JOIN users pu ON pu.id = pm.pinned_by
+        LEFT JOIN messages m ON m.id = pm.message_id AND m.chat_id = pm.chat_id
+        LEFT JOIN users su ON su.id = m.sender_id
+        LEFT JOIN user_profile sup ON sup.user_id = su.id
         WHERE pm.chat_id = ?
         ORDER BY pm.pinned_at DESC
         LIMIT 100
@@ -470,6 +522,11 @@ async fn list_pins(
             pinned_by: r.get("pinned_by"),
             pinned_by_username: r.get("pinned_by_username"),
             pinned_at: r.get("pinned_at"),
+            message_exists: r.try_get::<i64, _>("message_exists_id").ok().is_some(),
+            sender_id: r.try_get::<i64, _>("sender_id").ok(),
+            sender_username: r.try_get::<String, _>("sender_username").ok(),
+            sender_avatar_file_id: r.try_get::<i64, _>("sender_avatar_file_id").ok(),
+            content: r.try_get::<String, _>("content").ok(),
         })
         .collect::<Vec<_>>();
 

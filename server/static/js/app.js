@@ -7,12 +7,12 @@ if (typeof fetch === 'undefined') {
 }
 
 import { api } from "./api.js?v=9";
-import { initFriends } from "./friends.js?v=7";
-import { wsManager } from "./websocket-manager.js?v=10";
-import { createSettingsUI } from "./settings.js?v=7";
+import { initFriends } from "./friends.js?v=8";
+import { wsManager } from "./websocket-manager.js?v=11";
+import { createSettingsUI } from "./settings.js?v=9";
 import { showUserMenu } from "./user-menu.js?v=7";
 import { initVoice } from "./voice.js?v=13";
-import { initProfileModal } from "./profile-modal.js?v=7";
+import { initProfileModal } from "./profile-modal.js?v=8";
 
 console.log('[APP] All imports loaded successfully');
 
@@ -20,14 +20,22 @@ window.lbShowUserMenu = showUserMenu;
 
 const $ = (id) => document.getElementById(id);
 
+// ui scale: fast paint from localStorage
 try {
     const s = localStorage.getItem('ui_scale');
-    if (s) document.documentElement.style.setProperty('--ui-scale', String(s));
+    if (s) {
+        document.documentElement.style.setProperty('--ui-scale', String(s));
+        const scaleNum = Number(s);
+        const scaled = Number.isFinite(scaleNum) && Math.abs(scaleNum - 1) > 0.001;
+        document.documentElement.classList.toggle('ui-scaled', scaled);
+        document.body?.classList?.toggle?.('ui-scaled', scaled);
+        document.getElementById('appRoot')?.classList?.toggle?.('ui-scaled-root', scaled);
+    }
 } catch (_) {}
 
 const chatNameById = new Map();
 const chatKindById = new Map();
-const serverOwnerById = new Map();
+const serverOwnerById = new Map(); // server_id -> owner_id (for channel management)
 let lastVoiceSwitchClick = { id: null, at: 0 };
 
 let settingsSnapshot = null;
@@ -86,9 +94,13 @@ window.addEventListener('laberry:avatar-updated', (ev) => {
 let audioCtx = null;
 let lastDesktopAt = 0;
 let lastSoundAt = 0;
+
+// reply draft
 let replyToMessageId = null;
-let replyToPreview = null;
+let replyToPreview = null; // { sender, text }
 let replyBarEl = null;
+
+// emoji picker
 let emojiPickerEl = null;
 let emojiPickerBackdrop = null;
 
@@ -104,7 +116,8 @@ window.addEventListener('beforeunload', () => {
 let currentServerId = null;
 let currentChatId = null;
 
-const lastTextChatByServer = new Map();
+// last opened NON-voice text channel per server (for returning after leaving voice)
+const lastTextChatByServer = new Map(); // serverId -> { id:number, name:string }
 let currentUser = null;
 let currentUserProfile = null;
 let isInitialized = false;
@@ -112,6 +125,7 @@ let isOpeningServer = false;
 let openChatSeq = 0;
 let membersPollTimer = null;
 
+// ===== CHAT SCROLL + UNREAD (client-side) =====
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 
 let messagesAutoWired = false;
@@ -170,6 +184,7 @@ function getLatestRenderedMessageId(container) {
     if (!container) return null;
     const last = container.querySelector?.('.message[data-msg-id]:last-of-type');
     if (!last) {
+        // fallback: last message in DOM
         const all = container.querySelectorAll?.('.message[data-msg-id]');
         const el = all && all.length ? all[all.length - 1] : null;
         const v = el?.dataset?.msgId;
@@ -240,6 +255,7 @@ function scrollToMessageId(container, id) {
     const el = container.querySelector(`.message[data-msg-id="${n}"]`);
     if (!el) return false;
 
+    // align near top, with some padding
     el.scrollIntoView({ block: 'start' });
     container.scrollTop = Math.max(0, container.scrollTop - 24);
     return true;
@@ -304,7 +320,9 @@ function wireMessagesAutoScroll() {
         scrollToBottomSafe(container, 2);
     };
 
+    // when media loads, height changes -> keep bottom if needed
     const onMediaLoad = () => {
+        // avoid spam in case of many images
         const now = Date.now();
         if (now - lastScrollUpdateAt < 20) return;
         lastScrollUpdateAt = now;
@@ -312,11 +330,12 @@ function wireMessagesAutoScroll() {
         tryStick();
     };
 
-    container.addEventListener('load', onMediaLoad, true);
+    container.addEventListener('load', onMediaLoad, true); // capture: load doesn't bubble
     container.addEventListener('loadedmetadata', onMediaLoad, true);
     container.addEventListener('canplay', onMediaLoad, true);
     container.addEventListener('error', onMediaLoad, true);
 
+    // also react to size changes (new DOM / image decode, etc.)
     try {
         const ro = new ResizeObserver(() => onMediaLoad());
         ro.observe(container);
@@ -324,9 +343,12 @@ function wireMessagesAutoScroll() {
 
     container.addEventListener('scroll', () => {
         if (!container) return;
+
+        // user scrolled up -> stop sticking
         if (isAtBottomEl(container, SCROLL_BOTTOM_THRESHOLD_PX)) {
             setStickToBottom(true);
 
+            // mark last seen, but do it sparingly
             const now = Date.now();
             if (now - lastScrollUpdateAt > 200) {
                 lastScrollUpdateAt = now;
@@ -345,6 +367,8 @@ function wireMessagesAutoScroll() {
     }, { passive: true });
 }
 
+
+// messages pagination (последние 50 + подгрузка вверх)
 const MESSAGES_PAGE_SIZE = 50;
 let chatPaging = { chatId: null, minId: null, hasMore: true, loading: false };
 
@@ -365,6 +389,7 @@ function markSeen(chatId, id) {
 }
 
 function normalizeHash() {
+    // поддержка старого формата (#friends)
     if (location.hash === '#friends') {
         try { history.replaceState(null, '', `${location.pathname}${location.search}#/friends`); }
         catch (_) { location.hash = '#/friends'; }
@@ -377,12 +402,20 @@ function statusToClass(status) {
     return 'online';
 }
 
+function statusToLabel(status) {
+    const cls = statusToClass(status);
+    if (cls === 'idle') return 'Нет на месте';
+    if (cls === 'dnd') return 'Не беспокоить';
+    if (cls === 'offline' || cls === 'invisible') return 'Не в сети';
+    return 'В сети';
+}
+
 function applyMyStatusToUI(status) {
     const cls = statusToClass(status);
     const top = document.getElementById('status');
     const mini = document.getElementById('userStatus');
 
-    const text = (cls === 'invisible') ? 'invisible' : cls;
+    const text = statusToLabel(cls);
 
     if (top) {
         top.textContent = text;
@@ -418,6 +451,7 @@ async function updateMyStatus(status) {
         console.warn('[SETTINGS] Failed to update status', e);
     }
 
+    // быстрый рефреш, чтобы статус не "лагал" в списках
     try { refreshFriendsStatus(); } catch (_) {}
     if (currentServerId) {
         try { await loadMembers(currentServerId); } catch (_) {}
@@ -442,11 +476,15 @@ function canNotifyNow() {
 }
 
 function isUserWatchingChat(chatId) {
+    // friends view hides chat
     if (location.hash === '#/friends' || location.hash === '#friends') return false;
 
     const chatView = document.getElementById('chatView');
     if (!chatView || chatView.classList.contains('hidden')) return false;
+
     if (chatId !== currentChatId) return false;
+
+    // tab not active
     if (document.hidden || !document.hasFocus()) return false;
 
     const container = document.getElementById('messages');
@@ -461,6 +499,7 @@ function playNotifySound() {
     const { sound } = canNotifyNow();
     if (!sound) return;
 
+    // rate limit
     const now = Date.now();
     if (now - lastSoundAt < 700) return;
 
@@ -489,7 +528,9 @@ function playNotifySound() {
         o.stop(t + 0.2);
 
         lastSoundAt = now;
-    } catch (_) {}
+    } catch (_) {
+        // ignored (autoplay restrictions)
+    }
 }
 
 function showDesktopNotification(title, body, tag) {
@@ -503,7 +544,7 @@ function showDesktopNotification(title, body, tag) {
         const n = new Notification(title, {
             body,
             tag: tag ? String(tag) : undefined,
-            silent: true,
+            silent: true, // sound handled separately
         });
 
         n.onclick = () => {
@@ -521,12 +562,16 @@ function notifyForIncomingMessage(roomId, sender, content) {
 
     try { maybeUnhideDmOnIncoming(roomId); } catch (_) {}
 
+    // notify only if user is not watching that chat
     if (isUserWatchingChat(roomId)) return;
+
+    // client-side unread counter (for Discord-like open behavior)
     if (currentServerId && roomId !== null && roomId !== undefined) {
         incUnreadCount(currentServerId, roomId, 1);
         updateJumpBtn();
     }
 
+    // desktop notification + sound use same trigger
     showDesktopNotification(title, body, `chat:${roomId}`);
     playNotifySound();
 }
@@ -549,6 +594,7 @@ async function openSettings() {
 }
 
 
+// ===== Pins (modal) =====
 let pinsOverlayEl = null;
 
 function ensurePinsOverlay() {
@@ -582,6 +628,58 @@ function ensurePinsOverlay() {
 function closePinsModal() {
     if (!pinsOverlayEl) return;
     pinsOverlayEl.hidden = true;
+}
+
+function pinPreviewText(pin) {
+    const raw = (pin?.content || '').toString();
+    if (!raw.trim()) {
+        return pin?.message_exists === false
+            ? 'Сообщение было удалено'
+            : 'Не удалось загрузить сообщение';
+    }
+
+    const fileNames = extractAllFileNamesFromMessageContent(raw);
+    const cleanedText = raw
+        .replace(/\[\[file[:=]\d+\|[^\]]*\]\]/g, ' ')
+        .replace(/\[\[file:(\d+)\]\][^\]]*\]\]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const attachmentLines = fileNames.map((name) => `📎 ${name}`);
+    if (cleanedText && attachmentLines.length) return `${cleanedText}\n${attachmentLines.join('\n')}`;
+    if (attachmentLines.length) return attachmentLines.join('\n');
+    return previewTextFromMessageContent(raw) || 'Пустое сообщение';
+}
+
+function renderPinRow(pin) {
+    const mid = Number(pin?.message_id);
+    const pinnedBy = (pin?.pinned_by_username || String(pin?.pinned_by || '')).toString();
+    const pinnedAt = formatPinTimestamp(pin?.pinned_at);
+    const sender = (pin?.sender_username || '').toString().trim() || 'Неизвестный пользователь';
+    const avatarFileId = Number(pin?.sender_avatar_file_id);
+    const preview = pinPreviewText(pin);
+    const missing = !pin?.content && pin?.message_exists === false;
+
+    return `
+      <div class="pin-row" data-mid="${mid}">
+        <div class="pin-message">
+          <div class="pin-avatar">${avatarInnerHtml(Number.isFinite(avatarFileId) && avatarFileId > 0 ? avatarFileId : null, sender)}</div>
+          <div class="pin-main">
+            <div class="pin-head">
+              <span class="pin-author">${escapeHtml(sender)}</span>
+              <span class="pin-dot">•</span>
+              <span class="pin-time">${escapeHtml(pinnedAt)}</span>
+            </div>
+            <div class="pin-submeta">Закрепил ${escapeHtml(pinnedBy)}</div>
+            <div class="pin-text${missing ? ' is-missing' : ''}">${escapeHtml(preview)}</div>
+            <div class="pin-actions">
+              <button class="btn btn-secondary btn-small" type="button" data-act="jump">Перейти</button>
+              <button class="btn btn-ghost btn-small" type="button" data-act="unpin">Открепить</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
 }
 
 async function jumpToMessage(messageId) {
@@ -639,37 +737,9 @@ async function openPinsModal() {
             return;
         }
 
-        const details = await Promise.all(items.map(async (p) => {
-            try {
-                const m = await api(`/api/messages/${Number(p.message_id)}`, { method: 'GET' });
-                return { pin: p, msg: m };
-            } catch (_) {
-                return { pin: p, msg: null };
-            }
-        }));
+        body.innerHTML = items.map(renderPinRow).join('');
 
-        body.innerHTML = details.map(({ pin, msg }) => {
-            const mid = Number(pin?.message_id);
-            const by = (pin?.pinned_by_username || String(pin?.pinned_by || '')).toString();
-            const at = (pin?.pinned_at || '').toString();
-            const sender = (msg?.sender_username || '').toString();
-            const content = msg?.content ? previewTextFromMessageContent(msg.content) : '(сообщение недоступно)';
-
-            const meta = `${escapeHtml(by)} • ${escapeHtml(at)}${sender ? ' • ' + escapeHtml(sender) : ''}`;
-
-            return `
-              <div class="pin-row" data-mid="${mid}">
-                <div class="pin-meta">${meta}</div>
-                <div class="pin-text">${escapeHtml(content)}</div>
-                <div class="pin-actions">
-                  <button class="u-btn" type="button" data-act="jump">Перейти</button>
-                  <button class="u-btn" type="button" data-act="unpin">Открепить</button>
-                </div>
-              </div>
-            `;
-        }).join('');
-
-        body.querySelectorAll('[data-act="jump"]').forEach(btn => {
+        body.querySelectorAll('[data-act="jump"]').forEach((btn) => {
             btn.addEventListener('click', (e) => {
                 const row = e.target?.closest?.('[data-mid]');
                 const mid = Number(row?.getAttribute('data-mid'));
@@ -678,7 +748,7 @@ async function openPinsModal() {
             });
         });
 
-        body.querySelectorAll('[data-act="unpin"]').forEach(btn => {
+        body.querySelectorAll('[data-act="unpin"]').forEach((btn) => {
             btn.addEventListener('click', async (e) => {
                 const row = e.target?.closest?.('[data-mid]');
                 const mid = Number(row?.getAttribute('data-mid'));
@@ -691,18 +761,24 @@ async function openPinsModal() {
                 openPinsModal();
             });
         });
-
     } catch (e) {
         console.warn('[PINS] load failed', e);
         body.innerHTML = '<div class="muted">Не удалось загрузить</div>';
     }
 }
 
-let dmCallIncoming = null;
+
+
+// ===== DM CALLS (voice in DMs) =====
+let dmCallIncoming = null; // {chat_id, from_user_id, from_username}
+let dmCallOverlayMode = 'incoming';
 
 function dmCallOverlayEls() {
     return {
         overlay: document.getElementById('dmCallOverlay'),
+        card: document.querySelector('#dmCallOverlay .dm-call-card'),
+        avatar: document.getElementById('dmCallAvatar'),
+        name: document.getElementById('dmCallName'),
         title: document.getElementById('dmCallTitle'),
         sub: document.getElementById('dmCallSub'),
         accept: document.getElementById('dmCallAcceptBtn'),
@@ -710,30 +786,54 @@ function dmCallOverlayEls() {
     };
 }
 
-function showDmCallOverlay(info) {
-    const { overlay, title, sub } = dmCallOverlayEls();
+function setDmCallOverlay(info, mode = 'incoming') {
+    const { overlay, avatar, name, title, sub, accept, decline } = dmCallOverlayEls();
     if (!overlay) return;
 
-    dmCallIncoming = info;
+    dmCallIncoming = info || null;
+    dmCallOverlayMode = mode || 'incoming';
 
-    const from = (info?.from_username || 'Unknown').toString();
-    if (title) title.textContent = 'Входящий звонок';
-    if (sub) sub.textContent = `От: ${from}`;
+    const displayName = (info?.from_username || info?.target_username || chatNameById.get(Number(info?.chat_id)) || 'Пользователь').toString();
+    const letter = (displayName.trim().charAt(0) || 'U').toUpperCase();
 
+    if (avatar) avatar.textContent = letter;
+    if (name) name.textContent = displayName;
+
+    if (mode === 'outgoing') {
+        if (title) title.textContent = 'Исходящий звонок';
+        if (sub) sub.textContent = 'Ожидаем ответ…';
+        if (accept) accept.hidden = true;
+        if (decline) decline.textContent = 'Отменить';
+    } else {
+        if (title) title.textContent = 'Входящий звонок';
+        if (sub) sub.textContent = 'Принять звонок?';
+        if (accept) accept.hidden = false;
+        if (decline) decline.textContent = 'Отклонить';
+    }
+
+    overlay.dataset.mode = mode;
     overlay.classList.remove('hidden');
     overlay.setAttribute('aria-hidden', 'false');
 }
 
+function showDmCallOverlay(info) {
+    setDmCallOverlay(info, 'incoming');
+}
+
 function hideDmCallOverlay() {
-    const { overlay } = dmCallOverlayEls();
+    const { overlay, accept, decline } = dmCallOverlayEls();
     if (!overlay) return;
     overlay.classList.add('hidden');
     overlay.setAttribute('aria-hidden', 'true');
+    overlay.dataset.mode = 'incoming';
+    if (accept) accept.hidden = false;
+    if (decline) decline.textContent = 'Отклонить';
     dmCallIncoming = null;
+    dmCallOverlayMode = 'incoming';
 }
 
 async function startDmCall() {
-    if (currentServerId) return;
+    if (currentServerId) return; // only DMs
     const chatId = Number(currentChatId);
     if (!Number.isFinite(chatId) || chatId <= 0) return;
 
@@ -743,12 +843,7 @@ async function startDmCall() {
         wsManager.send({ type: 'dm_call_invite', data: { chat_id: chatId } });
     } catch (_) {}
 
-    try {
-        await window.lbVoice?.join?.(chatId, otherName);
-    } catch (e) {
-        console.warn('[DM CALL] join voice failed', e);
-    }
-
+    setDmCallOverlay({ chat_id: chatId, target_username: otherName }, 'outgoing');
     showToast('Вызов отправлен');
 }
 
@@ -758,7 +853,11 @@ function wireDmCallOverlayButtonsOnce() {
     if (overlay) overlay.dataset.wired = '1';
 
     overlay?.addEventListener('click', (e) => {
-        if (e.target === overlay) hideDmCallOverlay();
+        if (e.target !== overlay) return;
+        if (dmCallOverlayMode === 'outgoing' && dmCallIncoming?.chat_id) {
+            try { wsManager.send({ type: 'dm_call_cancel', data: { chat_id: Number(dmCallIncoming.chat_id), reason: 'dismissed' } }); } catch (_) {}
+        }
+        hideDmCallOverlay();
     });
 
     accept?.addEventListener('click', async (e) => {
@@ -790,8 +889,10 @@ function wireDmCallOverlayButtonsOnce() {
             return;
         }
         const chatId = Number(info.chat_id);
+        const evt = dmCallOverlayMode === 'outgoing' ? 'dm_call_cancel' : 'dm_call_decline';
+        const reason = dmCallOverlayMode === 'outgoing' ? 'canceled' : 'declined';
         hideDmCallOverlay();
-        try { wsManager.send({ type: 'dm_call_decline', data: { chat_id: chatId, reason: 'declined' } }); } catch (_) {}
+        try { wsManager.send({ type: evt, data: { chat_id: chatId, reason } }); } catch (_) {}
     });
 }
 
@@ -823,15 +924,21 @@ function onDmCallEvent(ev) {
     }
 
     if (t === 'dm_call_accept') {
+        // remote accepted: auto-join voice if we are still in that DM
         const chatId = Number(ev.chat_id);
         const fromName = (ev.from_username || chatNameById.get(chatId) || 'DM').toString();
+        hideDmCallOverlay();
         showToast('Вызов принят');
-        try { window.lbVoice?.join?.(chatId, fromName); } catch (_) {}
+        try {
+            openDmChat(chatId, fromName).catch(() => {});
+            window.lbVoice?.join?.(chatId, fromName);
+        } catch (_) {}
         return;
     }
 
     if (t === 'dm_call_end') {
         const chatId = Number(ev.chat_id);
+        hideDmCallOverlay();
         showToast('Звонок завершён');
         try {
             const st = window.lbVoice?.getState?.();
@@ -843,6 +950,7 @@ function onDmCallEvent(ev) {
         return;
     }
 
+    // *_sent
     if (t.endsWith('_sent')) {
         return;
     }
@@ -863,6 +971,97 @@ async function refreshFriendsStatus() {
     } catch (_) {
         el.textContent = '—';
     }
+}
+
+function askConfirmModal(opts = {}) {
+    const title = (opts.title || 'Подтверждение').toString();
+    const text = (opts.text || '').toString();
+    const okText = (opts.okText || 'Подтвердить').toString();
+    const cancelText = (opts.cancelText || 'Отмена').toString();
+    const danger = Boolean(opts.danger);
+
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.id = 'confirmOverlay';
+
+        overlay.innerHTML = `
+          <div class="modal" role="dialog" aria-modal="true">
+            <div class="modal-header">
+              <h2>${escapeHtml(title)}</h2>
+              <button class="icon-btn" type="button" id="confirmCloseBtn">✕</button>
+            </div>
+            <div class="modal-body">
+              <div>${escapeHtml(text)}</div>
+            </div>
+            <div class="modal-actions">
+              <button class="btn btn-ghost" type="button" id="confirmCancelBtn">${escapeHtml(cancelText)}</button>
+              <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" type="button" id="confirmOkBtn">${escapeHtml(okText)}</button>
+            </div>
+          </div>
+        `;
+
+        const cleanup = (val) => {
+            try { overlay.remove(); } catch (_) {}
+            resolve(Boolean(val));
+        };
+
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) cleanup(false);
+        });
+
+        document.body.appendChild(overlay);
+
+        const btnOk = overlay.querySelector('#confirmOkBtn');
+        const btnCancel = overlay.querySelector('#confirmCancelBtn');
+        const btnClose = overlay.querySelector('#confirmCloseBtn');
+
+        btnOk?.addEventListener('click', () => cleanup(true));
+        btnCancel?.addEventListener('click', () => cleanup(false));
+        btnClose?.addEventListener('click', () => cleanup(false));
+
+        overlay.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') cleanup(false);
+            if (e.key === 'Enter') cleanup(true);
+        });
+
+        setTimeout(() => {
+            try { btnOk?.focus(); } catch (_) {}
+        }, 0);
+    });
+}
+
+function formatPinTimestamp(value) {
+    const raw = (value ?? '').toString().trim();
+    if (!raw) return 'Дата неизвестна';
+
+    const asNumber = Number(raw);
+    if (Number.isFinite(asNumber) && asNumber > 0) {
+        const ms = raw.length >= 13 ? asNumber : asNumber * 1000;
+        const dt = new Date(ms);
+        if (!Number.isNaN(dt.getTime())) {
+            return dt.toLocaleString('ru-RU', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+            });
+        }
+    }
+
+    const iso = new Date(raw);
+    if (!Number.isNaN(iso.getTime())) {
+        return iso.toLocaleString('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+        });
+    }
+
+    return raw;
 }
 
 function askTextModal(opts = {}) {
@@ -1046,6 +1245,7 @@ function showServersMenu() {
     if (serversPanel) {
         serversPanel.classList.add('show-servers');
         document.body.classList.add('servers-open');
+        // mutually exclusive
         hideChannelsMenu();
         hideMembersMenu();
     }
@@ -1206,6 +1406,7 @@ function showEmojiPicker({ anchorEl, messageId } = {}) {
 
     emojiPickerEl.dataset.forMsgId = String(mid);
 
+    // place
     let x = window.innerWidth / 2;
     let y = window.innerHeight / 2;
     if (anchorEl && anchorEl.getBoundingClientRect) {
@@ -1230,6 +1431,7 @@ function showEmojiPicker({ anchorEl, messageId } = {}) {
     emojiPickerBackdrop.hidden = false;
 }
 
+// reactions (message-level)
 const _lbReactionsFetched = new Set();
 const _lbReactionsInFlight = new Set();
 
@@ -1252,6 +1454,7 @@ function renderReactionsHtml(items) {
         })
         .join('');
 
+    // add reaction button appears after first reaction
     const addBtn = `<button type="button" class="react-add" data-act="emoji" title="Добавить реакцию">+</button>`;
     return pills + addBtn;
 }
@@ -1372,13 +1575,16 @@ function renderServers(servers) {
             if (currentServerId === server.id) {
                 console.log(`[UI] Server ${server.id} already active`);
 
+                // if we are in Friends view, close it and ensure server UI is visible
                 if (location.hash === '#/friends' && window.closeFriends) {
                     window.closeFriends();
                     try { history.replaceState(null, '', location.pathname + location.search); } catch (_) { location.hash = ''; }
+                    // force refresh of channels/chat
                     openServer(server.id, server.name);
                     if (isTouchUi()) {
                         hideServersMenu();
-                        showChannelsMenu();
+                        hideChannelsMenu();
+                        hideMembersMenu();
                     }
                     return;
                 }
@@ -1387,7 +1593,9 @@ function renderServers(servers) {
                 setTimeout(() => serverItem.classList.remove('refreshing'), 300);
 
                 if (isTouchUi()) {
-                    showChannelsMenu();
+                    hideServersMenu();
+                    hideChannelsMenu();
+                    hideMembersMenu();
                 }
 
                 return;
@@ -1397,7 +1605,8 @@ function renderServers(servers) {
             openServer(server.id, server.name);
             if (isTouchUi()) {
                 hideServersMenu();
-                showChannelsMenu();
+                hideChannelsMenu();
+                hideMembersMenu();
             }
         });
         
@@ -1511,16 +1720,14 @@ function renderMembers(members) {
         let st = statusToClass(rawStatus);
         if (st === 'invisible') st = 'offline';
         const online = st !== 'offline';
+        const badgeHtml = m.role === 'admin' ? '<span class="member-badge">Админ</span>' : '';
 
-        el.className = `member status-${st} ${online ? 'online' : ''}`;
-        const letter = (m.username || 'U').charAt(0).toUpperCase();
-        const roleLabel = m.role === 'admin' ? 'Админ' : (m.role || 'Участник');
-
+        el.className = `member status-${st} ${online ? 'online' : 'offline'}`;
         el.innerHTML = `
           <div class="avatar small">${avatarInnerHtml(m.avatar_file_id, m.username)}</div>
           <div class="text">
-            <div class="name">${m.username || 'Unknown'}</div>
-            <div class="role">${roleLabel}</div>
+            <div class="name">${escapeHtml(m.username || 'Unknown')}</div>
+            <div class="role">${badgeHtml}</div>
           </div>
         `;
 
@@ -1548,40 +1755,25 @@ function renderMembers(members) {
         return el;
     };
 
-    const renderGroup = (title, arr, opts = {}) => {
+    const renderGroup = (title, arr) => {
         if (!arr.length) return;
-        const collapsible = !!opts.collapsible;
-        const defaultCollapsed = !!opts.defaultCollapsed;
 
-        const h = document.createElement('button');
-        h.type = 'button';
-        h.className = 'members-group-title' + (collapsible ? ' collapsible' : '');
-        h.innerHTML = `<span class="t">${escapeHtml(title)} (${arr.length})</span>${collapsible ? `<span class="chev">▾</span>` : ''}`;
+        const h = document.createElement('div');
+        h.className = 'members-group-title';
+        h.innerHTML = `<span class="t">${escapeHtml(title)} — ${arr.length}</span>`;
         membersList.appendChild(h);
 
         const box = document.createElement('div');
         box.className = 'members-group-box';
-        if (collapsible && defaultCollapsed) box.hidden = true;
 
         for (const m of arr) {
             box.appendChild(createMemberEl(m));
         }
         membersList.appendChild(box);
-
-        if (collapsible) {
-            h.addEventListener('click', () => {
-                const next = !box.hidden;
-                box.hidden = next;
-                h.classList.toggle('collapsed', next);
-            });
-            h.classList.toggle('collapsed', box.hidden);
-        }
     };
 
-    renderGroup('В сети', onlineMembers, { collapsible: false });
-
-    const shouldCollapseOffline = offlineMembers.length >= 8;
-    renderGroup('Оффлайн', offlineMembers, { collapsible: true, defaultCollapsed: shouldCollapseOffline });
+    renderGroup('В сети', onlineMembers);
+    renderGroup('Не в сети', offlineMembers);
 }
 
 async function openServer(serverId, serverName) {
@@ -1596,6 +1788,7 @@ async function openServer(serverId, serverName) {
         console.log(`[UI] Opening server ${serverId} (${serverName})`);
         if ((location.hash === '#/friends' || location.hash === '#friends') && window.closeFriends) {
             window.closeFriends();
+            // clear hash so friends doesn't reopen on refresh
             try { history.replaceState(null, '', location.pathname + location.search); } catch (_) { location.hash = ''; }
         }
         
@@ -1617,10 +1810,12 @@ async function openServer(serverId, serverName) {
         console.log(`[UI] Loaded ${chats.length} chats for server ${serverId}`);
         
         renderChannels(chats);
+        // update members list
         await loadMembers(serverId);
         
-        if (window.innerWidth <= 900) {
-            showChannelsMenu();
+        if (window.innerWidth <= 900 || isTouchUi()) {
+            hideServersMenu();
+            hideMembersMenu();
         }
         
         const lastChatId = Number(sessionStorage.getItem("lastChatId"));
@@ -1676,10 +1871,14 @@ function renderChannels(chats) {
         channelItem.className = `item channel ${isVoice ? 'voice' : ''} ${isActive ? 'active' : ''}`;
 
         const unread = Number(chat?.unread_count ?? 0);
+        // unread badges only for TEXT channels
         const hasUnread = !isVoice && Number.isFinite(unread) && unread > 0;
+
+        // IMPORTANT: last message preview should NOT be shown in public server channels.
         const subText = isVoice
             ? 'Голосовой канал'
             : (chat.description || 'Канал');
+
         const delBtn = canManage ? `<button class="channel-del" type="button" title="Удалить канал">🗑</button>` : '';
 
         channelItem.innerHTML = `
@@ -1695,6 +1894,7 @@ function renderChannels(chats) {
             ${delBtn}
         `;
 
+        // delete channel (owner/admin)
         channelItem.querySelector('.channel-del')?.addEventListener('click', async (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -1734,6 +1934,8 @@ function renderChannels(chats) {
 
                 const st = window.lbVoice?.getState?.();
                 const inCh = Number(st?.channel_id || 0);
+
+                // Not in voice yet: open voice view and connect
                 if (!inCh) {
                     try { await openVoiceView(targetId, targetName); } catch (_) {}
                     try { await window.lbVoice?.join?.(targetId, targetName); } catch (_) {}
@@ -1741,12 +1943,14 @@ function renderChannels(chats) {
                     return;
                 }
 
+                // Already in this voice: just open the voice view
                 if (inCh === targetId) {
                     try { await openVoiceView(targetId, targetName); } catch (_) {}
                     markVoiceSelectedInList(targetId);
                     return;
                 }
 
+                // Switching voice: require double click to avoid misclick disconnect
                 const now = Date.now();
                 if (lastVoiceSwitchClick?.id === targetId && (now - Number(lastVoiceSwitchClick.at || 0)) < 1500) {
                     lastVoiceSwitchClick = { id: null, at: 0 };
@@ -1771,6 +1975,8 @@ function renderChannels(chats) {
 }
 
 let currentVoiceViewChannelId = null;
+
+// chatView is moved between chatPanel and membersPanel in voice split mode
 let chatViewHomeParent = null;
 let chatViewHomeNext = null;
 
@@ -1788,6 +1994,7 @@ function setVoiceDiscordLayout(enabled) {
       chatViewHomeNext = chatView.nextElementSibling;
     }
 
+    // move chat to the right panel
     try {
       voiceChatSide.hidden = false;
       if (membersPanelMembers) membersPanelMembers.hidden = true;
@@ -1798,6 +2005,7 @@ function setVoiceDiscordLayout(enabled) {
       }
     } catch (_) {}
   } else {
+    // restore default layout
     try {
       if (membersPanelMembers) membersPanelMembers.hidden = false;
       voiceChatSide.hidden = true;
@@ -1833,16 +2041,19 @@ function showVoiceTextLocked(chatId, channelName) {
   currentChatId = cid;
   clearReplyTo();
 
+  // header
   const chatTitleElement = document.getElementById('chat-title');
   if (chatTitleElement) {
     chatTitleElement.textContent = `# ${channelName || 'Voice'}`;
   }
 
+  // active item highlight
   document.querySelectorAll('.item.channel').forEach(item => {
     const itemId = parseInt(item.dataset.channelId);
     item.classList.toggle('active', itemId === cid);
   });
 
+  // lock screen
   const messagesContainer = document.getElementById('messages');
   if (messagesContainer) {
     messagesContainer.innerHTML = `
@@ -1854,6 +2065,7 @@ function showVoiceTextLocked(chatId, channelName) {
     `;
   }
 
+  // hide composer
   const composer = document.getElementById('composer');
   if (composer) composer.hidden = true;
 }
@@ -1876,6 +2088,8 @@ async function openVoiceView(channelId, channelName) {
   currentVoiceViewChannelId = Number(channelId);
   if (!Number.isFinite(currentVoiceViewChannelId) || currentVoiceViewChannelId <= 0) currentVoiceViewChannelId = null;
   if (!currentVoiceViewChannelId) return;
+
+  // Discord-like: stage in center, text chat on the right.
   if (friendsView) friendsView.hidden = true;
   if (membersPanel) membersPanel.hidden = false;
   if (voiceChatSide) voiceChatSide.hidden = false;
@@ -1883,7 +2097,7 @@ async function openVoiceView(channelId, channelName) {
 
   voiceView.hidden = false;
   document.body.classList.add('voice-view-open');
-  document.body.classList.add('voice-split-open');
+  document.body.classList.add('voice-split-open');  // Open voice text only if we are actually connected to this voice channel.
   try {
     const stv = window.lbVoice?.getState?.();
     const inCh = Number(stv?.channel_id || 0);
@@ -1920,6 +2134,7 @@ function closeVoiceView() {
   document.body.classList.remove('voice-view-open');
   document.body.classList.remove('voice-split-open');
   try { setVoiceDiscordLayout(false); } catch (_) {}
+  // restore members panel in server mode
   try {
     const membersPanel = document.getElementById('membersPanel');
     if (membersPanel && currentServerId) membersPanel.hidden = false;
@@ -1928,6 +2143,7 @@ function closeVoiceView() {
   markVoiceSelectedInList(null);
 }
 
+// allow other modules (friends/settings/etc.) to reliably close/open voice view
 window.openVoiceView = openVoiceView;
 window.closeVoiceView = closeVoiceView;
 
@@ -1936,6 +2152,7 @@ document.addEventListener('lb:openVoiceView', (ev) => {
   openVoiceView(d.channel_id, d.channel_name);
 });
 
+// Voice module notifies when user leaves voice (so UI must not look "still in voice")
 document.addEventListener('lb:voiceLeft', (ev) => {
   try {
     const ch = Number(ev?.detail?.channel_id || 0);
@@ -1946,12 +2163,14 @@ document.addEventListener('lb:voiceLeft', (ev) => {
       closeVoiceView();
     }
 
+    // If we were looking at the voice text chat — return to last opened text chat for this server
     if (wasVoiceChatOpen && currentServerId) {
       const last = lastTextChatByServer.get(Number(currentServerId));
       const nextId = Number(last?.id || 0);
       if (nextId && nextId !== ch) {
         openChat(nextId, last?.name || chatNameById.get(nextId) || '');
       } else {
+        // fallback: first non-voice channel
         try {
           const list = document.getElementById('channels-list');
           const first = list?.querySelector?.('.item.channel:not(.voice)')?.dataset?.channelId;
@@ -1965,11 +2184,14 @@ document.addEventListener('lb:voiceLeft', (ev) => {
   }
 });
 
+// Voice module notifies when user successfully joined a voice channel
 document.addEventListener('lb:voiceJoined', (ev) => {
   try {
     const ch = Number(ev?.detail?.channel_id || 0);
     if (!ch) return;
     const name = (ev?.detail?.channel_name || chatNameById.get(ch) || 'Voice').toString();
+
+    // Open voice view if it matches the currently selected voice channel
     if (Number(currentVoiceViewChannelId || 0) === ch) {
       hideVoiceTextLocked();
       openChat(ch, name);
@@ -2007,6 +2229,7 @@ function setUiModeDm() {
 
     if (channelsList) channelsList.hidden = true;
     if (dmList) dmList.hidden = false;
+    // On desktop keep members panel visible (voice members are shown there).
   if (membersPanel) membersPanel.hidden = (window.innerWidth <= 900);
 
     try { updateChannelAdminUi(); } catch (_) {}
@@ -2019,7 +2242,8 @@ let hiddenDmChats = new Set();
 let hiddenDmMeta = new Map();
 let dmMetaByChatId = new Map();
 
-const dmActivity = new Map();
+// DM ordering: keep local last-activity timestamps/ids to re-order instantly on new messages
+const dmActivity = new Map(); // chatId -> { lastId?:number, at?:number }
 
 function parseMaybeNumber(v) {
     const n = typeof v === 'string' ? Number(v) : Number(v);
@@ -2028,19 +2252,28 @@ function parseMaybeNumber(v) {
 
 function extractFileNameFromMessageContent(text) {
     const s = (text || '').toString();
+    // Robust parse (supports truncated previews from SQL substr and legacy/broken variants):
+    //   [[file:ID|NAME|MIME|SIZE]]
+    //   [[file:ID|NAME|MIME...  (truncated)
+    //   [[file=ID|NAME|...     (legacy)
+    //   [[file:ID]]NAME|MIME|SIZE]]   (broken legacy seen in DB)
     const i1 = s.indexOf('[[file:');
     const i2 = s.indexOf('[[file=');
     const i = i1 >= 0 ? i1 : i2;
     if (i < 0) return null;
 
     const tail = s.slice(i);
+
+    // Canonical / legacy-with-pipe: "[[file:ID|NAME|..." or "[[file=ID|NAME|..."
     const headPipe = tail.match(/\[\[file[:=](\d+)\|/);
     if (headPipe) {
+        // Position right after "[[file:ID|" (or "[[file=ID|")
         const nameStart = i + headPipe[0].length;
         if (nameStart >= s.length) return null;
 
         const rest = s.slice(nameStart);
 
+        // Name ends at next "|" or closing "]]" or end (if truncated)
         let end = rest.indexOf('|');
         const endClose = rest.indexOf(']]');
         if (end === -1 || (endClose !== -1 && endClose < end)) end = endClose;
@@ -2049,11 +2282,13 @@ function extractFileNameFromMessageContent(text) {
         let encName = rest.slice(0, end).trim();
         if (!encName) return null;
 
+        // If truncated mid-name, strip trailing whitespace/ellipsis
         encName = encName.replace(/[\s\u2026]+$/g, '');
 
         try { return decodeURIComponent(encName); } catch (_) { return encName; }
     }
 
+    // Broken legacy: "[[file:ID]]NAME|MIME|SIZE]]" (note: no "|" after ID)
     const headBroken = tail.match(/\[\[file:(\d+)\]\]/);
     if (!headBroken) return null;
 
@@ -2062,6 +2297,7 @@ function extractFileNameFromMessageContent(text) {
 
     const rest = s.slice(nameStart);
 
+    // Name ends at next "|" or closing "]]" or end
     let end = rest.indexOf('|');
     const endClose = rest.indexOf(']]');
     if (end === -1 || (endClose !== -1 && endClose < end)) end = endClose;
@@ -2079,6 +2315,7 @@ function extractAllFileNamesFromMessageContent(text) {
     const out = [];
     if (!s.includes('[[file:') && !s.includes('[[file=')) return out;
 
+    // canonical / legacy with pipe: [[file:ID|NAME|...]]
     try {
         const re = /\[\[file[:=](\d+)\|([^|\]]+)[^\]]*\]\]/g;
         let m;
@@ -2091,6 +2328,7 @@ function extractAllFileNamesFromMessageContent(text) {
         }
     } catch (_) {}
 
+    // broken legacy: [[file:ID]]NAME|...]]
     try {
         const re2 = /\[\[file:(\d+)\]\]([^|\]]+)[^\]]*\]\]/g;
         let m2;
@@ -2103,6 +2341,7 @@ function extractAllFileNamesFromMessageContent(text) {
         }
     } catch (_) {}
 
+    // unique, keep order
     const seen = new Set();
     const uniq = [];
     for (const n of out) {
@@ -2122,10 +2361,13 @@ function previewTextFromMessageContent(text) {
     if (fn) return `📎 ${fn}`;
 
     if (raw.includes('[[file:') || raw.includes('[[file=')) {
+        // hide internal file markers even if parsing failed
         const cleaned = raw
+            // canonical / legacy with pipe
             .replace(/\[\[file[:=]\d+\|([^|\]]+)[^\]]*\]\]/g, (_, name) => {
                 try { return `📎 ${decodeURIComponent(name)}`; } catch (_) { return `📎 ${name}`; }
             })
+            // broken legacy: [[file:ID]]NAME|MIME|SIZE]]
             .replace(/\[\[file:(\d+)\]\]([^|\]]+)[^\]]*\]\]/g, (_, _id, name) => {
                 try { return `📎 ${decodeURIComponent(name)}`; } catch (_) { return `📎 ${name}`; }
             })
@@ -2141,9 +2383,11 @@ function previewTextFromMessageContent(text) {
 function dmPreviewFrom(dm) {
     const raw = (dm?.last_message_preview || '').toString().trim();
     if (raw) {
+        // prevent leaking internal ids: show file name instead of [[file:id|...]]
         const fn = extractFileNameFromMessageContent(raw);
         if (fn) return fn;
         if (raw.includes('[[file:') || raw.includes('[[file=')) return '📎 вложение';
+        // if raw contains file tag but parsing failed (no mime/size), still hide it
         const cleaned = raw
             .replace(/\[\[file:\d+\|([^|\]]+)[^\]]*\]\]/g, (_, name) => {
                 try { return decodeURIComponent(name); } catch (_) { return name; }
@@ -2153,6 +2397,7 @@ function dmPreviewFrom(dm) {
         return cleaned;
     }
 
+    // fallback: if server didn't provide preview but we have last message content-like text
     const fallback = (dm?.last_message_content || '').toString();
     const fn = extractFileNameFromMessageContent(fallback);
     if (fn) return fn;
@@ -2256,6 +2501,7 @@ function maybeUnhideDmOnIncoming(chatId) {
     const meta = hiddenDmMeta.get(id) || dmMetaByChatId.get(id);
     const otherName = (meta?.otherName || chatNameById.get(id) || `Чат #${id}`).toString();
 
+    // refresh list (не переключаем чат автоматически)
     (async () => {
         try { await loadDmList(); } catch (_) {}
     })();
@@ -2284,6 +2530,7 @@ function updateChannelListItemOnMessage(chatId, unreadCount) {
     if (!list) return;
     const el = list.querySelector(`.item.channel[data-channel-id="${chatId}"]`);
     if (!el) return;
+    // update badge
     const badge = el.querySelector('.badge-unread');
     const n = Number(unreadCount);
     const show = Number.isFinite(n) && n > 0;
@@ -2302,6 +2549,7 @@ function updateChannelListItemOnMessage(chatId, unreadCount) {
     } else {
         badge?.remove?.();
     }
+    // do NOT bump channel ordering here (server channels usually fixed)
 }
 
 loadHiddenDmChats();
@@ -2334,6 +2582,7 @@ function renderDmList(dms) {
     const sorted = [...dms].sort((a, b) => {
         const ka = dmSortKey(a);
         const kb = dmSortKey(b);
+        // desc
         return (kb > ka) ? 1 : (kb < ka) ? -1 : 0;
     });
 
@@ -2343,6 +2592,8 @@ function renderDmList(dms) {
         const otherId = Number(dm?.other_user_id);
         const otherName = (dm?.other_username || 'Unknown').toString();
         const preview = dmPreviewFrom(dm);
+
+        // cache activity from API
         const apiLastId = parseMaybeNumber(dm?.last_message_id) || parseMaybeNumber(dm?.last_message_msg_id);
         const apiAt = Date.parse(dm?.last_message_at || dm?.updated_at || '') || 0;
         if (Number.isFinite(chatId) && chatId > 0) {
@@ -2358,6 +2609,7 @@ function renderDmList(dms) {
         }
 
         if (hiddenDmChats.has(chatId)) {
+            // keep meta for auto-unhide
             if (Number.isFinite(chatId) && chatId > 0) {
                 hiddenDmMeta.set(chatId, { otherId, otherName });
                 saveHiddenDmMeta();
@@ -2397,12 +2649,13 @@ function renderDmList(dms) {
 async function openDmChat(chatId, otherName) {
     currentServerId = null;
 
+    // If user is in Friends view, chat UI is hidden. Ensure we exit Friends view.
     if (typeof window.closeFriends === 'function') {
         try { window.closeFriends(); } catch (e) { console.warn('[UI] closeFriends failed', e); }
     }
 
     setUiModeDm();
-    await loadDmList();
+    await loadDmList(); // refresh active state + order
     await openChat(chatId, otherName);
 }
 
@@ -2418,6 +2671,8 @@ window.addEventListener('laberry:dm-open', (ev) => {
 
 
 async function openChat(chatId, title) {
+    // If voice view is open in split mode for the same channel, do not close it.
+    // Otherwise, switching chats should close voice layout.
     try {
         const cid = Number(chatId);
         const vid = Number(currentVoiceViewChannelId || 0);
@@ -2432,6 +2687,7 @@ async function openChat(chatId, title) {
     console.log(`[UI] Opening chat ${chatId} (${title})`);
     const seq = ++openChatSeq;
 
+    // unlock composer if it was locked by voice
     try { hideVoiceTextLocked(); } catch (_) {}
     try {
         const composer = document.getElementById('composer');
@@ -2439,10 +2695,12 @@ async function openChat(chatId, title) {
     } catch (_) {}
     
     currentChatId = chatId;
+    // prevent cross-chat reply leaks
     clearReplyTo();
     try { chatNameById.set(chatId, title || `#${chatId}`); } catch (_) {}
     sessionStorage.setItem("lastChatId", chatId.toString());
 
+    // remember last opened TEXT (non-voice) chat for this server
     try {
         const kind = (chatKindById.get(chatId) || 'text').toString();
         if (currentServerId && kind !== 'voice') {
@@ -2499,11 +2757,15 @@ async function openChat(chatId, title) {
         }
         
         if (Array.isArray(msgs) && msgs.length > 0) {
+            // msgs приходят уже по возрастанию id
             msgs.forEach(m => addMessage(m, { dedup: false, history: true }));
 
             chatPaging.minId = msgs[0]?.id ?? null;
             chatPaging.hasMore = msgs.length >= MESSAGES_PAGE_SIZE;
 
+            // scroll logic:
+            // - no unread -> start at bottom (and stick to bottom while media loads)
+            // - has unread -> jump to last seen message + marker
             if (messagesContainer) {
                 wireMessagesAutoScroll();
 
@@ -2554,6 +2816,7 @@ async function openChat(chatId, title) {
             }
         }
         
+        // Join room via WS. If WS isn't connected yet, websocket-manager will queue the message.
         if (wsManager && typeof wsManager.joinRoom === 'function') {
             wsManager.joinRoom(chatId);
         }
@@ -2607,6 +2870,7 @@ async function loadOlderMessages() {
         return;
     }
 
+    // prepend in correct order
     for (let i = msgs.length - 1; i >= 0; i--) {
         addMessage(msgs[i], { dedup: false, prepend: true });
     }
@@ -2624,11 +2888,14 @@ function setupWebSocketHandlers() {
     window.onChatMessage = (data) => {
         console.log('[APP] WebSocket message received:', data);
         if (!data) return;
+
+        // support service events (typing/upload) if server sends them
         if (data.type === 'typing_state' || data.type === 'typing' || data.type === 'upload_state') {
             try { window.onWsMessage?.(data); } catch (_) {}
             return;
         }
 
+        // message deleted
         if (data.type === 'message_deleted') {
             const roomIdRaw = data.room_id;
             if (roomIdRaw === undefined || roomIdRaw === null) return;
@@ -2643,6 +2910,7 @@ function setupWebSocketHandlers() {
             return;
         }
 
+        // reactions update
         if (data.type === 'reaction') {
             if (data.room_id === undefined || data.room_id === null) return;
             const roomId = typeof data.room_id === 'string' ? parseInt(data.room_id, 10) : data.room_id;
@@ -2667,8 +2935,10 @@ function setupWebSocketHandlers() {
         const senderAvatar = parseMaybeNumber(data.sender_avatar_file_id);
         const reactions = Array.isArray(data.reactions) ? data.reactions : null;
 
+        // ignore echo from yourself
         const myName = (currentUser?.username || currentUser?.nickname || '').toString();
         if (myName && sender === myName) {
+            // still append if it's current chat and missing
             if (roomId === currentChatId) {
                 addMessage({
                     id: data.id,
@@ -2686,6 +2956,7 @@ function setupWebSocketHandlers() {
             return;
         }
 
+        // DM list ordering + preview
         const dmPreview = (() => {
             const fn = extractFileNameFromMessageContent(content);
             if (fn) return fn;
@@ -2696,11 +2967,13 @@ function setupWebSocketHandlers() {
         })();
 
         if (dmMetaByChatId.has(roomId) || hiddenDmMeta.has(roomId)) {
+            // unhide on incoming
             maybeUnhideDmOnIncoming(roomId);
             dmActivity.set(roomId, { lastId: msgId || (dmActivity.get(roomId)?.lastId || 0), at: Date.now() });
             updateDmListItemOnMessage(roomId, dmPreview);
         }
 
+        // server channel unread updates
         if (currentServerId && roomId !== currentChatId) {
             const kind = (chatKindById.get(roomId) || 'text').toString();
             if (kind !== 'voice') {
@@ -2710,6 +2983,7 @@ function setupWebSocketHandlers() {
             }
         }
 
+        // append to current chat
         if (roomId === currentChatId) {
             addMessage({
                 id: data.id,
@@ -2723,19 +2997,22 @@ function setupWebSocketHandlers() {
                 reply_preview: replyPreview,
                 reactions: reactions || undefined,
             });
-
+            // mark read
             if (currentServerId) {
                 clearUnreadCount(currentServerId, roomId);
                 updateChannelListItemOnMessage(roomId, 0);
             }
         }
 
+        // notifications for any subscribed chats (ws joins accessible rooms)
         if ((chatKindById.get(roomId) || 'text') !== 'voice') {
             notifyForIncomingMessage(roomId, sender, content);
         }
     };
 }
 
+// ===== Typing / Upload indicator (above composer) =====
+// roomId -> Map(username -> { kind:'typing'|'upload', activity:'text'|'image'|'video'|'file', at:number })
 const roomTyping = new Map();
 
 function ensureTypingIndicatorEl() {
@@ -2758,6 +3035,7 @@ function _activityLabel(kind, activity) {
         if (a === 'video') return 'отправляет видео…';
         return 'отправляет файл…';
     }
+    // typing
     if (a === 'image' || a === 'video' || a === 'file') return _activityLabel('upload', a);
     return 'печатает…';
 }
@@ -2799,6 +3077,7 @@ window.onWsMessage = (msg) => {
 
         const myName = (currentUser?.username || currentUser?.nickname || '').toString();
 
+        // old format: {type:'typing_state', data:{room_id, username, is_typing}}
         if (msg.type === 'typing_state') {
             const d = msg.data || msg;
             const roomId = Number(d.room_id);
@@ -2823,6 +3102,8 @@ window.onWsMessage = (msg) => {
             return;
         }
 
+        // new format from server ws/chat.rs:
+        // {type:'typing'|'upload_state', chat_id, username, state:'start'|'stop', activity:'text'|'image'|'video'|'file'}
         if (msg.type === 'typing' || msg.type === 'upload_state') {
             const roomId = Number(msg.chat_id);
             const username = (msg.username || '').toString();
@@ -2846,6 +3127,14 @@ window.onWsMessage = (msg) => {
             }
 
             refreshTypingIndicator(roomId);
+            return;
+        }
+
+        if (msg.type === 'user_online' || msg.type === 'user_offline') {
+            if (currentServerId) {
+                loadMembers(currentServerId).catch(() => {});
+            }
+            refreshFriendsStatus().catch(() => {});
             return;
         }
     } catch (e) {
@@ -2878,10 +3167,12 @@ function initWebSocket() {
             wsManager.connect(token).then(() => {
                 console.log('[APP] WebSocket connected successfully');
 
+                // После WS-коннекта presence в БД обновлён — перезагрузим список участников
                 if (currentServerId) {
                     loadMembers(currentServerId).catch(e => console.warn('[APP] loadMembers after WS connect failed', e));
                 }
 
+                // Лёгкий поллинг, чтобы онлайн/оффлайн не зависали (без WS-событий presence)
                 if (!membersPollTimer) {
                     membersPollTimer = setInterval(() => {
                         if (currentServerId) loadMembers(currentServerId).catch(() => {});
@@ -2907,6 +3198,7 @@ function setupMessageComposer() {
         return;
     }
 
+    // remove old listeners (hot reload safe)
     const newForm = composerForm.cloneNode(true);
     composerForm.parentNode.replaceChild(newForm, composerForm);
 
@@ -2959,15 +3251,19 @@ function setupMessageComposer() {
         for (let f of list) {
             if (!f) continue;
 
+            // some clipboard images have empty name
             let name = (f.name || '').toString().trim();
             if (!name) {
                 const ext = (f.type && f.type.includes('/')) ? f.type.split('/')[1] : 'png';
                 name = `pasted_${Date.now()}_${Math.floor(Math.random() * 1000)}.${ext}`;
                 try {
                     f = new File([f], name, { type: f.type || 'application/octet-stream' });
-                } catch (_) {}
+                } catch (_) {
+                    // ignore
+                }
             }
 
+            // 50MB server limit
             if ((f.size || 0) > 50 * 1024 * 1024) {
                 alert(`Файл слишком большой (лимит 50MB): ${name}`);
                 continue;
@@ -2988,6 +3284,8 @@ function setupMessageComposer() {
 
     attachBtn?.addEventListener('click', () => {
         if (!fileInput) return;
+        // iOS Safari может игнорировать programmatic click, если инпут был hidden/display:none.
+        // Если attachBtn это <label for="fileInput"> — нативный клик уже откроет пикер.
         if ((attachBtn?.tagName || '').toUpperCase() === 'LABEL') return;
         fileInput.click();
     });
@@ -3035,6 +3333,7 @@ function setupMessageComposer() {
             timestamp: payload?.timestamp || Date.now(),
         };
 
+        // re-order DM list immediately after send
         if (!currentServerId && Number.isFinite(Number(currentChatId))) {
             const chatId = Number(currentChatId);
             const prev = extractFileNameFromMessageContent(c) || ((c.includes('[[file:') || c.includes('[[file=')) ? '📎 вложение' : (c.replace(/\s+/g, ' ').trim().slice(0, 120))) || '📎 вложение';
@@ -3051,6 +3350,7 @@ function setupMessageComposer() {
             msg.reply_to_id = replyId;
         }
 
+        // reset reply draft only for the active composer (not for background upload jobs)
         if (replyId && (!opts || opts.replyId === undefined)) {
             replyToMessageId = null;
             replyToPreview = null;
@@ -3069,15 +3369,18 @@ function setupMessageComposer() {
             addMessage(msg);
         }
 
+        // mark read for current server chat
         if (currentServerId) {
             clearUnreadCount(currentServerId, currentChatId);
             updateChannelListItemOnMessage(currentChatId, 0);
         }
     };
 
+    // ===== Upload queue (progress + cancel) =====
     const uploadQueueEl = document.getElementById('uploadQueue');
     let uploadSeq = 1;
-    const uploadJobs = []; 
+    const uploadJobs = []; // {jobId, chatId, serverId, text, replyId, replyPreview, files:[{file, name, mime, size, fileId}], status, loadedBytes, totalBytes, xhrs:[], err?:string}
+
     const guessUploadActivity = (filesArr) => {
         const items = Array.isArray(filesArr) ? filesArr : [];
         const hasVideo = items.some(it => (it?.mime || it?.file?.type || '').toString().toLowerCase().startsWith('video/'));
@@ -3239,6 +3542,7 @@ function setupMessageComposer() {
                 const res = await uploadFileXHR(f, job.chatId, (loaded, total) => {
                     const curTotal = Number(total || it.size || f.size || 0);
                     const curLoaded = Number(loaded || 0);
+                    // Progress is: doneBytes + current file loaded
                     job.loadedBytes = Math.min(job.totalBytes, doneBytes + Math.min(curLoaded, curTotal || curLoaded));
                     renderUploadQueue();
                 }, (xhr) => {
@@ -3275,6 +3579,8 @@ function setupMessageComposer() {
 
             const combined = (job.text ? job.text : '') + (markers.length ? ((job.text ? '\n' : '') + markers.join('')) : '');
             await sendMessage(combined, { replyId: job.replyId, replyPreview: job.replyPreview });
+
+            // done
             wsSendState('upload_state', 'stop', job.activity);
             const idx = uploadJobs.findIndex(j => j.jobId === job.jobId);
             if (idx >= 0) uploadJobs.splice(idx, 1);
@@ -3304,6 +3610,7 @@ function setupMessageComposer() {
             return;
         }
 
+        // snapshot reply
         const replyIdSnap = replyToMessageId;
         const replyPreviewSnap = replyToPreview ? { ...replyToPreview } : null;
         if (replyIdSnap) {
@@ -3312,12 +3619,15 @@ function setupMessageComposer() {
             if (replyBarEl) replyBarEl.hidden = true;
         }
 
+        // optimistic UI
         if (input) input.value = '';
         pending = [];
         renderPending();
 
         const emptyMsg = document.getElementById('messages')?.querySelector?.('.empty-chat');
         if (emptyMsg) emptyMsg.remove();
+
+        // Text-only: keep old behavior (short lock only)
         if (files.length === 0) {
             if (isSubmitting) return;
             isSubmitting = true;
@@ -3335,6 +3645,7 @@ function setupMessageComposer() {
             return;
         }
 
+        // Files: create background upload job (do NOT lock composer)
         const job = {
             jobId: uploadSeq++,
             chatId: Number(currentChatId),
@@ -3357,10 +3668,14 @@ function setupMessageComposer() {
 
         uploadJobs.push(job);
         renderUploadQueue();
+
+        // stop typing (user submitted)
         wsSendState('typing', 'stop', 'text');
+
         startUploadJob(job);
     });
 
+    // ===== Typing (client -> WS) =====
     let typingActive = false;
     let typingStopTimer = null;
 
@@ -3692,6 +4007,7 @@ if (this.openEl) this.openEl.href = rawHref;
         },
     };
 
+    // buttons
     overlay.querySelector('#avClose')?.addEventListener('click', close);
     overlay.querySelector('#avZoomIn')?.addEventListener('click', () => {
         const v = attachmentViewer;
@@ -3715,6 +4031,7 @@ if (this.openEl) this.openEl.href = rawHref;
     return attachmentViewer;
 }
 
+// ===== Archive browser (safe, read-only) =====
 let archiveViewer = null;
 
 function ensureArchiveViewer() {
@@ -3759,6 +4076,7 @@ function ensureArchiveViewer() {
 }
 
 function buildArchiveTree(entries) {
+    // entries: array of {path, size?, is_dir?} OR string paths
     const root = { name: '', kids: new Map(), isDir: true };
 
     const addPath = (p, size) => {
@@ -3843,9 +4161,10 @@ function setupAttachmentUi() {
     const container = $("messages");
     if (!container) return;
 
+    // open viewer (image click / file-row click)
     container.addEventListener('click', (e) => {
         const dl = e.target?.closest?.('.att-dl');
-        if (dl) return;
+        if (dl) return; // download
 
         const archBtn = e.target?.closest?.('.att-archive');
         if (archBtn) {
@@ -3898,6 +4217,7 @@ function setupAttachmentUi() {
         }
     });
 
+    // video: dblclick to open viewer
     container.addEventListener('dblclick', (e) => {
         const vtag = e.target?.closest?.('video.att-video');
         if (!vtag) return;
@@ -3920,7 +4240,10 @@ function setupAttachmentUi() {
     attachmentUiReady = true;
 }
 
-const _fileLinkCache = new Map();
+
+
+// Signed file links (avoid exposing auth tokens in URLs; short-lived per-file dl token)
+const _fileLinkCache = new Map(); // id -> { expMs, data }
 
 async function getFileLinks(fileId) {
     const id = String(fileId || '').trim();
@@ -3943,6 +4266,7 @@ function wireAttachments(root) {
 
 if (!root) return;
 
+// initialize videos (src + show controls on hover)
 root.querySelectorAll?.('video.att-video')?.forEach?.((v) => {
     if (v.dataset.wired === '1') return;
     const src = v.getAttribute('data-src');
@@ -3953,6 +4277,7 @@ root.querySelectorAll?.('video.att-video')?.forEach?.((v) => {
     v.dataset.wired = '1';
 });
 
+// wire signed links for attachments (download/raw/preview)
 root.querySelectorAll?.('.msg-attachment')?.forEach?.((att) => {
     if (!att || att.dataset.linksWired === '1') return;
     const id = att.getAttribute('data-file-id');
@@ -3962,10 +4287,12 @@ root.querySelectorAll?.('.msg-attachment')?.forEach?.((att) => {
     getFileLinks(id).then((links) => {
         if (!links) return;
 
+        // download buttons (there can be multiple in one attachment)
         att.querySelectorAll?.('a.att-dl')?.forEach?.((a) => {
             if (links.download_url) a.href = links.download_url;
         });
 
+        // image preview + raw
         const img = att.querySelector?.('img.att-img');
         if (img) {
             if (links.preview_url) {
@@ -3975,18 +4302,23 @@ root.querySelectorAll?.('.msg-attachment')?.forEach?.((att) => {
             if (links.raw_url) img.setAttribute('data-raw-src', links.raw_url);
         }
 
+        // video
         const v = att.querySelector?.('video.att-video');
         if (v) {
             if (links.raw_url) v.setAttribute('data-src', links.raw_url);
             if (v.dataset.wired === '1' && links.raw_url) v.src = links.raw_url;
         }
 
+        // audio
         const a = att.querySelector?.('audio.att-audio');
         if (a && links.raw_url) {
+            // avoid initial 401: src is set only after we have signed link
             a.src = links.raw_url;
             try { a.removeAttribute('data-src'); } catch (_) {}
         }
-    }).catch(() => {});
+    }).catch(() => {
+        // ignore
+    });
 });
 
 }
@@ -4013,6 +4345,9 @@ function renderMessageContent(content) {
         return out;
     };
 
+    // Support both canonical and broken legacy markers.
+    // canonical: [[file:ID|NAME|MIME|SIZE]]
+    // broken:    [[file:ID]]NAME|MIME|SIZE]]
     const reAny = /\[\[file:(\d+)\|([^|]*)\|([^|]*)\|(\d+)\]\]|\[\[file:(\d+)\]\]([^|\]]*)\|([^|\]]*)\|(\d+)\]\]/g;
     if (!reAny.test(raw)) {
         return renderTextWithLinks(raw);
@@ -4045,6 +4380,7 @@ function renderMessageContent(content) {
         const start = m.index ?? 0;
         out += renderTextWithLinks(raw.slice(last, start));
 
+        // canonical groups: 1-4, broken groups: 5-8
         const isCanonical = m[1] !== undefined && m[1] !== null;
         const id = isCanonical ? m[1] : m[5];
         const encName = isCanonical ? (m[2] || '') : (m[6] || '');
@@ -4068,45 +4404,14 @@ function renderMessageContent(content) {
         );
         const sizeText = formatBytes(size);
 
-        const href = `/api/files/${id}`;
-        const rawHref = `/api/files/${id}/raw`;
+        const href = `/api/files/${id}`; // download
+        const rawHref = `/api/files/${id}/raw`; // inline / stream
         const previewHref = isGif ? rawHref : `/api/files/${id}/preview`;
         const badge = fileBadge(name, mime);
 
         const attData = `data-file-id="${escapeHtml(id)}" data-file-name="${escapeHtml(name)}" data-file-mime="${escapeHtml(mime)}" data-file-size="${escapeHtml(size)}"`;
 
-        out += `
-          <div class="msg-attachment ${isMedia ? 'media' : 'file'} ${isVideo ? 'hover-dl' : ''}" ${attData}>
-            ${isImage ? `
-              <div class="att-preview">
-                <img class="att-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=" data-src="${previewHref}" data-raw-src="${rawHref}" alt="${escapeHtml(name)}" loading="lazy" decoding="async">
-                <a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a>
-              </div>
-            ` : ''}
-
-            ${isVideo ? `
-              <div class="att-preview">
-                <video class="att-video" preload="metadata" data-src="${rawHref}"></video>
-                <a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a>
-              </div>
-            ` : ''}
-
-            ${isAudio ? `
-              <div class="att-preview">
-                <audio class="att-audio" controls preload="metadata" data-src="${rawHref}"></audio>
-                <a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a>
-              </div>
-            ` : ''}
-
-            <div class="file-row">
-              <span class="file-badge">${escapeHtml(badge)}</span>
-              <span class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-              <span class="file-meta">${sizeText ? escapeHtml(sizeText) : ''}</span>
-              ${isArchive ? `<button type="button" class="att-archive" data-act="archive" title="Посмотреть содержимое">📦</button>` : ''}
-              <a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a>
-            </div>
-          </div>
-        `;
+        out += `<div class="msg-attachment ${isMedia ? 'media' : 'file'} ${isVideo ? 'hover-dl' : ''}" ${attData}>${isImage ? `<div class="att-preview"><img class="att-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=" data-src="${previewHref}" data-raw-src="${rawHref}" alt="${escapeHtml(name)}" loading="lazy" decoding="async"><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>` : ''}${isVideo ? `<div class="att-preview"><video class="att-video" preload="metadata" data-src="${rawHref}"></video><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>` : ''}${isAudio ? `<div class="att-preview"><audio class="att-audio" controls preload="metadata" data-src="${rawHref}"></audio><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>` : ''}<div class="file-row"><span class="file-badge">${escapeHtml(badge)}</span><span class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="file-meta">${sizeText ? escapeHtml(sizeText) : ''}</span>${isArchive ? `<button type="button" class="att-archive" data-act="archive" title="Посмотреть содержимое">📦</button>` : ''}<a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div></div>`;
 
         last = start + m[0].length;
     }
@@ -4149,7 +4454,8 @@ function addMessage(msg, opts = {}) {
     const isCurrentUser = (Number.isFinite(senderId) && senderId > 0 && Number(currentUser?.id) === senderId);
     const timeText = formatMessageTime(msg?.timestamp);
     const avatarChar = (sender.charAt(0) || '?').toUpperCase();
-    window.__lbMsgCache = window.__lbMsgCache || new Map();
+    // ---- reply fallback (если нет reply_preview, но есть reply_to_id) ----
+    window.__lbMsgCache = window.__lbMsgCache || new Map(); // id -> msg
 
     try {
         const mid = Number(msg?.id);
@@ -4184,6 +4490,7 @@ function addMessage(msg, opts = {}) {
             msg.reply_preview = reply;
         }
     }
+    // ---- /reply fallback ----
 
     const hasReply = !!(reply && Number(reply.id) > 0);
     const replyText = hasReply ? (previewTextFromMessageContent(reply.content) || '') : '';
@@ -4237,6 +4544,7 @@ function addMessage(msg, opts = {}) {
 
     wireAttachments(div);
 
+    // user menu on avatar/name
     if (senderId && !isCurrentUser) {
         const avatarEl = div.querySelector('.avatar');
         const nameEl = div.querySelector('.author .name');
@@ -4258,6 +4566,7 @@ function addMessage(msg, opts = {}) {
         nameEl?.addEventListener('click', onOpenMenu);
     }
 
+    // tools
     const tools = div.querySelector('.msg-tools');
     tools?.addEventListener('click', async (e) => {
         const btn = e.target?.closest?.('.tool');
@@ -4278,13 +4587,16 @@ function addMessage(msg, opts = {}) {
             const raw = (msg?.content || '').toString();
 
             const cleanText = raw
+                // canonical / legacy with pipe
                 .replace(/\[\[file[:=]\d+\|[^\]]*\]\]/g, '')
+                // broken legacy: [[file:ID]]NAME|MIME|SIZE]]
                 .replace(/\[\[file:\d+\]\][^\]]*\]\]/g, '')
                 .replace(/\s+/g, ' ')
                 .trim();
 
             let toCopy = cleanText;
 
+            // If message is ONLY attachments — copy file names (without internal ids)
             if (!toCopy && (raw.includes('[[file:') || raw.includes('[[file='))) {
                 const names = extractAllFileNamesFromMessageContent(raw);
                 if (names && names.length) {
@@ -4323,8 +4635,16 @@ function addMessage(msg, opts = {}) {
             try {
                 await api(`/api/messages/${mid}/pin`, { method: wasPinned ? 'DELETE' : 'PUT' });
                 btn.classList.toggle('active', !wasPinned);
+                showToast(wasPinned ? 'Сообщение откреплено' : 'Сообщение закреплено');
+                try {
+                    const ov = document.querySelector('.pins-overlay');
+                    if (ov && !ov.hidden && Number(currentChatId) > 0) {
+                        openPinsModal();
+                    }
+                } catch (_) {}
             } catch (err) {
                 console.warn('[UI] pin toggle failed', err);
+                showToast('Не удалось изменить закреп');
             }
             return;
         }
@@ -4332,7 +4652,7 @@ function addMessage(msg, opts = {}) {
         if (act === 'delete') {
             if (!Number.isFinite(mid) || mid <= 0) return;
             if (!isCurrentUser) return;
-            const ok = window.confirm('Удалить сообщение?');
+            const ok = await askConfirmModal({ title: 'Удаление сообщения', text: 'Удалить сообщение? Это действие нельзя отменить.', okText: 'Удалить', cancelText: 'Отмена', danger: true });
             if (!ok) return;
             try {
                 await api(`/api/messages/${mid}`, { method: 'DELETE' });
@@ -4347,6 +4667,7 @@ function addMessage(msg, opts = {}) {
         }
 
     });
+    // reactions (render + interactions)
     const midForReactions = Number(msg?.id);
     const reactionsEl = div.querySelector('.msg-reactions');
     if (reactionsEl && Number.isFinite(midForReactions) && midForReactions > 0) {
@@ -4385,6 +4706,7 @@ function addMessage(msg, opts = {}) {
         }
     }
 
+    // reply preview jump
     div.querySelector('.reply-preview')?.addEventListener('click', async (e) => {
         const rid = Number(e.currentTarget?.getAttribute('data-reply-to'));
         if (!Number.isFinite(rid) || rid <= 0) return;
@@ -4405,6 +4727,8 @@ function addMessage(msg, opts = {}) {
             return;
         }
 
+        // If original message is older than currently loaded history — подгрузим вверх.
+        // Cap to avoid infinite loops.
         let tries = 0;
         while (!anchor && chatPaging && chatPaging.hasMore && Number(chatPaging.minId || 0) > rid && tries < 12) {
             tries += 1;
@@ -4417,20 +4741,26 @@ function addMessage(msg, opts = {}) {
             return;
         }
 
+        // not found (deleted or too old)
         try { showToast('Сообщение не найдено'); } catch (_) {}
     });
 
     const isHistory = !!opts.history || prepend;
     const isCurrentChat = chatId === currentChatId;
+
+    // unread bookkeeping for realtime messages
     if (!isHistory && msg && msg.id !== undefined && msg.id !== null && currentServerId && chatId !== null && chatId !== undefined) {
         const watching = isCurrentChat && isUserWatchingChat(chatId);
         if (watching && (forceScroll || nearBottom)) {
+            // user is at bottom while watching -> read instantly
             setLastSeenId(currentServerId, chatId, msg.id);
             clearUnreadCount(currentServerId, chatId);
                         updateChannelListItemOnMessage(chatId, 0);
             removeNewMarker(container);
         } else {
             incUnreadCount(currentServerId, chatId, 1);
+
+            // if user is inside this chat but not at bottom - show marker at last seen
             if (isCurrentChat && !nearBottom) {
                 const lastSeen = getLastSeenId(currentServerId, chatId);
                 if (lastSeen !== null) insertNewMarkerAfter(container, lastSeen);
@@ -4442,6 +4772,8 @@ function addMessage(msg, opts = {}) {
     if (!prepend && (forceScroll || nearBottom)) {
         setStickToBottom(true);
         scrollToBottomSafe(container, 4);
+
+        // if we scrolled to bottom, also mark read
         const lastId = msg?.id ?? getLatestRenderedMessageId(container);
         if (!isHistory && isCurrentChat && lastId !== null && currentServerId) {
             setLastSeenId(currentServerId, chatId, lastId);
@@ -4453,6 +4785,7 @@ function addMessage(msg, opts = {}) {
     }
 }
 
+// ===== INIT =====
 async function initializeApp() {
     if (isInitialized) {
         console.warn('[APP] Already initialized, skipping');
@@ -4491,6 +4824,7 @@ async function initializeApp() {
         await initFriends();
         try { initProfileModal({ api, getMe: () => currentUser }); } catch (e) { console.warn('[PROFILE] init failed', e); }
 
+        // global buttons
         document.getElementById('settingsBtn')?.addEventListener('click', openSettings);
         document.getElementById('pinsBtn')?.addEventListener('click', () => openPinsModal());
         document.getElementById('addChannelBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); createChannelFlow(); });
@@ -4502,21 +4836,26 @@ async function initializeApp() {
                 createServerFlow();
             }
         });
+
+        // mobile drawer buttons
         document.getElementById('mobileServersBtn')?.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
             toggleServersMenu();
         });
+
         document.getElementById('mobileChannelsBtn')?.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
             toggleChannelsMenu();
         });
+
         document.getElementById('mobileMembersBtn')?.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
             toggleMembersMenu();
         });
+
         document.getElementById('uiOverlay')?.addEventListener('click', () => {
             closeAllDrawers();
         });
@@ -4529,8 +4868,8 @@ async function initializeApp() {
         ensureJumpToPresentBtn();
         updateJumpBtn();
         setupAttachmentUi();
-        
-        const servers = await api("/api/servers");
+        // mobile drawers are closed by clicking overlay
+const servers = await api("/api/servers");
         console.log('[APP] Servers loaded:', servers);
         
         const lastServerId = Number(sessionStorage.getItem("lastServerId"));
@@ -4557,6 +4896,7 @@ async function initializeApp() {
             console.log('[APP] Chats loaded:', chats);
             
             renderChannels(chats);
+        // update members list
         await loadMembers(serverId);
             
             let chatId = lastChatId;
@@ -4640,6 +4980,10 @@ window.appState = {
 };
 
 window.wsManager = wsManager;
+window.hideServersMenu = hideServersMenu;
+window.hideChannelsMenu = hideChannelsMenu;
+window.hideMembersMenu = hideMembersMenu;
+window.closeAllDrawers = closeAllDrawers;
 
 if (window.appInitialized) {
     console.warn('[APP] App already initialized elsewhere');

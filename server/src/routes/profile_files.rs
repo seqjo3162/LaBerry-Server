@@ -173,6 +173,7 @@ pub async fn get_raw(
     let ct = mime_type.parse().unwrap_or(header::HeaderValue::from_static("application/octet-stream"));
     headers.insert(header::CONTENT_TYPE, ct);
 
+    // inline for images
     let disp = format!("inline; filename=\"{}\"", original_name.replace('"', ""));
     if let Ok(v) = disp.parse() {
         headers.insert(header::CONTENT_DISPOSITION, v);

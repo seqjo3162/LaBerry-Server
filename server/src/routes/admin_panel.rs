@@ -15,6 +15,10 @@ use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 use std::{env, net::IpAddr};
 
+// =============================
+// Router
+// =============================
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(root))
@@ -33,6 +37,10 @@ pub fn router() -> Router<AppState> {
         .route("/db/reset_keep_users", post(db_reset_keep_users_post))
         .route("/db/vacuum", post(db_vacuum_post))
 }
+
+// =============================
+// Config helpers
+// =============================
 
 fn admin_enabled() -> bool {
     env_bool("LB_ENABLE_ADMIN_PANEL", false) || admin_password_configured()
@@ -135,6 +143,7 @@ fn cookie_get(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn set_cookie(headers: &mut HeaderMap, cookie: String) {
+    // allow multiple Set-Cookie
     headers.append(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -231,6 +240,10 @@ button:hover {{ background:#242d57; }}
     Html(html)
 }
 
+// =============================
+// Auth/session
+// =============================
+
 fn require_admin_panel_enabled() -> Result<(), (StatusCode, String)> {
     if !admin_enabled() {
         return Err((
@@ -261,6 +274,8 @@ fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<(String, AdminSess
 }
 
 fn require_allow_ip(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+    // Optional simple allow-list by exact IPs.
+    // NOTE: If you run behind proxy, ensure X-Forwarded-For is trusted.
     let allow = env::var("LB_ADMIN_ALLOW_IPS").unwrap_or_default();
     let allow = allow.trim();
     if allow.is_empty() {
@@ -332,6 +347,10 @@ fn cookie_clear(secure: bool) -> String {
     }
     c
 }
+
+// =============================
+// Pages
+// =============================
 
 async fn root(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
@@ -423,6 +442,10 @@ async fn logout_post(State(st): State<AppState>, headers: HeaderMap) -> impl Int
     set_cookie(&mut h, cookie_clear(admin_cookie_secure(&headers)));
     (h, Redirect::to("/admin/login")).into_response()
 }
+
+// =============================
+// Users list + actions
+// =============================
 
 #[derive(Deserialize, Default)]
 struct ListQuery {
@@ -638,6 +661,10 @@ async fn action_user_common(
     }
 }
 
+// =============================
+// Test users page
+// =============================
+
 #[derive(Deserialize, Default)]
 struct TestUsersQuery {
     msg: Option<String>,
@@ -753,6 +780,7 @@ async fn test_users_delete(
         return admin_redirect_with_msg("/admin/test-users", &format!("Type exactly: {}", phrase)).into_response();
     }
 
+    // Safety: verify they are actually test users
     let re = test_user_re();
     for id in &f.user_ids {
         let row = sqlx::query("SELECT username, COALESCE(email,'') AS email FROM users WHERE id = ?")
@@ -777,6 +805,10 @@ async fn test_users_delete(
 
     admin_redirect_with_msg("/admin/test-users", "OK").into_response()
 }
+
+// =============================
+// Servers list + actions
+// =============================
 
 async fn servers_list(
     State(st): State<AppState>,
@@ -915,6 +947,11 @@ async fn server_delete(
         Err(e) => admin_redirect_with_msg("/admin/servers", &format!("Error: {}", e)).into_response(),
     }
 }
+
+
+// =============================
+// DB tools
+// =============================
 
 async fn db_tools_page(
     State(st): State<AppState>,
@@ -1067,6 +1104,7 @@ async fn db_action_common(
         return admin_redirect_with_msg("/admin/db", "Confirmation phrase mismatch").into_response();
     }
 
+    // Global destructive ops always require configured admin password
     if !admin_password_configured() {
         return admin_redirect_with_msg("/admin/db", "Admin password is not configured (LB_ADMIN_PASSWORD[_HASH])").into_response();
     }
@@ -1089,6 +1127,11 @@ async fn db_action_common(
         Err(e) => admin_redirect_with_msg("/admin/db", &format!("Error: {}", e)).into_response(),
     }
 }
+
+
+// =============================
+// DB helpers
+// =============================
 
 #[derive(Clone)]
 struct UserRow {
@@ -1283,6 +1326,10 @@ async fn fetch_servers(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<V
         })
         .collect())
 }
+
+// =============================
+// Destructive ops (copied from CLI)
+// =============================
 
 async fn ban_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
     let affected = sqlx::query("UPDATE users SET is_banned = 1, token_version = token_version + 1 WHERE id = ?")
@@ -1480,6 +1527,8 @@ async fn purge_server_exec(db: &SqlitePool, server_id: i64) -> anyhow::Result<()
 
 async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
     use std::path::PathBuf;
+
+    // delete owned servers first (needs separate tx because purge_server_exec uses its own tx)
     {
         let mut tx = db.begin().await?;
         let owned_servers = sqlx::query_scalar::<_, i64>("SELECT id FROM servers WHERE owner_id = ?")
@@ -1733,10 +1782,18 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
+// =============================
+// DB Tools (global wipe/reset)
+// =============================
+
+/// Remove all messages + message-related tables + all uploaded files (and thumbnails).
+/// Keeps: users, servers, chats, participants.
 async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
     use std::path::{Path, PathBuf};
 
     let mut tx = db.begin().await?;
+
+    // Collect file paths first (so we can delete from FS after commit)
     let file_rows = sqlx::query("SELECT storage_path, filename FROM files")
         .fetch_all(&mut *tx)
         .await?;
@@ -1756,6 +1813,7 @@ async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
         file_paths.push((main, Some(thumb)));
     }
 
+    // Delete in FK-safe order
     sqlx::query("DELETE FROM message_reactions")
         .execute(&mut *tx)
         .await?;
@@ -1775,6 +1833,7 @@ async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
 
     tx.commit().await?;
 
+    // Best-effort filesystem cleanup
     for (main, thumb) in file_paths {
         let _ = std::fs::remove_file(&main);
         if let Some(t) = thumb {
@@ -1785,22 +1844,32 @@ async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Remove ALL servers (including Global) with all dependent data (channels/messages/files).
+/// Then recreates Global server.
 async fn wipe_all_servers_exec(db: &SqlitePool) -> anyhow::Result<()> {
     let server_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM servers ORDER BY id")
         .fetch_all(db)
         .await?;
 
     for sid in server_ids {
+        // purge_server_exec uses its own transaction and removes files from disk.
         let _ = purge_server_exec(db, sid).await;
     }
+
+    // Recreate Global server if missing
     crate::db::bootstrap::ensure_global_server(db).await?;
     Ok(())
 }
 
+/// Deletes everything except rows in `users`.
+/// Intended for DEV/testing.
+/// Also removes stored files/avatars from disk and recreates Global server.
 async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
     use std::path::{Path, PathBuf};
 
     let mut tx = db.begin().await?;
+
+    // Collect stored file paths (attachments)
     let file_rows = sqlx::query("SELECT storage_path, filename FROM files")
         .fetch_all(&mut *tx)
         .await?;
@@ -1820,6 +1889,7 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
         file_paths.push((main, Some(thumb)));
     }
 
+    // Collect profile file paths (avatars/banners)
     let profile_rows = sqlx::query("SELECT storage_path FROM profile_files")
         .fetch_all(&mut *tx)
         .await?;
@@ -1829,6 +1899,7 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
         profile_paths.push(PathBuf::from(p));
     }
 
+    // Delete in FK-safe order
     sqlx::query("DELETE FROM message_reactions")
         .execute(&mut *tx)
         .await?;
@@ -1902,6 +1973,7 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
 
     tx.commit().await?;
 
+    // Best-effort filesystem cleanup
     for (main, thumb) in file_paths {
         let _ = std::fs::remove_file(&main);
         if let Some(t) = thumb {
@@ -1912,11 +1984,14 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&p);
     }
 
+    // Recreate Global server if missing
     crate::db::bootstrap::ensure_global_server(db).await?;
 
     Ok(())
 }
 
+/// Shrinks the sqlite DB file by rebuilding it.
+/// NOTE: VACUUM may require up to ~2x free disk space while running.
 async fn vacuum_exec(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query("VACUUM;").execute(db).await?;
     Ok(())

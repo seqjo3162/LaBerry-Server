@@ -16,44 +16,57 @@ use argon2::PasswordHasher;
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
+
+    /// DB path (overrides LB_DB_PATH)
     #[arg(long)]
     db: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Interactive menu
     Interactive,
+
+    /// Print an Argon2 hash for an admin password
     HashAdminPassword {
+        /// Admin password (will be read from stdin if omitted)
         #[arg(long)]
         password: Option<String>,
     },
 
+    /// List users
     ListUsers {
         #[arg(long, default_value_t = 200)]
         limit: u32,
     },
 
+    /// List servers
     ListServers {
         #[arg(long, default_value_t = 200)]
         limit: u32,
     },
 
+    /// Ban a user (soft ban)
     BanUser {
         user_id: i64,
     },
 
+    /// Permanently ban (delete) a user and all related data
     BanUserForever {
         user_id: i64,
     },
 
+    /// Purge content of a user (messages/files) but keep the account
     PurgeUserContent {
         user_id: i64,
     },
 
+    /// Purge a server and all related data
     PurgeServer {
         server_id: i64,
     },
 
+    /// Purge test users by regex (default: ^test_)
     PurgeTestUsers {
         #[arg(long)]
         regex: Option<String>,

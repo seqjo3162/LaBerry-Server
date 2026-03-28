@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 pub const GLOBAL_SERVER_ID: i64 = 1;
 
 pub async fn ensure_global_server(db: &SqlitePool) -> anyhow::Result<()> {
+    // проверяем, существует ли global server
     let exists: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM servers WHERE id = ?"
     )
@@ -14,6 +15,7 @@ pub async fn ensure_global_server(db: &SqlitePool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // гарантируем системного пользователя
     let system_user_id: i64 = match sqlx::query_scalar(
         "SELECT id FROM users WHERE username = '__system__' LIMIT 1"
     )
@@ -34,6 +36,7 @@ pub async fn ensure_global_server(db: &SqlitePool) -> anyhow::Result<()> {
         }
     };
 
+    // создаём global server
     sqlx::query(
         r#"
         INSERT INTO servers (id, name, owner_id, created_at)
@@ -45,6 +48,7 @@ pub async fn ensure_global_server(db: &SqlitePool) -> anyhow::Result<()> {
     .execute(db)
     .await?;
 
+    // создаём минимальный чат
     sqlx::query(
         r#"
         INSERT INTO chats (server_id, name, kind, created_at)
@@ -54,6 +58,7 @@ pub async fn ensure_global_server(db: &SqlitePool) -> anyhow::Result<()> {
     .execute(db)
     .await?;
 
+    // default voice channel (do not duplicate)
     let _ = sqlx::query(
         r#"
         INSERT INTO chats (server_id, name, kind, created_at)
@@ -76,6 +81,7 @@ pub async fn add_user_to_global_server(
     db: &SqlitePool,
     user_id: i64,
 ) -> anyhow::Result<()> {
+    // гарантируем, что global server существует
     let exists: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM servers WHERE id = ?"
     )
@@ -87,6 +93,7 @@ pub async fn add_user_to_global_server(
         anyhow::bail!("Global server does not exist");
     }
 
+    // гарантируем, что пользователь существует
     let user_exists: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM users WHERE id = ?"
     )
@@ -98,6 +105,7 @@ pub async fn add_user_to_global_server(
         anyhow::bail!("User does not exist");
     }
 
+    // добавляем пользователя в global server
     sqlx::query(
         r#"
         INSERT INTO server_members (server_id, user_id)
@@ -109,7 +117,8 @@ pub async fn add_user_to_global_server(
     .bind(user_id)
     .execute(db)
     .await?;
- 
+
+    // default voice channel (do not duplicate)
     let _ = sqlx::query(
         r#"
         INSERT INTO chats (server_id, name, kind, created_at)

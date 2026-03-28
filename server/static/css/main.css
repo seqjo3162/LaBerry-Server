@@ -1,3 +1,4 @@
+/* // 1. СБРОС И БАЗОВЫЕ СТИЛИ */
 * {
   margin: 0;
   padding: 0;
@@ -5,17 +6,10 @@
 }
 
 html, body {
+  width: 100%;
   height: 100%;
+  min-height: 100%;
   overflow: hidden;
-}
-
-@supports not (zoom: 1) {
-  body {
-    transform: scale(var(--ui-scale));
-    transform-origin: top left;
-    width: calc(100% / var(--ui-scale));
-    height: calc(100% / var(--ui-scale));
-  }
 }
 
 body {
@@ -23,11 +17,33 @@ body {
   background: var(--bg);
   color: var(--text);
   line-height: 1.5;
-  zoom: var(--ui-scale);
+  width: 100%;
+  height: 100%;
+  min-height: 100dvh;
+  position: relative;
 }
 
+.app-root {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+html.ui-scaled .app-root {
+  transform-origin: top left;
+  transform: scale(var(--ui-scale));
+  width: calc(100% / var(--ui-scale));
+  height: calc(100% / var(--ui-scale));
+}
+
+/* // 2. CSS-ПЕРЕМЕННЫЕ (единые для всего) */
 :root {
   --ui-scale: 1;
+  /* // Цвета */
   --accent: #b04cff;
   --accent-strong: #ff6ad5;
   --accent-light: rgba(176, 76, 255, 0.15);
@@ -46,6 +62,7 @@ body {
   --idle: #f0883e;
   --dnd: #f85149;
   
+  /* // Размеры */
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -58,6 +75,7 @@ body {
   --space-xl: 32px;
 }
 
+/* // 3. УТИЛИТЫ (переиспользуемые классы) */
 .hidden { display: none !important; }
 [hidden] { display: none !important; }
 .muted { color: var(--text-muted); }
@@ -73,6 +91,9 @@ body {
 .status.dnd { color: var(--dnd); }
 .status.offline { color: var(--text-secondary); }
 
+/* // 4. КОМПОНЕНТЫ (кнопки, инпуты, аватарки) */
+
+/* // Кнопки */
 .btn {
   padding: 10px 16px;
   border-radius: var(--radius-md);
@@ -125,6 +146,7 @@ body {
   font-size: 13px;
 }
 
+/* // Поля ввода */
 .inp {
   padding: 10px 14px;
   border-radius: var(--radius-md);
@@ -146,6 +168,7 @@ body {
   color: var(--text-muted);
 }
 
+/* // Аватарки */
 .avatar {
   width: 32px;
   height: 32px;
@@ -180,6 +203,7 @@ body {
   display: block;
 }
 
+/* // Иконки */
 .icon-btn {
   background: none;
   border: none;
@@ -199,6 +223,7 @@ body {
 }
 
 
+/* // file input */
 .file-input,
 #fileInput,
 .composer input[type="file"] {
@@ -208,7 +233,7 @@ body {
   height: 1px !important;
   opacity: 0 !important;
 }
-
+/* // 5. ШАПКА */
 .topbar {
   height: 56px;
   display: flex;
@@ -248,16 +273,16 @@ body {
   }
 }
 
+
+/* // 6. ОСНОВНОЙ МАКЕТ */
 .layout {
   display: flex;
-  height: calc(100vh - 56px);
-  height: calc(100svh - 56px);
-  height: calc(100dvh - 56px);
-gap: var(--space-md);
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: var(--space-md);
   padding: var(--space-md);
   position: relative;
   overflow: hidden;
-
 }
 
 .ui-overlay {
@@ -277,6 +302,8 @@ body.members-open .ui-overlay {
   pointer-events: all;
 }
 
+
+/* // 7. ПАНЕЛИ (серверы, каналы, чат, участники) */
 .panel {
   display: flex;
   flex-direction: column;
@@ -287,26 +314,31 @@ body.members-open .ui-overlay {
   min-height: 0;
 }
 
+/* // Левая панель - серверы */
 .panel.servers {
   width: 240px;
   flex-shrink: 0;
 }
 
+/* // Правая панель - участники */
 .panel.members {
   width: 240px;
   flex-shrink: 0;
 }
 
+/* // Центральная панель - чат */
 .panel.chat {
   flex: 1;
   min-width: 0;
 }
 
+/* // Панель каналов */
 .panel.channels {
   width: 240px;
   flex-shrink: 0;
 }
 
+/* // Заголовок панели */
 .panelHeader {
   display: flex;
   align-items: center;
@@ -317,6 +349,10 @@ body.members-open .ui-overlay {
 }
 
 .panelHeader h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
@@ -324,6 +360,7 @@ body.members-open .ui-overlay {
   letter-spacing: 0.5px;
 }
 
+/* // 8. СПИСКИ (серверы, каналы, друзья) */
 .list {
   flex: 1;
   overflow-y: auto;
@@ -350,6 +387,7 @@ body.members-open .ui-overlay {
   background: var(--text-secondary);
 }
 
+/* // Элемент списка */
 .item {
   display: flex;
   align-items: center;
@@ -453,6 +491,7 @@ body.members-open .ui-overlay {
   color: var(--text);
 }
 
+/* // Специальные элементы */
 .friends-button.item {
   margin-bottom: var(--space-md);
   background: rgba(176, 76, 255, 0.1);
@@ -467,6 +506,7 @@ body.members-open .ui-overlay {
   background: rgba(176, 76, 255, 0.2);
 }
 
+/* // 9. ЧАТ (основная часть) */
 #chatView {
   display: flex;
   flex-direction: column;
@@ -474,6 +514,7 @@ body.members-open .ui-overlay {
   position: relative;
 }
 
+/* // Контейнер сообщений */
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -503,6 +544,7 @@ body.members-open .ui-overlay {
   background: rgba(176, 76, 255, 0.5);
 }
 
+/* // Маркер новых сообщений + кнопка "вниз" */
 .new-messages-marker {
   margin: 8px 0;
   padding: 8px 12px;
@@ -517,7 +559,7 @@ body.members-open .ui-overlay {
 .jump-to-present {
   position: absolute;
   right: 18px;
-  bottom: 76px;
+  bottom: 76px; /* над полем ввода */
   z-index: 30;
   padding: 10px 12px;
   border-radius: 999px;
@@ -537,6 +579,7 @@ body.members-open .ui-overlay {
   display: none;
 }
 
+/* // Приветствие канала */
 .channel-welcome {
   text-align: center;
   padding: var(--space-xl);
@@ -549,6 +592,7 @@ body.members-open .ui-overlay {
   color: var(--text);
 }
 
+/* // Форма ввода */
 .composer {
   padding: var(--space-md);
   padding-bottom: calc(var(--space-md) + env(safe-area-inset-bottom, 0px));
@@ -632,6 +676,7 @@ body.members-open .ui-overlay {
   background: rgba(255, 255, 255, 0.10);
 }
 
+/* // 11. ПОЛЬЗОВАТЕЛЬСКАЯ ПАНЕЛЬ */
 .userbar {
   display: flex;
   align-items: center;
@@ -660,6 +705,8 @@ body.members-open .ui-overlay {
   color: var(--text-secondary);
 }
 
+
+/* // 11.1 VOICE BAR */
 .voicebar {
   display: flex;
   align-items: center;
@@ -795,6 +842,7 @@ body.members-open .ui-overlay {
   border-color: rgba(255, 255, 255, 0.22);
 }
 
+/* screenshare button active */
 .voice-sharing #voiceShareBtn {
   background: rgba(176, 76, 255, 0.14);
   border-color: rgba(176, 76, 255, 0.45);
@@ -815,6 +863,7 @@ body.members-open .ui-overlay {
   border-color: rgba(176, 76, 255, 0.45);
 }
 
+/* // 11.2 SCREEN SHARE (Discord-like) */
 .ss-modal {
   width: min(980px, calc(100vw - 24px));
   max-width: 980px;
@@ -1004,6 +1053,7 @@ body.members-open .ui-overlay {
   display: block;
 }
 
+/* // 11.3 VOICE VIEW (Discord-like stage) */
 body.voice-view-open #ssPanel {
   display: none !important;
 }
@@ -1020,6 +1070,8 @@ body.voice-view-open #ssPanel {
   display: none !important;
 }
 
+
+/* voice split layout (Discord-like): stage in the center panel, chat in the right panel */
 body.voice-split-open #chatPanel {
   flex: 1;
 }
@@ -1523,6 +1575,7 @@ body.voice-split-open #chatView {
   gap: 6px;
 }
 
+/* // 12. ЗАГРУЗКА И ОВЕРЛЕЙ */
 #loading-overlay {
   position: fixed;
   top: 0;
@@ -1563,6 +1616,7 @@ body.voice-split-open #chatView {
   to { transform: rotate(360deg); }
 }
 
+/* // 13. АНИМАЦИИ */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
@@ -1599,7 +1653,9 @@ body.voice-split-open #chatView {
   animation: pulse 0.3s ease-in-out;
 }
 
+/* // 14. АДАПТИВНОСТЬ */
 @media (max-width: 1200px) {
+  /* keep members visible (Discord-like right sidebar), just shrink panels */
   .panel.members { width: 220px; }
   .panel.servers { width: 210px; }
   .panel.channels { width: 210px; }
@@ -1646,6 +1702,10 @@ body.voice-split-open #chatView {
   }
 }
 
+/* // 15. ПОЛЬЗОВАТЕЛЬСКИЕ ЭЛЕМЕНТЫ */
+
+
+/* // Подсказки */
 [data-tooltip] {
   position: relative;
 }
@@ -1666,6 +1726,7 @@ body.voice-split-open #chatView {
   margin-bottom: 8px;
 }
 
+/* // Выделение кода */
 pre, code {
   font-family: 'Courier New', monospace;
   background: rgba(0, 0, 0, 0.3);
@@ -1674,6 +1735,7 @@ pre, code {
   font-size: 13px;
 }
 
+/* // Скелетон для загрузки */
 .skeleton {
   background: linear-gradient(90deg, 
     rgba(255,255,255,0.05) 25%, 
@@ -1688,6 +1750,7 @@ pre, code {
   100% { background-position: -200% 0; }
 }
 
+/* // 16. СТРАНИЦА АВТОРИЗАЦИИ */
 body.auth-page {
   display: flex;
   align-items: center;
@@ -1740,6 +1803,7 @@ body.auth-page {
   border-radius: var(--radius-sm);
 }
 
+/* // 17. СТРАНИЦА АВТОРИЗАЦИИ (дополнительно) */
 .auth-switch {
   margin-top: var(--space-lg);
   text-align: center;
@@ -1758,6 +1822,7 @@ body.auth-page {
   text-decoration: underline;
 }
 
+/* // 18. КОМПОНЕНТЫ ДРУЗЕЙ */
 .friends-header {
   padding: var(--space-lg);
   border-bottom: 1px solid var(--border);
@@ -1875,6 +1940,7 @@ body.auth-page {
   margin-bottom: var(--space-md);
 }
 
+/* // Friends search */
 .friends-search-panel {
   padding: var(--space-md);
   border-bottom: 1px solid var(--border);
@@ -1926,10 +1992,24 @@ body.auth-page {
   color: var(--text-secondary);
 }
 
+/* // 19. СПИСОК УЧАСТНИКОВ */
 .members-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   padding: var(--space-sm);
 }
 
+#membersPanelMembers {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+
+/* voice members tiles (Discord-like) */
 .voice-members-section {
   padding: 10px;
   border-bottom: 1px solid var(--border);
@@ -2103,41 +2183,24 @@ body.auth-page {
 
 
 .members-group-title {
-  margin: 10px 6px 6px;
+  margin: 12px 8px 6px;
   font-size: 12px;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-transform: none;
   color: var(--text-secondary);
-  background: transparent;
-  border: 0;
-  padding: 0;
-  width: 100%;
-  text-align: left;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  cursor: default;
-}
-
-.members-group-title.collapsible {
-  cursor: pointer;
-}
-
-.members-group-title .chev {
-  font-size: 12px;
-  opacity: 0.8;
-  transform: rotate(0deg);
-  transition: transform .15s ease;
-}
-
-.members-group-title.collapsed .chev {
-  transform: rotate(-90deg);
+  padding: 0 4px;
 }
 
 .members-group-box[hidden] {
   display: none;
 }
+
+.members-group-box {
+  display: grid;
+  gap: 2px;
+}
+
 .member {
   display: flex;
   align-items: center;
@@ -2151,9 +2214,30 @@ body.auth-page {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.member.offline {
+  opacity: 0.72;
+}
+
 .member .text {
   flex: 1;
   min-width: 0;
+}
+
+.member .role:empty {
+  display: none;
+}
+
+.member-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .member .name {
@@ -2170,6 +2254,7 @@ body.auth-page {
   margin-top: 2px;
 }
 
+/* // Индикатор статуса */
 .member .avatar {
   position: relative;
 }
@@ -2202,6 +2287,7 @@ body.auth-page {
   background: var(--text-secondary);
 }
 
+/* // 20. РАЗНОЕ */
 .hash {
   color: var(--text-secondary);
   font-weight: bold;
@@ -2209,6 +2295,8 @@ body.auth-page {
 }
 
 .count {
+  flex: 0 0 auto;
+  white-space: nowrap;
   color: var(--text-secondary);
   font-weight: normal;
   font-size: 14px;
@@ -2220,6 +2308,7 @@ body.auth-page {
   margin: var(--space-md) 0;
 }
 
+/* // 21. СТИЛИ СЕРВЕРОВ И КАНАЛОВ */
 .server .avatar {
     width: 36px;
     height: 36px;
@@ -2260,6 +2349,7 @@ body.auth-page {
     margin-bottom: 10px;
 }
 
+/* // 22. СООБЩЕНИЯ (улучшенная версия) */
 .message {
     display: grid;
     grid-template-columns: 40px 1fr;
@@ -2601,6 +2691,8 @@ body.auth-page {
     -webkit-text-fill-color: transparent;
 }
 
+
+/* // Вложения в сообщениях */
 .msg-attachment {
   display: inline-flex;
   flex-direction: column;
@@ -2641,6 +2733,7 @@ body.auth-page {
   color: var(--text-secondary);
 }
 
+/* // attachments (discord-like) */
 .msg-link {
   color: var(--accent-strong);
   text-decoration: none;
@@ -2650,7 +2743,15 @@ body.auth-page {
 }
 
 .msg-attachment {
-  margin-top: 6px;
+  margin-top: 2px;
+}
+
+.message .text > .msg-attachment:first-child {
+  margin-top: 0;
+}
+
+.message .text > .msg-attachment:last-child {
+  margin-bottom: 0;
 }
 
 .msg-attachment .file-preview-link {
@@ -2745,6 +2846,7 @@ body.auth-page {
   background: rgba(255, 255, 255, 0.05);
 }
 
+/* // audio */
 .audio-card {
   margin-top: 8px;
   display: flex;
@@ -2786,6 +2888,7 @@ body.auth-page {
   display: none;
 }
 
+/* // link embeds */
 .link-embed {
   margin-top: 8px;
   max-width: 520px;
@@ -2850,6 +2953,7 @@ body.auth-page {
   background: rgba(255, 255, 255, 0.02);
 }
 
+/* // attachment chips */
 .attachment-chip {
   display: inline-flex;
   align-items: center;
@@ -2899,7 +3003,7 @@ body.auth-page {
   border: 1px solid var(--border);
   background: rgba(0,0,0,0.2);
 }
-
+/* // 23. УВЕДОМЛЕНИЯ И ОШИБКИ */
 .notification {
     position: fixed;
     top: 20px;
@@ -2930,6 +3034,7 @@ body.auth-page {
     border-left: 4px solid var(--accent);
 }
 
+/* // 24. МОДАЛЬНЫЕ ОКНА */
 .modal-overlay {
     position: fixed;
     top: 0;
@@ -3053,31 +3158,52 @@ body.modal-open {
 /* profile modal */
 .profile-modal {
   background-image: none !important;
-  max-width: 520px;
+  width: min(560px, calc(100vw - 24px));
+  max-width: 560px;
 }
 
 .profile-modal .modal-body {
   background-image: none !important;
+  padding: 18px;
+}
+
+.profile-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .profile-head {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-bottom: 14px;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background:
+    linear-gradient(180deg, rgba(176, 76, 255, 0.14), rgba(255,255,255,0.02));
+}
+
+.profile-avatar-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
 }
 
 .profile-avatar {
-  width: 56px;
-  height: 56px;
+  width: 88px;
+  height: 88px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: 900;
-  font-size: 22px;
-  background: rgba(176, 76, 255, 0.18);
-  border: 1px solid rgba(176, 76, 255, 0.30);
+  font-size: 30px;
+  background: rgba(176, 76, 255, 0.20);
+  border: 1px solid rgba(176, 76, 255, 0.34);
+  box-shadow: 0 14px 36px rgba(0,0,0,0.28);
   overflow: hidden;
 }
 
@@ -3098,43 +3224,137 @@ body.modal-open {
 
 .profile-meta {
   min-width: 0;
+  flex: 1;
+}
+
+.profile-name-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .profile-name {
   font-weight: 900;
-  font-size: 18px;
-  line-height: 1.15;
+  font-size: 24px;
+  line-height: 1.05;
+}
+
+.profile-chip,
+.profile-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(176, 76, 255, 0.30);
+  background: rgba(176, 76, 255, 0.12);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .profile-username {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-secondary);
-  margin-top: 2px;
+  margin-top: 6px;
+}
+
+.profile-id {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.profile-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.profile-card,
+.profile-section {
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
 }
 
 .profile-section {
-  margin-top: 12px;
+  margin-top: 0;
 }
 
 .profile-label {
+  display: block;
   font-size: 12px;
   color: var(--text-secondary);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .profile-text {
-  padding: 10px 12px;
+  min-height: 44px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: rgba(255,255,255,0.02);
+  border-radius: 14px;
+  background: rgba(0,0,0,0.18);
   white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.profile-text.empty {
+  color: var(--text-muted);
 }
 
 .profile-actions {
-  margin-top: 14px;
+  margin-top: 2px;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 600px) {
+  .profile-modal {
+    width: 100vw;
+    max-width: none;
+    border-radius: 0;
+    height: 100vh;
+  }
+
+  .profile-modal .modal-body {
+    padding: 14px;
+  }
+
+  .profile-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .profile-avatar-wrap {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .profile-avatar {
+    width: 72px;
+    height: 72px;
+    font-size: 26px;
+  }
+
+  .profile-name {
+    font-size: 22px;
+  }
+
+  .profile-actions {
+    justify-content: stretch;
+  }
+
+  .profile-actions .btn {
+    width: 100%;
+  }
 }
 
 .modal-header h2 {
@@ -3169,12 +3389,17 @@ body.modal-open {
     gap: var(--space-sm);
 }
 
+/* // 24.1 НАСТРОЙКИ (Discord-like) */
+
+
+/* profile avatar image safe */
 .profile-avatar-img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
+/* settings helpers */
 .setting-row {
   display: flex;
   align-items: center;
@@ -3182,6 +3407,15 @@ body.modal-open {
   gap: 12px;
   padding: 10px 0;
   border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.setting-copy {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.setting-row-range {
+  align-items: flex-start;
 }
 .setting-row:last-child { border-bottom: 0; }
 
@@ -3192,7 +3426,7 @@ body.modal-open {
 }
 
 .setting-desc {
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -3243,20 +3477,25 @@ body.modal-open {
 }
 
 .range-wrap {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
+  width: min(100%, 320px);
+  min-width: 0;
+  flex: 1 1 240px;
 }
 
 .range-wrap input[type=range] {
-  width: 180px;
+  width: 100%;
+  min-width: 0;
 }
 
 .range-val {
-  min-width: 46px;
+  min-width: 50px;
   text-align: right;
   font-variant-numeric: tabular-nums;
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -3413,7 +3652,30 @@ body.modal-open {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   border-bottom: 1px solid var(--border);
+}
+
+.settings-topbar-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.settings-sections-btn {
+  display: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  font-weight: 600;
+}
+
+.settings-sections-btn:hover {
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
 }
 
 .settings-close {
@@ -3441,7 +3703,7 @@ body.modal-open {
 }
 
 .settings-body {
-  padding: var(--space-lg);
+  padding: 20px;
   overflow-y: auto;
 }
 
@@ -3461,8 +3723,8 @@ body.modal-open {
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: var(--space-lg);
-  margin-bottom: var(--space-lg);
+  padding: 18px;
+  margin-bottom: 16px;
 }
 
 .settings-card-title {
@@ -3496,6 +3758,8 @@ body.modal-open {
 
 .settings-row .control {
   min-width: 220px;
+  max-width: 320px;
+  width: 100%;
 }
 
 .settings-inline {
@@ -3531,6 +3795,7 @@ body.modal-open {
 .settings-inline-msg.ok { color: var(--online); }
 .settings-inline-msg.err { color: var(--dnd); }
 
+/* // 24.2 ПРЕДСТАВЛЕНИЕ (настройки) */
 body.hide-header-status #status { display: none !important; }
 body.hide-timestamps .message .msg-time { display: none !important; }
 
@@ -3549,6 +3814,7 @@ body.compact-mode .message .content .text {
   font-size: 14px;
 }
 
+/* // 25. ТЕМНАЯ ТЕМА (по умолчанию) */
 .theme-dark {
   --accent: #b04cff;
   --accent-strong: #ff6ad5;
@@ -3561,6 +3827,7 @@ body.compact-mode .message .content .text {
   --text-secondary: #8b949e;
 }
 
+/* // 26. СВЕТЛАЯ ТЕМА (опционально) */
 .theme-light {
   --accent: #7c3aed;
   --accent-strong: #a855f7;
@@ -3578,6 +3845,8 @@ body.compact-mode .message .content .text {
   --muted: var(--text-muted);
 }
 
+
+/* // 27. СТИЛИ ДЛЯ ПРОИЗВОДИТЕЛЬНОСТИ */
 .will-change-transform {
   will-change: transform;
 }
@@ -3586,6 +3855,7 @@ body.compact-mode .message .content .text {
   will-change: opacity;
 }
 
+/* // 28. ФИНАЛЬНЫЕ ШТРИХИ */
 ::selection {
   background: rgba(176, 76, 255, 0.3);
   color: white;
@@ -3610,6 +3880,7 @@ body.compact-mode .message .content .text {
   outline-offset: 2px;
 }
 
+/* // mobile drawers */
 @media (max-width: 900px) {
   .panel.channels {
     display: none;
@@ -3635,10 +3906,6 @@ body.compact-mode .message .content .text {
     gap: 0;
   }
 
-  /* mobile must not inherit desktop zoom/scale */
-  :root { --ui-scale: 1 !important; }
-  body { zoom: 1 !important; }
-
   .panel {
     border-radius: 0;
   }
@@ -3654,7 +3921,8 @@ body.compact-mode .message .content .text {
     left: 0;
     top: 0;
     bottom: 0;
-    width: min(92vw, 360px);
+    width: 100vw;
+    max-width: 100vw;
     z-index: 120;
     background: var(--panel-solid);
     box-shadow: 5px 0 15px rgba(0, 0, 0, 0.3);
@@ -3679,7 +3947,8 @@ body.compact-mode .message .content .text {
     left: auto;
     top: 0;
     bottom: 0;
-    width: min(92vw, 360px);
+    width: min(94vw, 380px);
+    min-height: 0;
     z-index: 140;
     background: var(--panel-solid);
     box-shadow: -5px 0 15px rgba(0, 0, 0, 0.3);
@@ -3714,6 +3983,37 @@ body.compact-mode .message .content .text {
     padding: 12px;
     padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
   }
+
+  .panel.servers .panelHeader,
+  .panel.channels .panelHeader,
+  .panel.members .panelHeader {
+    padding-top: calc(14px + env(safe-area-inset-top, 0px));
+  }
+
+  .panel.servers .list,
+  .panel.channels .list,
+  .members-list {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .friends-button.item {
+    margin: 0 0 10px;
+  }
+}
+
+@media (max-width: 600px) {
+  .panel.servers,
+  .panel.channels,
+  .panel.members {
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-width: none;
+  }
+
+  .panel.members {
+    left: 0;
+  }
 }
 
 @keyframes slideInRight {
@@ -3726,6 +4026,10 @@ body.compact-mode .message .content .text {
   to { transform: translateX(0); opacity: 1; }
 }
 
+
+/* // PATCH: UI missing styles (attachments viewer, user menu, settings forms, errors) */
+
+/* errors used in friends/search */
 .error {
   background: rgba(248, 81, 73, 0.10);
   border: 1px solid rgba(248, 81, 73, 0.35);
@@ -3734,6 +4038,7 @@ body.compact-mode .message .content .text {
   border-radius: var(--radius-md);
 }
 
+/* user context menu + toast */
 .lb-menu-backdrop {
   position: fixed;
   inset: 0;
@@ -4586,11 +4891,12 @@ body.no-scroll { overflow: hidden; }
 }
 
 .pins-modal{
-  width: min(720px, 100%);
+  width: min(760px, 100%);
   max-height: min(78vh, 720px);
-  border-radius: 14px;
-  background: rgba(20,20,24,0.98);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(23,23,30,0.98), rgba(16,16,22,0.98));
   border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 24px 80px rgba(0,0,0,0.40);
   overflow: hidden;
   display:flex;
   flex-direction: column;
@@ -4600,50 +4906,148 @@ body.no-scroll { overflow: hidden; }
   display:flex;
   align-items:center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 14px 16px;
   border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.02);
 }
 
 .pins-body{
   overflow:auto;
-  padding: 10px 12px;
+  padding: 14px 16px 16px;
+  display:flex;
+  flex-direction:column;
+  gap:12px;
 }
 
 .pin-row{
-  padding: 10px;
+  padding: 0;
   border: 1px solid rgba(255,255,255,0.08);
   background: rgba(255,255,255,0.03);
-  border-radius: 12px;
-  margin-bottom: 10px;
+  border-radius: 16px;
+  overflow: hidden;
 }
 
-.pin-row .pin-meta{ font-size: 12px; opacity: 0.75; margin-bottom: 6px; }
-.pin-row .pin-text{ font-size: 13px; white-space: pre-wrap; word-break: break-word; }
-.pin-row .pin-actions{ display:flex; gap:8px; margin-top: 8px; }
+.pin-message{
+  display:flex;
+  gap:12px;
+  align-items:flex-start;
+  padding: 14px;
+}
+
+.pin-avatar{
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: rgba(255,255,255,0.06);
+}
+
+.pin-avatar img{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display:block;
+}
+
+.pin-main{
+  min-width: 0;
+  flex: 1;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+
+.pin-head{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:6px;
+  line-height: 1.2;
+}
+
+.pin-author{
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.pin-dot,
+.pin-time,
+.pin-submeta{
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.pin-submeta{
+  opacity: 0.9;
+}
+
+.pin-text{
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pin-text.is-missing{
+  color: var(--text-secondary);
+}
+
+.pin-actions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top: 2px;
+}
+
+.pin-actions .btn{
+  min-height: 34px;
+}
 
 @media (max-width: 600px) {
   .settings-modal{
     width: 100vw;
     height: 100vh;
     border-radius: 0;
-  }
-
-  .settings-modal{
     display:flex;
     flex-direction: column;
+    position: relative;
+  }
+
+  .settings-modal.show-sections::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.42);
+    z-index: 1;
   }
 
   .settings-sidebar{
-    width: 100%;
+    display: none;
+  }
+
+  .settings-modal.show-sections .settings-sidebar{
+    display:flex;
+    flex-direction: column;
+    gap: 6px;
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    top: 72px;
+    bottom: 12px;
+    width: auto;
     min-width: 0;
     height: auto;
-    display:flex;
-    flex-direction: row;
-    gap: 6px;
-    overflow-x: auto;
-    padding: 8px;
+    overflow-y: auto;
+    padding: 12px;
     border-right: 0;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
+    border-bottom: 0;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    background: var(--panel-solid);
+    z-index: 2;
   }
 
   .settings-side-header, .settings-side-sep{
@@ -4651,9 +5055,14 @@ body.no-scroll { overflow: hidden; }
   }
 
   .settings-nav-item{
-    flex: 0 0 auto;
+    width: 100%;
     white-space: nowrap;
     border-radius: 10px;
+  }
+
+  .settings-sections-btn{
+    display:inline-flex;
+    flex: 0 0 auto;
   }
 
   .settings-content{
@@ -4661,10 +5070,37 @@ body.no-scroll { overflow: hidden; }
     min-width: 0;
     flex: 1;
   }
+
+  .settings-topbar {
+    padding: 14px;
+  }
+
+  .settings-body {
+    padding: 14px;
+  }
+
+  .settings-card {
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+
+  .settings-row,
+  .setting-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .settings-row .control,
+  .range-wrap {
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
 }
 
-html.ui-scaled, html.ui-scaled body { overflow: auto; }
-html.ui-scaled .layout { overflow: auto; }
+html.ui-scaled, html.ui-scaled body { overflow: hidden; }
+html.ui-scaled .app-root, html.ui-scaled .layout { overflow: hidden; }
 
 /* states for voice buttons */
 .icon-btn.is-on, .vc-btn.is-on {
@@ -4694,7 +5130,7 @@ html.ui-scaled .layout { overflow: auto; }
 .dm-call-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.55);
+  background: radial-gradient(circle at top, rgba(176, 76, 255, 0.14), rgba(0,0,0,0.76) 62%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4703,29 +5139,113 @@ html.ui-scaled .layout { overflow: auto; }
 .dm-call-overlay.hidden { display: none; }
 
 .dm-call-card {
-  width: min(420px, calc(100% - 24px));
-  border-radius: 16px;
+  position: relative;
+  width: min(440px, calc(100% - 24px));
+  min-height: 360px;
+  border-radius: 22px;
   border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(20,20,24,0.95);
-  box-shadow: 0 18px 46px rgba(0,0,0,0.35);
-  padding: 16px;
-}
-.dm-call-title {
-  font-weight: 1000;
-  font-size: 16px;
-  color: rgba(255,255,255,0.92);
-}
-.dm-call-sub {
-  margin-top: 8px;
-  font-size: 13px;
-  color: rgba(255,255,255,0.70);
-}
-.dm-call-actions {
-  margin-top: 14px;
+  background: linear-gradient(180deg, rgba(32, 35, 44, 0.98), rgba(18, 20, 28, 0.98));
+  box-shadow: 0 24px 70px rgba(0,0,0,0.40);
+  padding: 28px 24px 22px;
   display: flex;
-  gap: 10px;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  overflow: hidden;
 }
+
+.dm-call-orb {
+  position: absolute;
+  width: 240px;
+  height: 240px;
+  border-radius: 50%;
+  top: -82px;
+  background: radial-gradient(circle, rgba(176,76,255,0.28), rgba(176,76,255,0.03) 62%, transparent 72%);
+  filter: blur(4px);
+  pointer-events: none;
+}
+
+.dm-call-avatar {
+  position: relative;
+  z-index: 1;
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  border: 1px solid rgba(176,76,255,0.45);
+  background: rgba(176,76,255,0.16);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 34px;
+  font-weight: 900;
+  color: var(--text);
+  box-shadow: 0 18px 34px rgba(0,0,0,0.28);
+}
+
+.dm-call-name {
+  margin-top: 18px;
+  font-size: 26px;
+  font-weight: 900;
+  color: rgba(255,255,255,0.95);
+}
+
+.dm-call-title {
+  margin-top: 12px;
+  font-weight: 900;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255,255,255,0.78);
+}
+
+.dm-call-sub {
+  margin-top: 10px;
+  font-size: 14px;
+  color: rgba(255,255,255,0.68);
+  max-width: 280px;
+}
+
+.dm-call-actions {
+  margin-top: 28px;
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  width: 100%;
+}
+
+.dm-call-actions .btn {
+  min-width: 136px;
+  min-height: 42px;
+}
+
+.dm-call-overlay[data-mode="outgoing"] .dm-call-avatar {
+  animation: dmCallPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes dmCallPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(176,76,255,0.24), 0 18px 34px rgba(0,0,0,0.28); }
+  50% { box-shadow: 0 0 0 18px rgba(176,76,255,0), 0 18px 34px rgba(0,0,0,0.28); }
+}
+
+@media (max-width: 600px) {
+  .dm-call-card {
+    min-height: 100vh;
+    width: 100vw;
+    border-radius: 0;
+    padding-top: calc(48px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .dm-call-actions {
+    flex-direction: column-reverse;
+  }
+
+  .dm-call-actions .btn {
+    width: 100%;
+  }
+}
+
 .btn.btn-danger {
   border-color: rgba(255, 80, 80, 0.45);
   background: rgba(255, 80, 80, 0.18);
@@ -4871,3 +5391,20 @@ html.ui-scaled .layout { overflow: auto; }
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .voice-tile-kind{ font-size:12px; color:rgba(255,255,255,0.70); }
+
+@media (max-width: 640px) {
+  .pins-overlay{
+    padding: 0;
+  }
+
+  .pins-modal{
+    width: 100vw;
+    max-height: 100dvh;
+    height: 100dvh;
+    border-radius: 0;
+  }
+
+  .pin-message{
+    padding: 12px;
+  }
+}

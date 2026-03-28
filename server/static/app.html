@@ -4,9 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LaBerry</title>
-  <link rel="stylesheet" href="/static/css/main.css?v=13">
+  <link rel="stylesheet" href="/static/css/main.css?v=19">
 </head>
 <body>
+  <div id="appRoot" class="app-root">
+
+  <!-- ===== HEADER ===== -->
   <header class="topbar">
     <div class="topbar-left">
       <button class="icon-btn mobile-only" type="button" id="mobileServersBtn" title="Серверы">☰</button>
@@ -23,7 +26,10 @@
   <div class="layout">
 
     <div id="uiOverlay" class="ui-overlay" aria-hidden="true"></div>
+
+    <!-- ===== SERVERS PANEL ===== -->
     <aside class="panel servers">
+      <!-- FRIENDS BUTTON -->
       <div class="friends-button item" id="friendsBtn">
         <div class="text">
           <div class="title">👥 Друзья</div>
@@ -37,6 +43,8 @@
       </div>
 
       <div class="list" id="servers-list"></div>
+
+      <!-- VOICE BAR -->
       <div class="voicebar" id="voiceBar" hidden>
         <div class="voicebar-main">
           <div class="voicebar-title"><span class="voice-ic">🔊</span> <span id="voiceChannelName">Voice</span></div>
@@ -58,6 +66,8 @@
 
       <div id="voiceAudioSink" hidden></div>
       <div id="voiceVideoSink" hidden></div>
+
+      <!-- USER BAR -->
       <div class="userbar">
         <div class="avatar" id="userAvatar">
           <img id="userAvatarImg" class="avatar-img" alt="" style="display:none;" />
@@ -71,13 +81,17 @@
       </div>
     </aside>
 
+    <!-- ===== CHANNELS ===== -->
     <aside class="panel channels" id="channelsPanel">
       <div class="panelHeader">
         <h3>Каналы</h3>
         <button class="btn btn-ghost" type="button" id="addChannelBtn" style="display: none;">＋</button>
       </div>
 
+      <!-- DM LIST -->
       <div class="list dm-list" id="dmList" hidden></div>
+
+      <!-- CHANNEL LIST -->
       <div class="list" id="channels-list">
         <div class="item active" data-channel-id="1">
           <span class="hash">#</span>
@@ -89,7 +103,9 @@
       </div>
     </aside>
 
+    <!-- ===== MAIN CHAT PANEL ===== -->
     <main class="panel chat" id="chatPanel">
+      <!-- CHAT VIEW -->
       <div id="chatView">
         <div class="panelHeader chat-header">
           <h3 id="chat-title"># general</h3>
@@ -119,6 +135,7 @@
         </form>
       </div>
 
+      <!-- VOICE VIEW (Discord-like) -->
       <div id="voiceView" class="voice-view" hidden>
         <div class="voice-view-header">
           <div class="voice-view-title">
@@ -203,6 +220,7 @@
         </div>
       </div>
       
+      <!-- FRIENDS VIEW (нужно добавить стили в main.css) -->
       <div id="friendsView" hidden>
         <div class="friends">
           <div class="friends-header">
@@ -234,6 +252,7 @@
       </div>
     </main>
 
+    <!-- ===== MEMBERS ===== -->
     <aside class="panel members" id="membersPanel">
       <div id="membersPanelMembers">
         <div class="panelHeader">
@@ -250,14 +269,19 @@
         </div>
       </div>
 
+      <!-- In voice mode we reuse the right panel as a text chat (Discord-like) -->
       <div id="voiceChatSide" class="voice-chat-side" hidden></div>
     </aside>
   </div>
 
 
 
-  <div id="dmCallOverlay" class="dm-call-overlay hidden" aria-hidden="true">
+  <!-- ===== DM CALL OVERLAY ===== -->
+  <div id="dmCallOverlay" class="dm-call-overlay hidden" aria-hidden="true" data-mode="incoming">
     <div class="dm-call-card" role="dialog" aria-modal="true">
+      <div class="dm-call-orb" aria-hidden="true"></div>
+      <div class="dm-call-avatar" id="dmCallAvatar">U</div>
+      <div class="dm-call-name" id="dmCallName">Пользователь</div>
       <div class="dm-call-title" id="dmCallTitle">Звонок</div>
       <div class="dm-call-sub" id="dmCallSub">Входящий вызов</div>
       <div class="dm-call-actions">
@@ -266,12 +290,13 @@
       </div>
     </div>
   </div>
-  
+  <!-- ===== LOADING OVERLAY ===== -->
   <div id="loading-overlay" class="overlay">
     <div class="spinner"></div>
     <p>Подключаемся к серверу...</p>
   </div>
 
+  <!-- ===== SCREEN SHARE MODAL (Discord-like) ===== -->
   <div id="screenShareOverlay" class="modal-overlay" hidden>
     <div class="modal ss-modal">
       <div class="modal-header">
@@ -319,6 +344,7 @@
     </div>
   </div>
 
+  <!-- ===== SCREEN SHARE VIEWER (remote) ===== -->
   <div id="ssPanel" class="ss-panel" hidden>
     <div class="ss-panel-head">
       <div class="ss-panel-title" id="ssPanelTitle">Демонстрация</div>
@@ -332,6 +358,8 @@
     </div>
   </div>
 
-  <script type="module" src="/static/js/app.js?v=13"></script>
+  </div>
+
+  <script type="module" src="/static/js/app.js?v=19"></script>
 </body>
 </html>

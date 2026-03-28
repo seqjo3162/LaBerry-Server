@@ -32,10 +32,12 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // 1. Если пользователь уже есть в extensions — берём оттуда
         if let Some(user) = parts.extensions.get::<AuthUser>() {
             return Ok(user.clone());
         }
 
+        // 2. Читаем Authorization header
         let auth_header = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -85,6 +87,7 @@ impl FromRequestParts<AppState> for AuthUser {
             role: row.get("role"),
         };
 
+        // sessions (best-effort)
         let now = auth::now_iso();
 
         if let Ok(Some(revoked_at)) = sqlx::query_scalar::<_, Option<String>>(
@@ -104,6 +107,8 @@ impl FromRequestParts<AppState> for AuthUser {
             .bind(&token_hash)
             .execute(&state.db)
             .await;
+
+        // 3. Кладём в extensions, чтобы не валидировать повторно
         parts.extensions.insert(user.clone());
 
         Ok(user)

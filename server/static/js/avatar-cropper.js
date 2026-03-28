@@ -1,3 +1,6 @@
+// avatar-cropper.js
+// Простая обрезка/центровка аватара под круг: перетаскивание + зум.
+
 let _overlay = null;
 let _state = null;
 
@@ -43,6 +46,8 @@ function ensureOverlay() {
 
   document.body.appendChild(overlay);
   _overlay = overlay;
+
+  // Click outside to close
   overlay.addEventListener('mousedown', (e) => {
     if (e.target === overlay && _state?.resolve) {
       e.preventDefault();
@@ -141,6 +146,8 @@ function close() {
   if (!_overlay) return;
   _overlay.classList.add('hidden');
   document.body.classList.remove('no-scroll');
+
+  // cleanup object URL
   if (_state?.objectUrl) {
     try { URL.revokeObjectURL(_state.objectUrl); } catch (_) {}
   }
@@ -208,6 +215,7 @@ async function renderToBlob() {
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas 2D context missing');
 
+  // draw as in preview, but scaled to output
   const img = _overlay.querySelector('#avatarCropImg');
   const dx = _state.offsetX * scaleOut;
   const dy = _state.offsetY * scaleOut;
@@ -236,6 +244,7 @@ export async function openAvatarCropper(file, options = {}) {
   const imgEl = _overlay.querySelector('#avatarCropImg');
   const zoomEl = _overlay.querySelector('#avatarCropZoom');
 
+  // Reset
   zoomEl.value = '1';
   imgEl.removeAttribute('src');
 

@@ -12,6 +12,7 @@ export function initVoice({ wsManager, api, getMe }) {
     return;
   }
 
+  // --- UI elements ---
   const elVoiceBar = document.getElementById('voiceBar');
   const elChanName = document.getElementById('voiceChannelName');
   const elStatus = document.getElementById('voiceStatusText');
@@ -22,9 +23,13 @@ export function initVoice({ wsManager, api, getMe }) {
   const btnLeave = document.getElementById('voiceLeaveBtn');
   const elAudioSink = document.getElementById('voiceAudioSink');
   const elVideoSink = document.getElementById('voiceVideoSink');
+
+  // Voice bar stream notice
   const elStreamNotice = document.getElementById('voiceStreamNotice');
   const elStreamText = document.getElementById('voiceStreamText');
   const btnStreamWatch = document.getElementById('voiceStreamWatchBtn');
+
+  // Voice view (Discord-like stage)
   const voiceView = document.getElementById('voiceView');
   const voiceViewChanName = document.getElementById('voiceViewChannelName');
   const voiceViewState = document.getElementById('voiceViewState');
@@ -47,6 +52,8 @@ export function initVoice({ wsManager, api, getMe }) {
   const vcLeaveBtn = document.getElementById('vcLeaveBtn');
   const voicePipBtn = document.getElementById('voicePipBtn');
   const voiceFullscreenBtn = document.getElementById('voiceFullscreenBtn');
+
+  // Screen share modal
   const ssOverlay = document.getElementById('screenShareOverlay');
   const ssCloseBtn = document.getElementById('screenShareCloseBtn');
   const ssCancelBtn = document.getElementById('screenShareCancelBtn');
@@ -54,14 +61,18 @@ export function initVoice({ wsManager, api, getMe }) {
   const ssPreviewVideo = document.getElementById('ssPreviewVideo');
   const ssPreviewHint = document.getElementById('ssPreviewHint');
   const ssAudioChk = document.getElementById('ssAudioChk');
+
+  // Remote viewer panel
   const ssPanel = document.getElementById('ssPanel');
   const ssPanelTitle = document.getElementById('ssPanelTitle');
   const ssRemoteVideo = document.getElementById('ssRemoteVideo');
   const ssPanelHideBtn = document.getElementById('ssPanelHideBtn');
   const ssPanelFullscreenBtn = document.getElementById('ssPanelFullscreenBtn');
-  const voiceMembersDock = document.getElementById('voiceMembersDock');
-  let voiceMembersGrid = null;
-  let voiceMembersCount = null;
+
+// Voice members dock is inside the voice stage (right panel is used for text chat in voice mode)
+const voiceMembersDock = document.getElementById('voiceMembersDock');
+let voiceMembersGrid = null;
+let voiceMembersCount = null;
 
 function ensureVoiceMembersSection() {
   if (!voiceMembersDock) return;
@@ -70,6 +81,8 @@ function ensureVoiceMembersSection() {
   voiceMembersCount = document.getElementById('voiceMembersCount');
 }
 
+
+  // --- state ---
   const pcs = new Map();          // peerId -> RTCPeerConnection
   const remoteStreams = new Map(); // peerId -> MediaStream
   const audioEls = new Map();     // peerId -> HTMLAudioElement
@@ -79,12 +92,16 @@ function ensureVoiceMembersSection() {
 
   let meId = null;
   let meName = null;
+
   let iceConfig = null;
   let localStream = null;
   let localStreamError = null;
+
+  // screenshare state
   let screenStream = null;
-  let ssWatchers = new Set();
-  let liveSharers = new Set();
+  let ssWatchers = new Set(); // userIds who are watching OUR share
+  let liveSharers = new Set(); // userIds who currently broadcast screen
+
   let screenVideoTrack = null;
   let screenAudioTrack = null;
   let screenSenders = new Map(); // peerId -> { videoSender, audioSender }
@@ -93,48 +110,26 @@ function ensureVoiceMembersSection() {
   let ssSelectedRes = 720;
   let ssSelectedFps = 30;
   let ssIncludeAudio = false;
+  
   let audioCtx = null;
   let analyser = null;
+  
   let lastJoinAttemptChannelId = null;
+
   let inChannelId = null;
   let inChannelName = null;
+
   let muted = false;
   let deafened = false;
+
   let joining = false;
+
+  // screen share viewing state (what is shown in the big stage)
   let remoteShareUserId = null;
   let remoteShareStream = null;
   let watchingUserId = null;
   let watchingStream = null;
-  let focusedUserId = null;
-  let _mediaUnlocked = false;
-  function unlockMediaPlaybackOnce() {
-    if (_mediaUnlocked) return;
-    _mediaUnlocked = true;
-    try {
-      if (audioCtx && audioCtx.state === 'suspended' && typeof audioCtx.resume === 'function') {
-        audioCtx.resume().catch(() => {});
-      }
-    } catch (_) {}
-    try {
-      for (const a of audioEls.values()) {
-        try {
-          const p = a.play?.();
-          if (p && typeof p.catch === 'function') p.catch(() => {});
-        } catch (_) {}
-      }
-    } catch (_) {}
-    const vids = [voiceStageVideo, ssRemoteVideo, ssPreviewVideo, voiceSelfVideo].filter(Boolean);
-    for (const v of vids) {
-      try {
-        const p = v.play?.();
-        if (p && typeof p.catch === 'function') p.catch(() => {});
-      } catch (_) {}
-    }
-  }
-  try { document.addEventListener('pointerdown', unlockMediaPlaybackOnce, { once: true, passive: true }); } catch (_) {}
-  try { document.addEventListener('touchstart', unlockMediaPlaybackOnce, { once: true, passive: true }); } catch (_) {}
-  try { document.addEventListener('click', unlockMediaPlaybackOnce, { once: true, passive: true }); } catch (_) {}
-
+  let focusedUserId = null; // local UI focus in members tiles
 
 
   function setBarVisible(v) {
@@ -192,6 +187,8 @@ function ensureVoiceMembersSection() {
   function renderUsersUnderVoiceChannel(channelId, ids) {
     const list = document.getElementById('channels-list');
     if (!list) return;
+
+    // Clear all containers first
     try {
       list.querySelectorAll('.item.channel.voice .voice-users').forEach((el) => {
         el.innerHTML = '';
@@ -267,6 +264,8 @@ function ensureVoiceMembersSection() {
     if (!Number.isFinite(id) || id <= 0) return 'Unknown';
 
     if (nameCache.has(id)) return nameCache.get(id);
+
+    // try members list DOM cache
     try {
       const el = document.querySelector(`.member[data-user-id="${id}"]`);
       const fromData = el?.dataset?.username;
@@ -281,6 +280,8 @@ function ensureVoiceMembersSection() {
         return t;
       }
     } catch (_) {}
+
+    // fallback: API
     try {
       const u = await api(`/api/users/${id}`);
       const name = (u?.username || '').toString() || `User#${id}`;
@@ -310,6 +311,8 @@ function ensureVoiceMembersSection() {
   async function getLocalStreamOptional() {
   if (localStream) return localStream;
   if (localStreamError) return null;
+
+  // Microphone access requires a secure context (HTTPS or localhost)
   if (!window.isSecureContext) {
     localStreamError = new Error('secure_context_required');
     return null;
@@ -329,6 +332,8 @@ function ensureVoiceMembersSection() {
 
   try {
     localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+    // create audio context & analyzer
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const source = audioCtx.createMediaStreamSource(localStream);
     analyser = audioCtx.createAnalyser();
@@ -398,6 +403,8 @@ function ensureVoiceMembersSection() {
       try { ve.remove(); } catch (_) {}
     }
     videoEls.delete(id);
+
+    // if this peer was sharing — clear
     try {
       if (remoteShareUserId === id) {
         hideRemoteViewerPanel();
@@ -422,6 +429,7 @@ function getVoiceDisplayName(uid) {
 
 function getVoiceAvatarInnerHtml(uid, name) {
   const id = Number(uid);
+  // Try to reuse server members avatar HTML if present
   try {
     const el = document.querySelector(`.member[data-user-id="${id}"] .avatar`);
     const html = el?.innerHTML;
@@ -445,6 +453,7 @@ function renderVoiceMembersTiles(ids) {
     return;
   }
 
+  // Hide the dock when you are alone in the channel (keeps the stage clean)
   if (arr.length <= 1) {
     voiceMembersGrid.innerHTML = '';
     voiceMembersDock.hidden = true;
@@ -478,6 +487,7 @@ function renderVoiceMembersTiles(ids) {
       ${isLive ? '<div class="voice-member-live">LIVE</div>' : ''}
     `;
 
+    // Right click toggles local focus
     tile.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -485,10 +495,14 @@ function renderVoiceMembersTiles(ids) {
       if (focusedUserId === id) focusedUserId = null;
       else focusedUserId = id;
 
+      // Re-render to update highlight
       renderVoiceMembersTiles(arr);
+
+      // Apply focus to stage if possible
       applyVoiceFocusToStage();
     });
 
+    // Left click: if LIVE — toggle watch; else open user menu if available
     tile.addEventListener('click', (e) => {
       try {
         const isLive = (id === meId ? (isSharingScreen && !!screenStream) : liveSharers.has(id));
@@ -517,8 +531,11 @@ function renderVoiceMembersTiles(ids) {
     });
 
     frag.appendChild(tile);
+
+    // Resolve name async if unknown
     if (!nameCache.has(id) && id !== meId) {
       resolveName(id).then(() => {
+        // Re-render if still in same channel and the tile exists
         try {
           if (!inChannelId) return;
           renderVoiceMembersTiles(arr);
@@ -559,6 +576,8 @@ function renderVoiceMembersTiles(ids) {
     if (!inChannelId) return;
     if (!Number.isFinite(uid) || uid <= 0) return;
     if (uid === meId) return;
+
+    // stop previous watch
     if (watchingUserId && watchingUserId !== uid) {
       ssSend('voice_ss_unwatch', watchingUserId);
       try {
@@ -569,8 +588,10 @@ function renderVoiceMembersTiles(ids) {
     watchingUserId = uid;
     focusedUserId = uid;
 
+    // request stream from the sharer
     ssSend('voice_ss_watch', uid);
 
+    // UI update
     try { renderVoiceMembersTiles(currentVoiceMemberIds()); } catch (_) {}
     try {
       if (isVoiceViewOpen() && !(isSharingScreen && screenStream)) {
@@ -609,17 +630,12 @@ function renderVoiceMembersTiles(ids) {
   }
 
 function applyVoiceFocusToStage() {
+  // If no voice view open — focus is only visual in the sidebar
   if (!isVoiceViewOpen()) return;
 
-  let fid = Number(focusedUserId || 0);
-  try {
-    const myId = Number(getMe?.()?.id || 0);
-    if (isSharingScreen && screenStream && (!fid || fid === myId)) {
-      fid = myId;
-      focusedUserId = myId;
-    }
-  } catch (_) {}
+  const fid = Number(focusedUserId || 0);
   if (!Number.isFinite(fid) || fid <= 0) {
+    // restore default stage
     if (isSharingScreen && screenStream) {
       stageShowSelfShare();
     } else if (remoteShareStream && remoteShareUserId) {
@@ -645,6 +661,7 @@ function applyVoiceFocusToStage() {
     return;
   }
 
+  // No video stream — keep default stage, but keep the focus highlight.
   if (isSharingScreen && screenStream) {
     stageShowSelfShare();
   } else if (remoteShareStream && remoteShareUserId) {
@@ -656,12 +673,15 @@ function applyVoiceFocusToStage() {
 
 
   function updateVoiceUiPeers() {
+    // Hide peer chips in the left voicebar (users expect the list under the voice channel).
     try {
       if (elPeers) {
         elPeers.innerHTML = '';
         elPeers.style.display = 'none';
       }
     } catch (_) {}
+
+    // Hide stage strip (no users list inside the stage).
     try {
       if (voiceStageStrip) {
         voiceStageStrip.innerHTML = '';
@@ -688,6 +708,7 @@ function applyVoiceFocusToStage() {
     renderUsersUnderVoiceChannel(inChannelId, ids);
     renderVoiceMembersTiles(ids);
 
+    // If focused user left the call — drop focus
     try {
       if (focusedUserId && !ids.includes(focusedUserId)) focusedUserId = null;
     } catch (_) {}
@@ -716,21 +737,15 @@ function applyVoiceFocusToStage() {
   function stageSetStream(stream, ownerUserId) {
     const hasVideo = !!stream;
 
+    // Set/clear the stage video
     try {
       if (voiceStageVideo) {
         if (hasVideo) {
           voiceStageVideo.hidden = false;
           voiceStageVideo.srcObject = stream;
-          try {
-            voiceStageVideo.muted = (Number(ownerUserId || 0) === Number(meId || 0));
-          } catch (_) {}
           const p = voiceStageVideo.play?.();
-          if (p && typeof p.catch === 'function') {
-            p.catch(() => {
-              try { voiceStageVideo.muted = true; } catch (_) {}
-              try { voiceStageVideo.play?.().catch(() => {}); } catch (_) {}
-            });
-          }} else {
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        } else {
           try { voiceStageVideo.pause?.(); } catch (_) {}
           voiceStageVideo.srcObject = null;
           voiceStageVideo.hidden = true;
@@ -738,6 +753,7 @@ function applyVoiceFocusToStage() {
       }
     } catch (_) {}
 
+    // Speaker tile next to the stream (keep it even without stream to avoid an "empty" left column)
     try {
       if (voicePeerTile) {
         const uid = hasVideo ? Number(ownerUserId || 0) : Number(meId || 0);
@@ -753,6 +769,7 @@ function applyVoiceFocusToStage() {
       }
     } catch (_) {}
 
+    // Stage state classes for CSS layout
     try {
       if (voiceStage) {
         voiceStage.classList.toggle('has-stream', hasVideo);
@@ -760,6 +777,7 @@ function applyVoiceFocusToStage() {
       }
     } catch (_) {}
 
+    // Show placeholder whenever there is no stream (keeps UI clean)
     try {
       if (voiceStageEmpty) {
         const showPlaceholder = !hasVideo;
@@ -792,21 +810,8 @@ function applyVoiceFocusToStage() {
     updateStageWatchButtons();
   }
 
-function stageShowSelfShare() {
-  try {
-    if (voiceStageVideo && screenStream && typeof screenStream.getVideoTracks === 'function') {
-      const vts = screenStream.getVideoTracks();
-      if (vts && vts.length > 0 && vts[0].readyState === 'live') {
-        voiceStageVideo.hidden = false;
-        voiceStageVideo.srcObject = screenStream;
-        try { voiceStageVideo.muted = true; } catch (_) {}
-        try { voiceStageVideo.style.objectFit = 'contain'; voiceStageVideo.style.width = '100%'; voiceStageVideo.style.height = '100%'; voiceStageVideo.style.display = 'block'; } catch (_) {}
-        const p = voiceStageVideo.play?.();
-        if (p && typeof p.catch === 'function') p.catch(() => {});
-      }
-    }
-  } catch (_) {}
-  if (!screenStream) return;
+  function stageShowSelfShare() {
+    if (!screenStream) return;
     stageSetStream(screenStream, meId);
     if (voiceStageName) voiceStageName.textContent = 'Вы транслируете';
     if (voiceStageTop) voiceStageTop.hidden = false;
@@ -823,6 +828,7 @@ function stageShowSelfShare() {
   function updateStageWatchButtons() {
     const hasRemote = !!remoteShareStream && !!remoteShareUserId;
     if (elStreamNotice) elStreamNotice.hidden = !hasRemote;
+    // "Watch" button is kept only for backward compatibility; UI uses the stage window.
     if (voiceStageWatchBtn) voiceStageWatchBtn.hidden = true;
     if (btnStreamWatch) btnStreamWatch.hidden = true;
   }
@@ -850,6 +856,10 @@ function stageShowSelfShare() {
     voiceStageStrip.appendChild(frag);
   }
 
+  // ==============================
+  // SCREEN SHARE UI + HELPERS
+  // ==============================
+
   function setSharingUi(v) {
     document.body.classList.toggle('voice-sharing', !!v && !!inChannelId);
   }
@@ -858,16 +868,7 @@ function stageShowSelfShare() {
     if (!remoteShareStream || !remoteShareUserId) return;
     try { ssRemoteVideo.pause?.(); } catch (_) {}
     try { ssRemoteVideo.srcObject = remoteShareStream; } catch (_) {}
-    try {
-      try { ssRemoteVideo.muted = false; } catch (_) {}
-      const p = ssRemoteVideo.play?.();
-      if (p && typeof p.catch === 'function') {
-        p.catch(() => {
-          try { ssRemoteVideo.muted = true; } catch (_) {}
-          try { ssRemoteVideo.play?.().catch(() => {}); } catch (_) {}
-        });
-      }
-    } catch (_) {}
+    try { ssRemoteVideo.play?.().catch(() => {}); } catch (_) {}
     try {
       const title = (elStreamText?.textContent || '').toString().trim();
       if (ssPanelTitle) ssPanelTitle.textContent = title || 'Демонстрация';
@@ -889,6 +890,7 @@ function stageShowSelfShare() {
     if (elStreamNotice) elStreamNotice.hidden = true;
     if (voiceStageWatchBtn) voiceStageWatchBtn.hidden = true;
 
+    // hide viewer panel
     hideRemoteViewerPanel();
 
     if (isSharingScreen && screenStream) stageShowSelfShare();
@@ -905,7 +907,11 @@ function stageShowSelfShare() {
     const name = await resolveName(uid).catch(() => `User#${uid}`);
     if (elStreamText) elStreamText.textContent = `Демонстрация: ${name}`;
     if (elStreamNotice) elStreamNotice.hidden = false;
+
+    // preload viewer panel (but keep hidden until user clicks 'Смотреть')
     try { if (ssRemoteVideo) ssRemoteVideo.srcObject = stream; } catch (_) {}
+
+    // if the voice view is open and you are not actively streaming yourself — show immediately
     if (isVoiceViewOpen() && !(isSharingScreen && screenStream)) {
       await stageShowRemoteShare();
     } else {
@@ -952,6 +958,7 @@ function stageShowSelfShare() {
 function ssMaxBitrateKbps(res, fps) {
   const r = Number(res) || 720;
   const f = Math.max(1, Math.min(60, Number(fps) || 30));
+  // User requirement: cap 1080p at 6000 kbps.
   if (r >= 1080) return 6000;
   if (r >= 720) return (f >= 60 ? 4500 : 3000);
   return (f >= 60 ? 2500 : 1500);
@@ -967,13 +974,18 @@ async function ssApplySenderBitrate(sender, res, fps) {
     if (!p.encodings) p.encodings = [{}];
     if (!Array.isArray(p.encodings) || p.encodings.length === 0) p.encodings = [{}];
 
+    // Per spec/browser behavior: encodings[0].maxBitrate is bps.
     p.encodings[0].maxBitrate = maxBps;
     p.encodings[0].maxFramerate = Math.max(1, Math.min(60, Number(fps) || 30));
 
+    // Prefer keeping resolution for screen share.
     if (!p.degradationPreference) p.degradationPreference = 'maintain-resolution';
 
     await sender.setParameters(p);
-  } catch (e) {}
+  } catch (e) {
+    // Some browsers/implementations may reject parameters; ignore silently.
+    // console.warn('[SS] setParameters failed', e);
+  }
 }
 
 async function ssApplyBitrateToAllPeers() {
@@ -995,12 +1007,15 @@ async function ssApplyBitrateToAllPeers() {
     const fps = Math.max(1, Math.min(60, Number(ssSelectedFps) || 30));
     const surface = (ssSelectedSurface || 'monitor').toString();
     const includeAudio = !!ssIncludeAudio;
+
+    // Chrome supports privacy controls (ignored by other browsers).
+    // https://developer.chrome.com/docs/web-platform/screen-sharing-controls
     const constraints = {
       video: {
         width: { ideal: dims.width },
         height: { ideal: dims.height },
         frameRate: { ideal: fps, max: fps },
-        displaySurface: surface,
+        displaySurface: surface, // "monitor" | "window" | "browser" (Chrome)
       },
       audio: includeAudio ? true : false,
       surfaceSwitching: 'include',
@@ -1009,6 +1024,7 @@ async function ssApplyBitrateToAllPeers() {
       selfBrowserSurface: surface === 'browser' ? 'include' : 'exclude',
     };
 
+    // preferCurrentTab is mutually exclusive with selfBrowserSurface: "exclude"
     if (surface === 'browser') {
       constraints.preferCurrentTab = true;
     }
@@ -1042,10 +1058,12 @@ async function ssApplyBitrateToAllPeers() {
     if (!inChannelId) return;
 
     if (shouldInitiate(pid)) {
+      // we are initiator -> create offer immediately
       setTimeout(() => { sendOffer(pid).catch((e) => console.warn('[SS] sendOffer failed', e)); }, 20);
       return;
     }
 
+    // ask initiator peer to create an offer
     wsManager.send({
       type: 'rtc_negotiate',
       data: {
@@ -1062,6 +1080,8 @@ async function ssApplyBitrateToAllPeers() {
     if (!pc) return;
 
     const prev = screenSenders.get(pid) || { videoSender: null, audioSender: null };
+
+    // Video
     if (screenVideoTrack) {
       const already = pc.getSenders().find((s) => s && s.track && s.track.kind === 'video' && s.track === screenVideoTrack);
       if (!already) {
@@ -1074,6 +1094,7 @@ async function ssApplyBitrateToAllPeers() {
       }
     }
 
+    // Audio (tab/system) optional
     if (screenAudioTrack) {
       const alreadyA = pc.getSenders().find((s) => s && s.track && s.track.kind === 'audio' && s.track === screenAudioTrack);
       if (!alreadyA) {
@@ -1116,6 +1137,7 @@ async function ssApplyBitrateToAllPeers() {
     }
     if (isSharingScreen) return;
 
+    // Screen capture requires HTTPS or localhost
     if (!window.isSecureContext) {
       setStatus('Демонстрация экрана требует HTTPS (secure context).');
       return;
@@ -1145,8 +1167,10 @@ async function ssApplyBitrateToAllPeers() {
       return;
     }
 
+    // Preview in modal (and keep it for “Stop” menu)
     ssSetPreview(screenStream);
 
+    // Auto-stop when user clicks "Stop sharing" in browser UI
     try {
       screenVideoTrack.onended = () => {
         stopScreenShare().catch(() => {});
@@ -1155,8 +1179,11 @@ async function ssApplyBitrateToAllPeers() {
 
     isSharingScreen = true;
     setSharingUi(true);
+
+    // Ensure voice UI is visible for the streamer.
     openVoiceViewAndShowStage();
 
+    // show local preview inside the stage
     try {
       if (voiceSelfPreview && voiceSelfVideo) {
         voiceSelfVideo.srcObject = screenStream;
@@ -1166,21 +1193,27 @@ async function ssApplyBitrateToAllPeers() {
       }
     } catch (_) {}
 
+    // if voice view is open — show your stream immediately
     if (isVoiceViewOpen()) {
       stageShowSelfShare();
     } else {
       updateStageWatchButtons();
     }
 
+    // Notify others that we started sharing (stream will be sent only to watchers)
     try { wsManager.send({ type: 'voice_ss_start', data: { channel_id: inChannelId } }); } catch (_) {}
     try { if (meId) liveSharers.add(meId); } catch (_) {}
     updateVoiceUiPeers();
+
+    // Close modal
     ssOverlayVisible(false);
+
   }
 
   async function stopScreenShare() {
     if (!isSharingScreen) return;
 
+    // Detach tracks first (renegotiate)
     const peerIds = [...screenSenders.keys()];
     for (const pid of peerIds) {
       await ssDetachFromPeer(pid);
@@ -1202,6 +1235,7 @@ async function ssApplyBitrateToAllPeers() {
     isSharingScreen = false;
     setSharingUi(false);
 
+    // Notify others that we stopped sharing
     try { wsManager.send({ type: 'voice_ss_stop', data: { channel_id: inChannelId } }); } catch (_) {}
     try { if (meId) liveSharers.delete(meId); } catch (_) {}
     updateVoiceUiPeers();
@@ -1221,6 +1255,7 @@ async function ssApplyBitrateToAllPeers() {
       updateStageWatchButtons();
     }
 
+    // keep preview clean
     ssClearPreview();
   }
 
@@ -1242,6 +1277,7 @@ async function ssApplyBitrateToAllPeers() {
 
     await ssApplyBitrateToAllPeers();
 
+    // renegotiate (some browsers need it when constraints change)
     const peerIds = [...pcs.keys()];
     for (const pid of peerIds) {
       await ssRequestRenegotiation(pid);
@@ -1251,6 +1287,7 @@ async function ssApplyBitrateToAllPeers() {
   function setDeafened(v) {
     deafened = !!v;
 
+    // mute all remote audios locally
     for (const a of audioEls.values()) {
       try { a.muted = deafened; } catch (_) {}
     }
@@ -1270,6 +1307,7 @@ async function ssApplyBitrateToAllPeers() {
     const p = Number(peerId);
     if (!Number.isFinite(p) || p <= 0) return false;
     if (!meId) return false;
+    // deterministic: smaller userId initiates
     return meId < p;
   }
 
@@ -1284,6 +1322,7 @@ async function ssApplyBitrateToAllPeers() {
 
     pcs.set(id, pc);
 
+    // Always be ready to RECEIVE video (screen share)
     try {
       pc.addTransceiver('video', { direction: 'recvonly' });
     } catch (_) {}
@@ -1324,6 +1363,7 @@ async function ssApplyBitrateToAllPeers() {
         return;
       }
 
+      // default: audio
       remoteStreams.set(id, stream);
 
       let a = audioEls.get(id);
@@ -1341,19 +1381,11 @@ async function ssApplyBitrateToAllPeers() {
       updateVoiceUiPeers();
     };
 
-    pc.onconnectionstatechange = () => {updateVoiceUiPeers();};
-    pc.oniceconnectionstatechange = () => {
-      try {
-        const st = pc.iceConnectionState;
-        if (st === 'failed') {
-          try { pc.restartIce?.(); } catch (_) {}
-          if (shouldInitiate(id)) {
-            setTimeout(() => { sendOffer(id).catch(() => {}); }, 50);
-          }
-        }
-      } catch (_) {}
+    pc.onconnectionstatechange = () => {
+      // keep status readable
+      updateVoiceUiPeers();
     };
-
+    // add local tracks (optional)
     const ls = await getLocalStreamOptional();
     if (ls) {
       for (const track of ls.getTracks()) {
@@ -1361,6 +1393,8 @@ async function ssApplyBitrateToAllPeers() {
       }
     }
 
+
+    // warm up names async
     resolveName(id).then((n) => {
       nameCache.set(id, n);
       updateVoiceUiPeers();
@@ -1375,6 +1409,7 @@ async function ssApplyBitrateToAllPeers() {
     const pc = await ensurePeerConnection(peerId);
     if (!pc || !inChannelId) return;
 
+    // already negotiated
     if (pc.signalingState !== 'stable') return;
 
     const offer = await pc.createOffer({
@@ -1397,6 +1432,9 @@ async function ssApplyBitrateToAllPeers() {
   async function handleOffer(fromUserId, sdp) {
     const pc = await ensurePeerConnection(fromUserId);
     if (!pc) return;
+
+    // if we are not stable, rollback is needed for perfect negotiation.
+    // keep it simple: accept the remote offer only if stable; otherwise ignore (rare with deterministic initiator).
     if (pc.signalingState !== 'stable') {
       console.warn('[VOICE] glare detected, ignoring offer', { fromUserId, state: pc.signalingState });
       return;
@@ -1453,8 +1491,10 @@ async function ssApplyBitrateToAllPeers() {
 async function join(channelId, channelName) {
   if (!channelId) return;
   if (joining) return;
-  unlockMediaPlaybackOnce();
+
+  // already in this channel: do NOT toggle/leave on repeated click
   if (inChannelId === channelId) {
+    // Keep UI visible; just refresh labels/state
     if (channelName) inChannelName = channelName || inChannelName;
     setBarVisible(true);
     setChannelName(inChannelName || channelName || 'Voice');
@@ -1464,6 +1504,7 @@ async function join(channelId, channelName) {
 
   joining = true;
   try {
+    // if we are in another channel — leave first
     if (inChannelId && inChannelId !== channelId) {
       await leave();
     }
@@ -1476,9 +1517,12 @@ async function join(channelId, channelName) {
     markVoiceChannelInList(channelId);
     setBarVisible(true);
     setStatus('Подключение…');
+
     updateVoiceStageLetter();
     stageShowEmpty();
     updateVoiceViewHeader();
+
+    // 1) prepare ICE + WS first (so we can show "connecting" state even if mic fails)
     await ensureIceConfig();
     const wsOk = await tryConnectWs();
     if (!wsOk) {
@@ -1486,6 +1530,7 @@ async function join(channelId, channelName) {
       return;
     }
 
+    // 2) request mic if possible (optional)
     const ls = await getLocalStreamOptional();
     if (!ls) {
       if (!window.isSecureContext) {
@@ -1497,10 +1542,12 @@ async function join(channelId, channelName) {
       }
     }
 
+    // 3) join voice channel (will be queued until WS auth if needed)
     wsManager.send({ type: 'voice_join', data: { channel_id: inChannelId } });
   } catch (e) {
     console.error('[VOICE] join failed', e);
     setStatus('Ошибка подключения');
+    // не прячем панель — пусть видно причину
   } finally {
     joining = false;
   }
@@ -1508,6 +1555,7 @@ async function join(channelId, channelName) {
   async function leave() {
     if (!inChannelId) return;
 
+    // notify server
     try {
       wsManager.send({
         type: 'voice_leave',
@@ -1515,6 +1563,7 @@ async function join(channelId, channelName) {
       });
     } catch (_) {}
 
+    // local cleanup (server ack is async)
     localLeaveCleanup();
   }
 
@@ -1524,12 +1573,16 @@ async function join(channelId, channelName) {
     stopLocalStream();
     stopScreenShare().catch(() => {});
     hideRemoteScreenShare();
+
     liveSharers = new Set();
     ssWatchers = new Set();
     watchingUserId = null;
+
+
     inChannelId = null;
     inChannelName = null;
     lastJoinAttemptChannelId = null;
+
     setChannelName('Voice');
     setStatus('');
     setPeersText('');
@@ -1537,8 +1590,11 @@ async function join(channelId, channelName) {
     markVoiceChannelInList(null);
     setSharingUi(false);
 
+    // Clear user lists under the voice channel and tiles
     try { if (prevChannelId) renderUsersUnderVoiceChannel(prevChannelId, []); } catch (_) {}
     try { renderVoiceMembersTiles([]); } catch (_) {}
+
+    // Inform UI that we left voice (so it doesn't look like we are still in voice).
     try {
       if (prevChannelId) {
         document.dispatchEvent(new CustomEvent('lb:voiceLeft', { detail: { channel_id: prevChannelId } }));
@@ -1562,10 +1618,14 @@ async function join(channelId, channelName) {
     if (t === 'voice_joined') {
       const ch = Number(msg.channel_id);
       if (!Number.isFinite(ch) || ch <= 0) return;
+
+      // Guard against stale "joined" events after we already left.
+      // Accept only if this join was requested/expected by the client.
       if (ch !== Number(inChannelId || 0) && ch !== Number(lastJoinAttemptChannelId || 0)) {
         return;
       }
 
+      // if server joined other (race), accept it
       inChannelId = ch;
       if (!inChannelName) inChannelName = `Voice #${ch}`;
 
@@ -1573,6 +1633,7 @@ async function join(channelId, channelName) {
       setChannelName(inChannelName);
       markVoiceChannelInList(inChannelId);
 
+      // Inform UI that we joined voice (to unlock voice text chat).
       try {
         document.dispatchEvent(new CustomEvent('lb:voiceJoined', { detail: { channel_id: inChannelId, channel_name: inChannelName || '' } }));
       } catch (_) {}
@@ -1592,8 +1653,10 @@ async function join(channelId, channelName) {
       if (!(isSharingScreen && screenStream)) stageShowEmpty();
       updateVoiceViewHeader();
 
+      // pre-cache own name
       if (meId && meName) nameCache.set(meId, meName);
 
+      // ensure PCs for each peer
       for (const pid of peers) {
         const peerId = Number(pid);
         if (!Number.isFinite(peerId) || peerId <= 0) continue;
@@ -1602,15 +1665,18 @@ async function join(channelId, channelName) {
         await ensurePeerConnection(peerId);
       }
 
+      // deterministic offers
       for (const pid of peers) {
         const peerId = Number(pid);
         if (!Number.isFinite(peerId) || peerId <= 0) continue;
         if (peerId === meId) continue;
         if (shouldInitiate(peerId)) {
+          // slight delay helps to avoid ICE race in some browsers
           setTimeout(() => { sendOffer(peerId).catch((e) => console.warn('[VOICE] sendOffer failed', e)); }, 40);
         }
       }
 
+      // async names
       const allIds = [meId, ...peers.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)];
       for (const id of allIds) {
         if (!id) continue;
@@ -1657,6 +1723,7 @@ async function join(channelId, channelName) {
     }
 
     if (t === 'voice_left') {
+      // we left (or switched)
       localLeaveCleanup();
       return;
     }
@@ -1699,6 +1766,8 @@ async function join(channelId, channelName) {
       if (!inChannelId || ch !== inChannelId) return;
       const from = Number(msg.from_user_id);
       if (!from) return;
+
+      // deterministic: only initiator sends offers
       if (shouldInitiate(from)) {
         setTimeout(() => { sendOffer(from).catch((e) => console.warn('[SS] renegotiate sendOffer failed', e)); }, 20);
       }
@@ -1722,6 +1791,8 @@ async function join(channelId, channelName) {
       if (!inChannelId || ch !== inChannelId) return;
       if (!Number.isFinite(uid) || uid <= 0) return;
       try { liveSharers.delete(uid); } catch (_) {}
+
+      // If we were watching this user — stop watching and clear stage
       if (watchingUserId === uid) {
         watchingUserId = null;
         focusedUserId = null;
@@ -1741,6 +1812,8 @@ async function join(channelId, channelName) {
       const from = Number(msg.from_user_id);
       if (!inChannelId || ch !== inChannelId) return;
       if (!Number.isFinite(from) || from <= 0) return;
+
+      // Someone wants to watch our share
       if (isSharingScreen && screenStream && screenVideoTrack) {
         try { ssWatchers.add(from); } catch (_) {}
         ensurePeerConnection(from).then(() => {
@@ -1761,11 +1834,15 @@ async function join(channelId, channelName) {
       return;
     }
 
+    // errors from server that affect voice
     if (t === 'error') {
       const code = (msg && msg.code) ? String(msg.code) : '';
       const ch = Number(msg && msg.channel_id);
 
+      // Voice errors always come with channel_id on server side
       if (!Number.isFinite(ch) || ch <= 0) return;
+
+      // Ignore non-related errors
       if (inChannelId && ch !== inChannelId && ch !== lastJoinAttemptChannelId) return;
       if (!inChannelId && lastJoinAttemptChannelId && ch !== lastJoinAttemptChannelId) return;
 
@@ -1778,6 +1855,7 @@ async function join(channelId, channelName) {
     }
   }
 
+  // --- UI wiring ---
   if (btnMute) {
     btnMute.addEventListener('click', (e) => {
       e.preventDefault();
@@ -1818,7 +1896,10 @@ async function join(channelId, channelName) {
     if (!inChannelId) return;
 
     openVoiceViewForChannel();
+
+    // wait a tick (voice view becomes visible in app.js)
     setTimeout(() => {
+      // Stage is the primary viewer now.
       if (remoteShareStream && remoteShareUserId) {
         stageShowRemoteShare().catch(() => {});
       } else if (isSharingScreen && screenStream) {
@@ -1845,16 +1926,19 @@ async function join(channelId, channelName) {
     });
   }
 
+  // Make the voice view accessible for the streamer too: clicking the voice bar opens the voice UI.
   try {
     const main = elVoiceBar?.querySelector?.('.voicebar-main') || elVoiceBar;
     if (main) {
       main.addEventListener('click', (e) => {
+        // Do not react to action buttons clicks.
         if (e?.target?.closest?.('.voicebar-actions')) return;
         openVoiceViewAndShowStage();
       });
     }
   } catch (_) {}
 
+  // Voice view controls (bottom bar)
   if (vcMuteBtn) {
     vcMuteBtn.addEventListener('click', (e) => {
       e.preventDefault();
@@ -1884,6 +1968,7 @@ async function join(channelId, channelName) {
     });
   }
 
+  // PIP / fullscreen (stage)
   if (voicePipBtn) {
     voicePipBtn.addEventListener('click', async (e) => {
       e.preventDefault();
@@ -1913,12 +1998,16 @@ async function join(channelId, channelName) {
     });
   }
 
+  // --- Screen share UI wiring ---
   function openScreenShareModal() {
     if (!ssOverlay) return;
+
+    // reflect current state
     if (isSharingScreen) {
       if (ssStartBtn) ssStartBtn.textContent = 'Остановить';
       if (ssCancelBtn) ssCancelBtn.textContent = 'Закрыть';
       if (ssPreviewHint) ssPreviewHint.textContent = 'Идёт демонстрация. Можно поменять качество или остановить.';
+      // show current preview
       if (screenStream) ssSetPreview(screenStream);
       else ssSetPreview(null);
     } else {
@@ -1939,6 +2028,7 @@ async function join(channelId, channelName) {
     });
   }
 
+  // tabs
   try {
     const tabs = ssOverlay?.querySelectorAll?.('.ss-tab') || [];
     tabs.forEach((b) => {
@@ -1948,10 +2038,12 @@ async function join(channelId, channelName) {
         tabs.forEach((x) => x.classList.remove('active'));
         b.classList.add('active');
         ssSelectedSurface = (b.dataset.surface || 'monitor').toString();
+        // if we are already sharing, don't force restart; just keep UI selection
       });
     });
   } catch (_) {}
 
+  // quality changes while sharing
   try {
     const radios = ssOverlay?.querySelectorAll?.('input[name="ssRes"], input[name="ssFps"], #ssAudioChk') || [];
     radios.forEach((el) => {
@@ -1961,6 +2053,7 @@ async function join(channelId, channelName) {
     });
   } catch (_) {}
 
+  // modal close buttons
   function closeSsModal() {
     ssOverlayVisible(false);
   }
@@ -1980,6 +2073,7 @@ async function join(channelId, channelName) {
     });
   }
 
+  // click outside modal
   if (ssOverlay) {
     ssOverlay.addEventListener('click', (e) => {
       if (e.target === ssOverlay) {
@@ -2001,6 +2095,7 @@ async function join(channelId, channelName) {
     });
   }
 
+  // remote panel controls
   if (ssPanelHideBtn) {
     ssPanelHideBtn.addEventListener('click', (e) => {
       e.preventDefault();
@@ -2020,17 +2115,20 @@ async function join(channelId, channelName) {
     });
   }
 
+  // leave voice on logout/unload
   window.addEventListener('beforeunload', () => {
     try { if (isSharingScreen) stopScreenShare().catch(() => {}); } catch (_) {}
     try { if (inChannelId) wsManager.send({ type: 'voice_leave', data: { channel_id: inChannelId } }); } catch (_) {}
   });
 
+  // install WS voice handler (chain if already exists)
   const prev = window.onVoiceEvent;
   window.onVoiceEvent = (msg) => {
     try { if (typeof prev === 'function') prev(msg); } catch (_) {}
     onVoiceEvent(msg).catch((e) => console.warn('[VOICE] onVoiceEvent error', e));
   };
 
+  // public API for app.js
   window.lbVoice = {
     join,
     leave,
@@ -2046,6 +2144,7 @@ async function join(channelId, channelName) {
     })
   };
 
+  // initial state hidden
   setBarVisible(false);
   updateVoiceStageLetter();
   stageShowEmpty();

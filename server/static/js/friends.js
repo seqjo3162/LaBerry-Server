@@ -1,5 +1,5 @@
-import { api } from "./api.js?v=7";
-import { showUserMenu } from "./user-menu.js?v=7";
+import { api } from "./api.js?v=10";
+import { showUserMenu } from "./user-menu.js?v=8";
 
 let friendsOpen = false;
 
@@ -10,9 +10,15 @@ function isFriendsHash() {
 function statusToLabel(status) {
   const s = (status || "offline").toString().toLowerCase();
   if (s === "online") return "В сети";
-  if (s === "idle") return "Не активен";
+  if (s === "idle") return "Отошёл";
   if (s === "dnd") return "Не беспокоить";
   return "Не в сети";
+}
+
+function presencePillHtml(status) {
+  const s = (status || "offline").toString().toLowerCase();
+  const cls = s === "invisible" ? "offline" : s;
+  return `<span class="presence-pill ${cls}">${statusToLabel(cls)}</span>`;
 }
 
 export function initFriends() {
@@ -182,6 +188,7 @@ export function initFriends() {
           }
         });
 
+        // menu
         row.querySelector(".avatar")?.addEventListener("click", (e) => {
           e.stopPropagation();
           const uid = Number(user?.id);
@@ -244,10 +251,25 @@ export function initFriends() {
     }
   }
 
+  function closeMobileDrawers() {
+    try {
+      window.closeAllDrawers?.();
+      return;
+    } catch (_) {}
+
+    try {
+      document.querySelector('.panel.servers')?.classList.remove('show-servers');
+      document.querySelector('.panel.channels')?.classList.remove('show-channels');
+      document.querySelector('.panel.members')?.classList.remove('show-members');
+      document.body.classList.remove('servers-open', 'channels-open', 'members-open');
+    } catch (_) {}
+  }
+
   function openFriends(opts = {}) {
     if (friendsOpen) return;
     friendsOpen = true;
 
+    // voice view must not stack above friends on mobile
     try { window.closeVoiceView?.(); } catch (_) {}
     try {
       const voiceView = document.getElementById('voiceView');
@@ -284,6 +306,13 @@ export function initFriends() {
     setHidden(membersPanel, true);
     friendsBtn?.classList.add("active");
 
+    try {
+      const isTouch = window.matchMedia?.('(pointer: coarse)')?.matches || window.innerWidth <= 900;
+      if (isTouch) closeMobileDrawers();
+    } catch (_) {
+      if (window.innerWidth <= 900) closeMobileDrawers();
+    }
+
     const active = document.querySelector(".friends-tabs .tab.active")?.dataset?.filter || "online";
     if (active === "pending") loadPending().catch(console.error);
     else loadFriends().then(() => applyFriendsFilter(active)).catch(console.error);
@@ -305,6 +334,13 @@ export function initFriends() {
 
     setHidden(membersPanel, false);
     friendsBtn?.classList.remove("active");
+
+    try {
+      const isTouch = window.matchMedia?.('(pointer: coarse)')?.matches || window.innerWidth <= 900;
+      if (isTouch) closeMobileDrawers();
+    } catch (_) {
+      if (window.innerWidth <= 900) closeMobileDrawers();
+    }
 
     if (isFriendsHash() && opts.clearHash !== false) {
       try {
@@ -356,7 +392,7 @@ export function initFriends() {
         <div class="avatar small">${letter}</div>
         <div class="text">
           <div class="name">${f.username || "Unknown"}</div>
-          <div class="role">${statusToLabel(st)}</div>
+          <div class="role">${presencePillHtml(st)}</div>
         </div>
       `;
       el.dataset.userId = String(f.id);
@@ -397,6 +433,7 @@ export function initFriends() {
     if (!layout) return;
     const { panel, items } = layout;
 
+    // toggle
     if (panel && panel.hidden === false) {
       closeSearch();
       return;
@@ -444,6 +481,7 @@ export function initFriends() {
           <button class="btn btn-ghost" type="button">Добавить</button>
         `;
 
+        // menu on avatar/name
         const showMenu = (anchorEl) => {
           const uid = Number(u?.id);
           if (!Number.isFinite(uid) || uid <= 0) return;
@@ -502,14 +540,24 @@ export function initFriends() {
     input?.focus();
   }
 
-  friendsBtn?.addEventListener("click", () => {
-    if (friendsOpen) closeFriends();
-    else openFriends();
+  friendsBtn?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (friendsOpen) {
+      closeFriends();
+      closeMobileDrawers();
+      return;
+    }
+
+    openFriends();
+    closeMobileDrawers();
   });
 
   addFriendBtn?.addEventListener("click", openSearch);
   findFriendsBtn?.addEventListener("click", openSearch);
 
+  // tabs
   document.querySelectorAll(".friends-tabs .tab").forEach((tab) => {
     const type = tab.dataset.filter;
     if (!type) return;
@@ -555,6 +603,8 @@ export function initFriends() {
     }
   });
 
+
+  // allow app.js to force-exit friends view without toggling server mode
   window.addEventListener("laberry:friends-force-exit", () => {
     if (!friendsOpen) return;
     friendsOpen = false;
