@@ -11,7 +11,7 @@ import { initFriends } from "./friends.js?v=8";
 import { wsManager } from "./websocket-manager.js?v=11";
 import { createSettingsUI } from "./settings.js?v=9";
 import { showUserMenu } from "./user-menu.js?v=7";
-import { initVoice } from "./voice.js?v=13";
+import { initVoice } from "./voice.js?v=22";
 import { initProfileModal } from "./profile-modal.js?v=8";
 
 console.log('[APP] All imports loaded successfully');

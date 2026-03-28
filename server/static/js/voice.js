@@ -34,6 +34,7 @@ export function initVoice({ wsManager, api, getMe }) {
   const voiceViewChanName = document.getElementById('voiceViewChannelName');
   const voiceViewState = document.getElementById('voiceViewState');
   const voiceStage = document.getElementById('voiceStage');
+  const voiceStageVideoWrap = document.getElementById('voiceStageVideoWrap');
   const voiceStageVideo = document.getElementById('voiceStageVideo');
   const voicePeerTile = document.getElementById('voicePeerTile');
   const voicePeerAva = document.getElementById('voicePeerAva');
@@ -130,6 +131,14 @@ function ensureVoiceMembersSection() {
   let watchingUserId = null;
   let watchingStream = null;
   let focusedUserId = null; // local UI focus in members tiles
+  let stagePriorityMode = 'stream'; // stream | user
+
+  function applyStagePriorityMode(mode) {
+    stagePriorityMode = (mode === 'user') ? 'user' : 'stream';
+    if (!voiceStage) return;
+    voiceStage.classList.remove('mode-stream', 'mode-user');
+    voiceStage.classList.add(stagePriorityMode === 'user' ? 'mode-user' : 'mode-stream');
+  }
 
 
   function setBarVisible(v) {
@@ -736,6 +745,10 @@ function applyVoiceFocusToStage() {
 
   function stageSetStream(stream, ownerUserId) {
     const hasVideo = !!stream;
+
+    if (hasVideo && stagePriorityMode !== 'user') {
+      applyStagePriorityMode('stream');
+    }
 
     // Set/clear the stage video
     try {
@@ -1917,6 +1930,24 @@ async function join(channelId, channelName) {
       openVoiceViewAndShowStage();
     });
   }
+
+  if (voicePeerTile) {
+    voicePeerTile.title = 'Показать участника крупнее';
+    voicePeerTile.addEventListener('click', (e) => {
+      if (e.target && e.target.closest && e.target.closest('button, a')) return;
+      applyStagePriorityMode('user');
+    });
+  }
+
+  if (voiceStageVideoWrap) {
+    voiceStageVideoWrap.title = 'Показать демонстрацию крупнее';
+    voiceStageVideoWrap.addEventListener('click', (e) => {
+      if (e.target && e.target.closest && e.target.closest('button, a')) return;
+      applyStagePriorityMode('stream');
+    });
+  }
+
+  applyStagePriorityMode('stream');
 
   if (voiceStageWatchBtn) {
     voiceStageWatchBtn.addEventListener('click', (e) => {
