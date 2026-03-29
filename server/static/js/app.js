@@ -4179,6 +4179,21 @@ function setupAttachmentUi() {
             return;
         }
 
+        const playBtn = e.target?.closest?.('.att-play');
+        if (playBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const att = playBtn.closest('.msg-attachment');
+            const video = att?.querySelector?.('video.att-video');
+            if (!video) return;
+            if (video.paused || video.ended) {
+                video.play().catch(() => {});
+            } else {
+                video.pause();
+            }
+            return;
+        }
+
         const img = e.target?.closest?.('img.att-img');
         if (img) {
             const att = img.closest('.msg-attachment');
@@ -4224,16 +4239,16 @@ function setupAttachmentUi() {
         const att = vtag.closest('.msg-attachment');
         if (!att) return;
         const v = ensureAttachmentViewer();
-            const msgEl = att.closest('.message');
-            const sender = msgEl?.querySelector('.author .name')?.textContent?.trim() || '';
-            const time = msgEl?.querySelector('.author .msg-time')?.textContent?.trim() || '';
-            v.open({
+        const msgEl = att.closest('.message');
+        const sender = msgEl?.querySelector('.author .name')?.textContent?.trim() || '';
+        const time = msgEl?.querySelector('.author .msg-time')?.textContent?.trim() || '';
+        v.open({
             id: att.getAttribute('data-file-id'),
             name: att.getAttribute('data-file-name'),
             mime: att.getAttribute('data-file-mime'),
             size: att.getAttribute('data-file-size'),
-                sender,
-                time,
+            sender,
+            time,
         });
     });
 
@@ -4266,14 +4281,30 @@ function wireAttachments(root) {
 
 if (!root) return;
 
-// initialize videos (src + show controls on hover)
+// initialize videos (wait for signed link, keep state classes in sync)
 root.querySelectorAll?.('video.att-video')?.forEach?.((v) => {
     if (v.dataset.wired === '1') return;
-    const src = v.getAttribute('data-src');
-    if (src) v.src = src;
-    v.controls = false;
-    v.addEventListener('mouseenter', () => { v.controls = true; });
-    v.addEventListener('mouseleave', () => { v.controls = false; });
+    const att = v.closest?.('.msg-attachment');
+    const syncState = () => {
+        if (!att) return;
+        const isPlaying = !!(v.currentSrc && !v.paused && !v.ended);
+        att.classList.toggle('is-playing', isPlaying);
+        att.classList.toggle('is-ready', !!v.currentSrc);
+        const playBtn = att.querySelector?.('.att-play');
+        if (playBtn) {
+            const title = isPlaying ? 'Пауза' : 'Воспроизвести';
+            playBtn.setAttribute('title', title);
+            playBtn.setAttribute('aria-label', title);
+        }
+    };
+
+    v.controls = true;
+    v.playsInline = true;
+    v.preload = 'metadata';
+    ['play', 'pause', 'ended', 'loadedmetadata', 'canplay', 'emptied'].forEach((evt) => {
+        v.addEventListener(evt, syncState);
+    });
+    syncState();
     v.dataset.wired = '1';
 });
 
@@ -4304,9 +4335,10 @@ root.querySelectorAll?.('.msg-attachment')?.forEach?.((att) => {
 
         // video
         const v = att.querySelector?.('video.att-video');
-        if (v) {
-            if (links.raw_url) v.setAttribute('data-src', links.raw_url);
-            if (v.dataset.wired === '1' && links.raw_url) v.src = links.raw_url;
+        if (v && links.raw_url) {
+            if (v.src !== links.raw_url) v.src = links.raw_url;
+            v.setAttribute('data-src', links.raw_url);
+            try { v.load(); } catch (_) {}
         }
 
         // audio
@@ -4348,7 +4380,7 @@ function renderMessageContent(content) {
     // Support both canonical and broken legacy markers.
     // canonical: [[file:ID|NAME|MIME|SIZE]]
     // broken:    [[file:ID]]NAME|MIME|SIZE]]
-    const reAny = /\[\[file:(\d+)\|([^|]*)\|([^|]*)\|(\d+)\]\]|\[\[file:(\d+)\]\]([^|\]]*)\|([^|\]]*)\|(\d+)\]\]/g;
+    const reAny = /\[\[file[:=](\d+)\|([^|]*)\|([^|]*)\|(\d+)\]\]|\[\[file[:=](\d+)\]\]([^|\]]*)\|([^|\]]*)\|(\d+)\]\]/g;
     if (!reAny.test(raw)) {
         return renderTextWithLinks(raw);
     }
@@ -4359,6 +4391,13 @@ function renderMessageContent(content) {
       <svg class="dl-ico" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M12 3v10m0 0l-4-4m4 4l4-4M4 17v3h16v-3"
               fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    `;
+
+    const playSvg = `
+      <svg class="play-ico" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M8 6.5v11a1 1 0 0 0 1.53.85l8.6-5.5a1 1 0 0 0 0-1.7l-8.6-5.5A1 1 0 0 0 8 6.5Z"
+              fill="currentColor"/>
       </svg>
     `;
 
@@ -4408,10 +4447,23 @@ function renderMessageContent(content) {
         const rawHref = `/api/files/${id}/raw`; // inline / stream
         const previewHref = isGif ? rawHref : `/api/files/${id}/preview`;
         const badge = fileBadge(name, mime);
+        const mediaKindClass = isImage ? 'media-image' : isVideo ? 'media-video' : isAudio ? 'media-audio' : 'file-generic';
 
         const attData = `data-file-id="${escapeHtml(id)}" data-file-name="${escapeHtml(name)}" data-file-mime="${escapeHtml(mime)}" data-file-size="${escapeHtml(size)}"`;
 
-        out += `<div class="msg-attachment ${isMedia ? 'media' : 'file'} ${isVideo ? 'hover-dl' : ''}" ${attData}>${isImage ? `<div class="att-preview"><img class="att-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=" data-src="${previewHref}" data-raw-src="${rawHref}" alt="${escapeHtml(name)}" loading="lazy" decoding="async"><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>` : ''}${isVideo ? `<div class="att-preview"><video class="att-video" preload="metadata" data-src="${rawHref}"></video><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>` : ''}${isAudio ? `<div class="att-preview"><audio class="att-audio" controls preload="metadata" data-src="${rawHref}"></audio><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>` : ''}<div class="file-row"><span class="file-badge">${escapeHtml(badge)}</span><span class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="file-meta">${sizeText ? escapeHtml(sizeText) : ''}</span>${isArchive ? `<button type="button" class="att-archive" data-act="archive" title="Посмотреть содержимое">📦</button>` : ''}<a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div></div>`;
+        const previewHtml = isImage
+            ? `<div class="att-preview att-preview-image" tabindex="0" role="button" aria-label="Открыть изображение ${escapeHtml(name)}"><img class="att-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=" data-src="${previewHref}" data-raw-src="${rawHref}" alt="${escapeHtml(name)}" loading="lazy" decoding="async"><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`
+            : isVideo
+                ? `<div class="att-preview att-preview-video"><video class="att-video" preload="metadata" playsinline></video><button type="button" class="att-play" title="Воспроизвести" aria-label="Воспроизвести">${playSvg}</button><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`
+                : isAudio
+                    ? `<div class="att-preview att-preview-audio"><div class="att-audio-shell"><div class="att-audio-icon" aria-hidden="true">♫</div><div class="att-audio-main"><div class="att-audio-title" title="${escapeHtml(name)}">${escapeHtml(name)}</div><div class="att-audio-sub">${escapeHtml(badge)}${sizeText ? ` • ${escapeHtml(sizeText)}` : ''}</div><audio class="att-audio" controls preload="metadata"></audio></div></div><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`
+                    : '';
+
+        const rowHtml = isAudio
+            ? ''
+            : `<div class="file-row"><span class="file-badge">${escapeHtml(badge)}</span><span class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="file-meta">${sizeText ? escapeHtml(sizeText) : ''}</span>${isArchive ? `<button type="button" class="att-archive" data-act="archive" title="Посмотреть содержимое">📦</button>` : ''}<a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`;
+
+        out += `<div class="msg-attachment ${isMedia ? 'media' : 'file'} ${mediaKindClass} ${isVideo ? 'hover-dl' : ''}" ${attData}>${previewHtml}${rowHtml}</div>`;
 
         last = start + m[0].length;
     }

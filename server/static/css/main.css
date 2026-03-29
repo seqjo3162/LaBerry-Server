@@ -3951,10 +3951,16 @@ body.compact-mode .message .content .text {
 /* message attachments (new markup: att-preview / att-dl) */
 .msg-attachment.media {
   padding: 0;
-  display: flex;
+  display: inline-flex;
   flex-direction: column;
-  gap: 10px;
-  align-items: flex-start; /* do not stretch preview to full width */
+  gap: 8px;
+  align-items: stretch;
+  width: auto;
+  max-width: min(520px, 100%);
+}
+
+.msg-attachment.media.media-audio {
+  width: min(420px, 100%);
 }
 
 .att-preview {
@@ -3962,13 +3968,21 @@ body.compact-mode .message .content .text {
   width: fit-content;
   max-width: 100%;
   align-self: flex-start;
-  line-height: 0; /* avoid extra gaps around media */
+  line-height: 0;
   font-size: 0;
   position: relative;
-  border-radius: var(--radius-md);
+  border-radius: 18px;
   overflow: hidden;
-  border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top right, rgba(176, 76, 255, 0.18), transparent 38%),
+    rgba(0, 0, 0, 0.3);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+
+.att-preview.att-preview-image,
+.att-preview.att-preview-video {
+  cursor: pointer;
 }
 
 .att-img {
@@ -3983,17 +3997,28 @@ body.compact-mode .message .content .text {
 
 .att-video {
   display: block;
-  width: auto;
-  height: auto;
-  max-width: 100%;
-  max-height: 360px;
-  background: transparent;
-}
-
-.att-audio {
   width: 100%;
+  max-width: 520px;
+  max-height: 360px;
+  background: #000;
 }
 
+.att-preview-video::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 72px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.34), transparent);
+  pointer-events: none;
+  opacity: .8;
+  transition: opacity .18s ease;
+}
+
+.msg-attachment.media.is-playing .att-preview-video::after {
+  opacity: .32;
+}
+
+.att-play,
 .att-dl {
   display: inline-flex;
   align-items: center;
@@ -4003,31 +4028,154 @@ body.compact-mode .message .content .text {
   color: inherit;
 }
 
+.att-play {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 62px;
+  height: 62px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(8, 10, 14, 0.58);
+  color: #fff;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+  transition: opacity .18s ease, transform .18s ease, background .18s ease;
+}
+
+.att-play:hover {
+  background: rgba(8, 10, 14, 0.72);
+  transform: translate(-50%, -50%) scale(1.04);
+}
+
+.msg-attachment.media.is-playing .att-play {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.play-ico {
+  width: 22px;
+  height: 22px;
+  margin-left: 3px;
+}
+
 .att-preview .att-dl {
   position: absolute;
   top: 10px;
   right: 10px;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(8, 10, 14, 0.62);
   border: 1px solid rgba(255, 255, 255, 0.18);
   opacity: 0;
   transform: translateY(-2px);
   transition: opacity .15s ease, transform .15s ease, background .15s ease;
+  z-index: 2;
 }
 
-.att-preview:hover .att-dl {
+.att-preview:hover .att-dl,
+.att-preview:focus-within .att-dl,
+.msg-attachment.media.is-playing .att-preview:hover .att-dl {
   opacity: 1;
   transform: translateY(0);
 }
 
+.att-preview-audio {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-width: min(320px, 100%);
+  padding: 14px 14px 14px 16px;
+  line-height: normal;
+  font-size: 14px;
+}
+
+.att-audio-shell {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.att-audio-icon {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: #fff;
+  background: linear-gradient(135deg, rgba(176, 76, 255, 0.95), rgba(255, 106, 213, 0.95));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.att-audio-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.att-audio-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.att-audio-sub {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.att-audio {
+  width: 100%;
+  min-width: 0;
+}
+
 .msg-attachment.media .file-row {
-  display: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+  backdrop-filter: blur(12px);
+}
+
+.msg-attachment.media .file-row .file-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.msg-attachment.media .file-row .file-meta {
+  white-space: nowrap;
 }
 
 .msg-attachment.media .file-row .att-dl {
   display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.msg-attachment.media .file-row .att-dl:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 /* compact: hide media, show file row like Discord compact mode */
@@ -4036,6 +4184,12 @@ body.compact-mode .msg-attachment.media .att-preview {
 }
 body.compact-mode .msg-attachment.media .file-row {
   display: flex;
+}
+body.compact-mode .msg-attachment.media.media-audio .att-preview {
+  display: flex;
+}
+body.compact-mode .msg-attachment.media.media-audio .file-row {
+  display: none;
 }
 
 /* download icon svg sizing */
@@ -4150,6 +4304,14 @@ body.compact-mode .msg-attachment.media .file-row {
   display: block;
   max-width: 100%;
   max-height: 100%;
+}
+
+.av-video {
+  background: #000;
+}
+
+.av-audio {
+  width: min(520px, calc(100% - 40px));
 }
 
 .av-img.zoomed {
