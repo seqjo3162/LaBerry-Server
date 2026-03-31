@@ -243,6 +243,18 @@ pub struct UpdateMeBody {
 }
 
 #[derive(Deserialize)]
+pub struct ChangeUsernameBody {
+    pub username: String,
+}
+
+#[derive(Serialize)]
+pub struct ChangeUsernameResponse {
+    pub status: String,
+    pub username: String,
+    pub reauth: bool,
+}
+
+#[derive(Deserialize)]
 pub struct SearchQuery {
     pub query: String,
 }
@@ -281,6 +293,7 @@ pub fn router() -> Router<AppState> {
         .route("/me/status", get(my_status).put(set_my_status))
         .route("/me/settings", get(get_my_settings).put(update_my_settings))
         .route("/me/password", put(change_password))
+        .route("/me/username", put(change_username))
         .route("/", get(list_users))
         .route("/search", get(search))
         .route("/:id/profile", get(get_profile_by_id))
@@ -627,7 +640,146 @@ async fn update_me(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+    let row = sqlx::query(
+        r#"SELECT id, username, email, email_verified, email_pending, public_encryption_key
+           FROM users WHERE id = ? LIMIT 1"#,
+    )
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(r) = row else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let resp = UserMeResponse {
+        id: r.get("id"),
+        username: r.get("username"),
+        email: r.get("email"),
+        email_verified: r.get::<i64, _>("email_verified") != 0,
+        email_pending: r.get("email_pending"),
+        public_encryption_key: r.get("public_encryption_key"),
+    };
+
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+async fn change_username(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Json(body): Json<ChangeUsernameBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let Some(new_username) = auth::normalize_username(&body.username) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"detail":"Invalid username"})),
+        )
+            .into_response();
+    };
+
+    let current_username = match sqlx::query_scalar::<_, String>(
+        "SELECT username FROM users WHERE id = ? LIMIT 1",
+    )
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    if current_username == new_username {
+        return (
+            StatusCode::OK,
+            Json(ChangeUsernameResponse {
+                status: "ok".to_string(),
+                username: current_username,
+                reauth: false,
+            }),
+        )
+            .into_response();
+    }
+
+    let taken = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM users WHERE username = ? AND id != ? LIMIT 1",
+    )
+    .bind(&new_username)
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+    if taken {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"detail":"Username already used"})),
+        )
+            .into_response();
+    }
+
+    let now = auth::now_iso();
+
+    let mut tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    let upd = sqlx::query(
+        r#"
+        UPDATE users
+        SET username = ?,
+            token_version = token_version + 1
+        WHERE id = ?
+        "#,
+    )
+    .bind(&new_username)
+    .bind(me.id)
+    .execute(&mut *tx)
+    .await;
+
+    if upd.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let _ = sqlx::query(
+        "UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+    )
+    .bind(&now)
+    .bind(me.id)
+    .execute(&mut *tx)
+    .await;
+
+    let _ = sqlx::query(
+        "UPDATE refresh_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+    )
+    .bind(&now)
+    .bind(me.id)
+    .execute(&mut *tx)
+    .await;
+
+    if tx.commit().await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    st.hub
+        .disconnect_user(me.id, "username_changed", "Username changed")
+        .await;
+
+    (
+        StatusCode::OK,
+        Json(ChangeUsernameResponse {
+            status: "ok".to_string(),
+            username: new_username,
+            reauth: true,
+        }),
+    )
+        .into_response()
 }
 
 async fn request_email_code(

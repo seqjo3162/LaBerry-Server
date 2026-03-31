@@ -85,11 +85,14 @@ async fn register(
 ) -> Result<Response, ApiError> {
     let db = &st.db;
 
+    let username = auth::normalize_username(&body.username)
+        .ok_or(ApiError::BadRequest("Invalid username"))?;
+
     // Проверка username
     let username_exists = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM users WHERE username = ? LIMIT 1",
     )
-    .bind(&body.username)
+    .bind(&username)
     .fetch_optional(db)
     .await
     .map_err(|_| ApiError::Internal("Database error"))?
@@ -126,7 +129,7 @@ async fn register(
         VALUES (?, ?, ?, 0, ?, 1, 0)
         "#,
     )
-    .bind(&body.username)
+    .bind(&username)
     .bind(&body.email)
     .bind(&password_hash)
     .bind(&created_at)

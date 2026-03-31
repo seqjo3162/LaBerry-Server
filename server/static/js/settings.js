@@ -434,10 +434,15 @@ export function createSettingsUI(opts = {}) {
             </div>
 
             <div class="settings-card">
-              <div class="settings-kv">
-                <div class="settings-k">Имя пользователя</div>
-                <div class="settings-v"><span class="mono">${escapeHtml(me?.username || '')}</span></div>
+              <h4>Имя пользователя</h4>
+              <div class="form-row">
+                <label>Новый никнейм</label>
+                <input class="inp" id="meUsername" placeholder="ваш никнейм" value="${escapeHtml(me?.username || '')}">
               </div>
+              <div class="form-actions">
+                <button class="btn btn-secondary" id="saveUsername" type="button">Изменить никнейм</button>
+              </div>
+              <div class="muted" style="margin-top:8px; font-size:12px;">Никнейм должен быть уникальным.</div>
             </div>
 
             <div class="settings-card">
@@ -641,10 +646,28 @@ export function createSettingsUI(opts = {}) {
             }
         });
 
+        overlay.querySelector('#saveUsername')?.addEventListener('click', async () => {
+            const username = overlay.querySelector('#meUsername')?.value?.trim() || '';
+            if (!username) {
+                showInline('err', 'Введите никнейм');
+                return;
+            }
+            try {
+                const updated = await api('/api/users/username', {
+                    method: 'PUT',
+                    body: JSON.stringify({ username })
+                });
+                setCurrentUser(updated);
+                showInline('ok', 'Никнейм сохранён');
+            } catch (e) {
+                console.warn('[SETTINGS] username save failed', e);
+                showInline('err', e?.data?.detail || 'Не удалось сохранить никнейм');
+            }
+        });
+
         overlay.querySelector('#logoutAll')?.addEventListener('click', async () => {
             await doLogout();
         });
-
 
         // DELETE ME (confirm username)
         const delInp = overlay.querySelector('#deleteMeConfirm');

@@ -9,7 +9,7 @@ if (typeof fetch === 'undefined') {
 import { api } from "./api.js?v=9";
 import { initFriends } from "./friends.js?v=8";
 import { wsManager } from "./websocket-manager.js?v=11";
-import { createSettingsUI } from "./settings.js?v=9";
+import { createSettingsUI } from "./settings.js?v=10";
 import { showUserMenu } from "./user-menu.js?v=7";
 import { initVoice } from "./voice.js?v=22";
 import { initProfileModal } from "./profile-modal.js?v=8";

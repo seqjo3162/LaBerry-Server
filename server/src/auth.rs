@@ -235,6 +235,25 @@ pub fn decode_file_download_claims(token: &str) -> anyhow::Result<FileDlClaims> 
     Ok(data.claims)
 }
 
+
+pub fn normalize_username(input: &str) -> Option<String> {
+    let username = input.trim();
+    if username.is_empty() {
+        return None;
+    }
+
+    let len = username.chars().count();
+    if !(2..=32).contains(&len) {
+        return None;
+    }
+
+    if username.chars().any(|c| c.is_control()) {
+        return None;
+    }
+
+    Some(username.to_string())
+}
+
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut rand::thread_rng());
     let argon2 = Argon2::default();

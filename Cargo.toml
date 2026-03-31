@@ -1,3 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["server"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
