@@ -10,6 +10,10 @@ pub async fn app() -> Html<String> {
     Html(std::fs::read_to_string(static_path("app.html")).unwrap_or_default())
 }
 
+pub async fn start() -> Html<String> {
+    Html(std::fs::read_to_string(static_path("start.html")).unwrap_or_default())
+}
+
 
 pub async fn admin_hint() -> Html<String> {
     let host = std::env::var("LB_ADMIN_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());

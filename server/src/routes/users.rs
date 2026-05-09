@@ -271,6 +271,20 @@ pub struct SetStatusBody {
     pub status: String,
 }
 
+
+#[derive(Deserialize, Default)]
+pub struct ReportUserBody {
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub message_id: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct ReportUserResponse {
+    pub ok: bool,
+    pub id: i64,
+}
+
 fn sanitize_status(s: &str) -> String {
     match s.to_ascii_lowercase().as_str() {
         "online" => "online".to_string(),
@@ -296,6 +310,7 @@ pub fn router() -> Router<AppState> {
         .route("/me/username", put(change_username))
         .route("/", get(list_users))
         .route("/search", get(search))
+        .route("/:id/report", post(report_user))
         .route("/:id/profile", get(get_profile_by_id))
         .route("/:id", get(get_by_id))
 }
@@ -325,9 +340,13 @@ pub struct RequestEmailCodeBody {
 #[derive(Serialize)]
 pub struct RequestEmailCodeResp {
     pub ok: bool,
-    /// stub: in prod should be omitted
+    /// returned only when LB_DEBUG_EMAIL_CODES=true
     pub debug_code: Option<String>,
     pub expires_in_sec: i64,
+    /// true when the external mail command completed successfully
+    pub mail_sent: bool,
+    /// sent | not_configured | failed
+    pub delivery: String,
 }
 
 #[derive(Deserialize)]
@@ -341,6 +360,69 @@ fn sanitize_email_purpose(p: Option<String>) -> String {
     match p.unwrap_or_else(|| "verify_email".to_string()).to_ascii_lowercase().as_str() {
         "change_email" => "change_email".to_string(),
         _ => "verify_email".to_string(),
+    }
+}
+
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false)
+}
+
+fn send_email_code_by_command(email: &str, code: &str, purpose: &str) -> Result<(), String> {
+    let command = std::env::var("LB_EMAIL_SEND_COMMAND")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "not_configured".to_string())?;
+
+    let subject = match purpose {
+        "change_email" => "LaBerry: подтверждение нового email",
+        _ => "LaBerry: подтверждение email",
+    };
+
+    let body = format!(
+        "Ваш код подтверждения LaBerry: {}\n\nКод действует 10 минут. Если вы не запрашивали код, просто проигнорируйте письмо.",
+        code
+    );
+
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(&command);
+        c
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(&command);
+        c
+    };
+
+    let output = cmd
+        .env("LB_EMAIL_TO", email)
+        .env("LB_EMAIL_CODE", code)
+        .env("LB_EMAIL_PURPOSE", purpose)
+        .env("LB_EMAIL_SUBJECT", subject)
+        .env("LB_EMAIL_BODY", body)
+        .output()
+        .map_err(|e| format!("failed_to_run: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!("exit_status: {}", output.status))
+        } else {
+            Err(stderr)
+        }
     }
 }
 
@@ -874,21 +956,27 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    // STUB: тут должен быть реальный SMTP send.
-    // Пока возвращаем debug_code, чтобы фронт можно было допилить.
-let debug = std::env::var("LB_DEBUG_EMAIL_CODES")
-    .ok()
-    .map(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        v == "1" || v == "true" || v == "yes" || v == "on"
-    })
-    .unwrap_or(false);
+    let debug = env_bool("LB_DEBUG_EMAIL_CODES");
 
-let resp = RequestEmailCodeResp {
-    ok: true,
-    debug_code: if debug { Some(code) } else { None },
-    expires_in_sec: 10 * 60,
-};
+    let (mail_sent, delivery) = match send_email_code_by_command(&email, &code, &purpose) {
+        Ok(()) => (true, "sent".to_string()),
+        Err(e) if e == "not_configured" => {
+            tracing::warn!("email code delivery is not configured: set LB_EMAIL_SEND_COMMAND");
+            (false, "not_configured".to_string())
+        }
+        Err(e) => {
+            tracing::warn!("email code delivery failed: {}", e);
+            (false, "failed".to_string())
+        }
+    };
+
+    let resp = RequestEmailCodeResp {
+        ok: true,
+        debug_code: if debug { Some(code) } else { None },
+        expires_in_sec: 10 * 60,
+        mail_sent,
+        delivery,
+    };
     (StatusCode::OK, Json(resp)).into_response()
 }
 
@@ -911,17 +999,6 @@ async fn confirm_email_code(
 // rate limit: 10 attempts / hour per user+purpose
 let rl_key = format!("email_confirm:{}:{}", me.id, purpose);
 if !rate_limit::allow(&rl_key, 10, 3600) {
-    return (
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(serde_json::json!({"detail":"Too many requests"})),
-    )
-        .into_response();
-}
-
-
-// rate limit: 5 codes / hour per user+purpose
-let rl_key = format!("email_code:{}:{}", me.id, purpose);
-if !rate_limit::allow(&rl_key, 5, 3600) {
     return (
         StatusCode::TOO_MANY_REQUESTS,
         Json(serde_json::json!({"detail":"Too many requests"})),
@@ -1248,6 +1325,101 @@ fn sanitize_status_text(s: Option<String>) -> Option<String> {
         v.truncate(128);
     }
     Some(v)
+}
+
+
+fn sanitize_report_reason(raw: Option<String>) -> String {
+    let value = raw.unwrap_or_else(|| "other".to_string()).trim().to_ascii_lowercase();
+    match value.as_str() {
+        "spam" => "spam".to_string(),
+        "abuse" => "abuse".to_string(),
+        "avatar" => "avatar".to_string(),
+        "username" => "username".to_string(),
+        "ads" => "ads".to_string(),
+        "scam" => "scam".to_string(),
+        "other" => "other".to_string(),
+        _ => "other".to_string(),
+    }
+}
+
+fn sanitize_report_message(raw: Option<String>) -> String {
+    let mut out = raw.unwrap_or_default().trim().to_string();
+    if out.len() > 1200 {
+        out.truncate(1200);
+    }
+    out
+}
+
+async fn report_user(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(target_user_id): Path<i64>,
+    Json(body): Json<ReportUserBody>,
+) -> impl IntoResponse {
+    if target_user_id <= 0 || target_user_id == me.id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"detail":"Bad target user"})),
+        )
+            .into_response();
+    }
+
+    let rl_key = format!("user_report:{}:{}", me.id, target_user_id);
+    if !rate_limit::allow(&rl_key, 5, 3600) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"detail":"Too many reports"})),
+        )
+            .into_response();
+    }
+
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE id = ? LIMIT 1")
+        .bind(target_user_id)
+        .fetch_optional(&st.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"detail":"User not found"})),
+        )
+            .into_response();
+    }
+
+    let reason = sanitize_report_reason(body.reason);
+    let message = sanitize_report_message(body.message);
+    let message_id = body.message_id.filter(|id| *id > 0);
+    let created_at = auth::now_iso();
+
+    let res = sqlx::query(
+        r#"
+        INSERT INTO user_reports(reporter_id, target_user_id, message_id, reason, message, status, created_at)
+        VALUES(?, ?, ?, ?, ?, 'open', ?)
+        "#,
+    )
+    .bind(me.id)
+    .bind(target_user_id)
+    .bind(message_id)
+    .bind(&reason)
+    .bind(&message)
+    .bind(&created_at)
+    .execute(&st.db)
+    .await;
+
+    let Ok(done) = res else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    (
+        StatusCode::OK,
+        Json(ReportUserResponse {
+            ok: true,
+            id: done.last_insert_rowid(),
+        }),
+    )
+        .into_response()
 }
 
 async fn get_my_profile(State(st): State<AppState>, me: AuthUser) -> impl IntoResponse {

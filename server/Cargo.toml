@@ -40,10 +40,6 @@ sysinfo = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# admin CLI (interactive)
-clap = { version = "4.5", features = ["derive"] }
-dialoguer = { version = "0.11", features = ["fuzzy-select"] }
-
 # thumbnails + image dimension checks
 image = "0.25"
 
@@ -51,7 +47,7 @@ image = "0.25"
 zip = "0.6"
 
 # link previews (OpenGraph)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "json"] }
 url = "2"
 regex = "1"
 
@@ -84,6 +80,3 @@ android_logger = "0.13"
 name = "laberry_server_bin"
 path = "src/main.rs"
 
-[[bin]]
-name = "laberry_admin"
-path = "src/admin_cli.rs"

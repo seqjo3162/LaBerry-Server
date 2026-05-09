@@ -7,12 +7,12 @@ if (typeof fetch === 'undefined') {
 }
 
 import { api } from "./api.js?v=9";
-import { initFriends } from "./friends.js?v=8";
+import { initFriends } from "./friends.js?v=9";
 import { wsManager } from "./websocket-manager.js?v=11";
-import { createSettingsUI } from "./settings.js?v=10";
-import { showUserMenu } from "./user-menu.js?v=7";
-import { initVoice } from "./voice.js?v=22";
-import { initProfileModal } from "./profile-modal.js?v=8";
+import { createSettingsUI } from "./settings.js?v=12";
+import { showUserMenu } from "./user-menu.js?v=10";
+import { initVoice } from "./voice.js?v=23";
+import { initProfileModal } from "./profile-modal.js?v=11";
 
 console.log('[APP] All imports loaded successfully');
 
@@ -36,9 +36,51 @@ try {
 const chatNameById = new Map();
 const chatKindById = new Map();
 const serverOwnerById = new Map(); // server_id -> owner_id (for channel management)
+const chatServerById = new Map(); // chat_id -> server_id
+const SERVER_MUTED_KEY = 'lb:muted_servers:v1';
+let mutedServerIds = new Set();
 let lastVoiceSwitchClick = { id: null, at: 0 };
+let lastServersSnapshot = [];
+let serverSearchQuery = '';
 
 let settingsSnapshot = null;
+
+function loadMutedServers() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(SERVER_MUTED_KEY) || '[]');
+        mutedServerIds = new Set((Array.isArray(raw) ? raw : []).map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0));
+    } catch (_) {
+        mutedServerIds = new Set();
+    }
+}
+
+function saveMutedServers() {
+    try { localStorage.setItem(SERVER_MUTED_KEY, JSON.stringify([...mutedServerIds])); } catch (_) {}
+}
+
+function isServerMuted(serverId) {
+    const sid = Number(serverId);
+    return Number.isFinite(sid) && sid > 0 && mutedServerIds.has(sid);
+}
+
+function toggleServerMuted(serverId) {
+    const sid = Number(serverId);
+    if (!Number.isFinite(sid) || sid <= 0) return false;
+    if (mutedServerIds.has(sid)) mutedServerIds.delete(sid);
+    else mutedServerIds.add(sid);
+    saveMutedServers();
+    return mutedServerIds.has(sid);
+}
+
+function updateServerSelection(serverId) {
+    const target = Number(serverId);
+    document.querySelectorAll('.item.server').forEach((item) => {
+        const itemId = Number(item.dataset.serverId);
+        item.classList.toggle('active', Number.isFinite(target) && target > 0 && itemId === target);
+    });
+}
+
+loadMutedServers();
 
 function avatarRawUrl(fileId) {
     const id = Number(fileId);
@@ -47,13 +89,94 @@ function avatarRawUrl(fileId) {
 }
 
 function avatarInnerHtml(fileId, usernameFallback) {
+    const letter = String(usernameFallback || '?').trim().charAt(0).toUpperCase() || '?';
     const url = avatarRawUrl(fileId);
     if (url) {
         const alt = escapeHtml(usernameFallback || '');
-        return `<img class="avatar-img" src="${url}" alt="${alt}">`;
+        return `<span class="avatar-fallback" aria-hidden="true" style="display:none">${escapeHtml(letter)}</span><img class="avatar-img" src="${url}" alt="${alt}" data-avatar-fallback="${escapeHtml(letter)}">`;
     }
-    const letter = String(usernameFallback || '?').trim().charAt(0).toUpperCase() || '?';
     return escapeHtml(letter);
+}
+
+function wireAvatarFallbacks(root = document) {
+    // Use a module-level variable to ensure the MutationObserver is set up only once.
+    if (window._avatarObserver && window._avatarObserver.isConnected) return;
+
+    const setupImageListeners = (img, fallback) => {
+        if (img.dataset.avatarWired === '1') return; // Already wired
+
+        // Set initial state and mark as processed
+        img.dataset.avatarWired = '1';
+
+        const showFallback = () => {
+            img.style.display = 'none';
+            if (fallback) fallback.style.display = '';
+            const box = img.closest?.('.avatar, .pin-avatar');
+            if (box) box.classList.add('avatar-load-failed');
+        };
+        const showImage = () => {
+            img.style.display = '';
+            if (fallback) fallback.style.display = 'none';
+            const box = img.closest?.('.avatar, .pin-avatar');
+            if (box) box.classList.remove('avatar-load-failed');
+        };
+
+        // Attach listeners only once per image element
+        img.addEventListener('error', showFallback);
+        img.addEventListener('load', showImage);
+        
+        // Initial check for cached images using naturalWidth > 0
+        if (img.complete && img.naturalWidth > 0) {
+            showImage();
+        } else if (!img.complete || img.naturalWidth === 0) {
+             // If not complete or zero width, rely on event listeners for state changes.
+        }
+    };
+
+    const processNode = (node) => {
+        if (!node || node.tagName !== 'IMG') return;
+        
+        const img = node;
+        // Only target images with the specific class and not already wired
+        if (img.classList.contains('avatar-img') && !img.dataset.avatarWired) {
+            const fallback = img.previousElementSibling?.classList?.contains('avatar-fallback') ? img.previousElementSibling : null;
+            setupImageListeners(img, fallback);
+        }
+    };
+
+    // 1. Initial scan of existing images on the root element
+    document.querySelectorAll('.avatar-img:not([data-avatar-wired])').forEach((img) => {
+        const fallback = img.previousElementSibling?.classList?.contains('avatar-fallback') ? img.previousElementSibling : null;
+        setupImageListeners(img, fallback);
+    });
+
+    // 2. Use MutationObserver for dynamic content (only if not already set up)
+    if (!window._avatarObserver) {
+        const observer = new MutationObserver((mutationsList) => {
+            for (const mutation of mutationsList) {
+                if (mutation.type === 'childList') {
+                    // Process added nodes first
+                    mutation.addedNodes?.forEach((node) => {
+                        // Check if the added node itself is an image
+                        if (node.tagName === 'IMG' && node.classList.contains('avatar-img') && !node.dataset.avatarWired) {
+                            const fallback = node.previousElementSibling?.classList?.contains('avatar-fallback') ? node.previousElementSibling : null;
+                            setupImageListeners(node, fallback);
+                        } else if (node.querySelectorAll) {
+                            // Process descendants of the added node
+                            node.querySelectorAll('img.avatar-img:not([data-avatar-wired])').forEach((img) => {
+                                const fallback = img.previousElementSibling?.classList?.contains('avatar-fallback') ? img.previousElementSibling : null;
+                                setupImageListeners(img, fallback);
+                            });
+                        }
+                    });
+                }
+            }
+        });
+
+        // Observe the entire document body for changes in children/subtrees
+        observer.observe(document.body, { childList: true, subtree: true });
+        window._avatarObserver = observer; // Store the instance globally to prevent re-initialization
+    }
 }
 
 function applyUserbarAvatar() {
@@ -68,6 +191,16 @@ function applyUserbarAvatar() {
     const url = avatarRawUrl(fid);
 
     if (img) {
+        img.onload = () => {
+            img.style.display = '';
+            if (txt) txt.style.display = 'none';
+        };
+        img.onerror = () => {
+            img.removeAttribute('src');
+            img.style.display = 'none';
+            if (txt) txt.style.display = '';
+        };
+
         if (url) {
             img.src = url + `?t=${Date.now()}`;
             img.style.display = '';
@@ -90,6 +223,23 @@ window.addEventListener('laberry:avatar-updated', (ev) => {
 
     applyUserbarAvatar();
 });
+
+try {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => wireAvatarFallbacks(document), { once: true });
+    } else {
+        wireAvatarFallbacks(document);
+    }
+
+    const avatarObserver = new MutationObserver((items) => {
+        for (const item of items) {
+            item.addedNodes?.forEach?.((node) => {
+                if (node && node.nodeType === 1) wireAvatarFallbacks(node);
+            });
+        }
+    });
+    avatarObserver.observe(document.documentElement, { childList: true, subtree: true });
+} catch (_) {}
 
 let audioCtx = null;
 let lastDesktopAt = 0;
@@ -565,6 +715,9 @@ function notifyForIncomingMessage(roomId, sender, content) {
     // notify only if user is not watching that chat
     if (isUserWatchingChat(roomId)) return;
 
+    const roomServerId = Number(chatServerById.get(Number(roomId)) || 0);
+    if (roomServerId > 0 && isServerMuted(roomServerId)) return;
+
     // client-side unread counter (for Discord-like open behavior)
     if (currentServerId && roomId !== null && roomId !== undefined) {
         incUnreadCount(currentServerId, roomId, 1);
@@ -781,13 +934,14 @@ function dmCallOverlayEls() {
         name: document.getElementById('dmCallName'),
         title: document.getElementById('dmCallTitle'),
         sub: document.getElementById('dmCallSub'),
+        state: document.getElementById('dmCallState'),
         accept: document.getElementById('dmCallAcceptBtn'),
         decline: document.getElementById('dmCallDeclineBtn'),
     };
 }
 
 function setDmCallOverlay(info, mode = 'incoming') {
-    const { overlay, avatar, name, title, sub, accept, decline } = dmCallOverlayEls();
+    const { overlay, avatar, name, title, sub, state, accept, decline } = dmCallOverlayEls();
     if (!overlay) return;
 
     dmCallIncoming = info || null;
@@ -800,13 +954,15 @@ function setDmCallOverlay(info, mode = 'incoming') {
     if (name) name.textContent = displayName;
 
     if (mode === 'outgoing') {
+        if (state) state.textContent = 'Исходящий';
         if (title) title.textContent = 'Исходящий звонок';
-        if (sub) sub.textContent = 'Ожидаем ответ…';
+        if (sub) sub.textContent = 'Ожидаем ответ и держим линию открытой.';
         if (accept) accept.hidden = true;
         if (decline) decline.textContent = 'Отменить';
     } else {
+        if (state) state.textContent = 'Входящий';
         if (title) title.textContent = 'Входящий звонок';
-        if (sub) sub.textContent = 'Принять звонок?';
+        if (sub) sub.textContent = 'Ответьте, чтобы сразу перейти в голосовой диалог.';
         if (accept) accept.hidden = false;
         if (decline) decline.textContent = 'Отклонить';
     }
@@ -1136,32 +1292,398 @@ function askTextModal(opts = {}) {
     });
 }
 
-async function createServerFlow() {
-    const name = await askTextModal({
-        title: 'Создать сервер',
-        label: 'Название сервера',
-        placeholder: 'Например: Global',
-        okText: 'Создать',
-        cancelText: 'Отмена',
+
+function serverVisibilityLabel(isPublic) {
+    return isPublic ? 'Публичный' : 'Приватный';
+}
+
+function getMyServersForRequest() {
+    return (Array.isArray(lastServersSnapshot) ? lastServersSnapshot : [])
+        .filter((s) => Number(s?.id) > 0)
+        .map((s) => ({ id: Number(s.id), name: (s.name || `Сервер ${s.id}`).toString() }));
+}
+
+function serverHubModalHtml() {
+    return `
+      <div class="server-hub-modal modal" role="dialog" aria-modal="true">
+        <div class="modal-header server-hub-head">
+          <div>
+            <h2>Добавить сервер</h2>
+            <div class="muted">Создание, поиск и заявки в одном месте.</div>
+          </div>
+          <button class="icon-btn" type="button" data-act="close">✕</button>
+        </div>
+        <div class="server-hub-tabs" role="tablist">
+          <button class="server-hub-tab active" type="button" data-tab="create">Создать</button>
+          <button class="server-hub-tab" type="button" data-tab="search">Поиск</button>
+          <button class="server-hub-tab" type="button" data-tab="requests">Заявки</button>
+        </div>
+        <div class="server-hub-body">
+          <section class="server-hub-pane active" data-pane="create">
+            <label class="form-label">Название сервера</label>
+            <input class="inp" id="serverHubCreateName" maxlength="64" placeholder="Например: Global" autocomplete="off">
+            <div class="server-visibility-pick" role="radiogroup" aria-label="Тип сервера">
+              <label class="server-vis-card active">
+                <input type="radio" name="serverHubVisibility" value="public" checked>
+                <span class="server-vis-title">Публичный</span>
+                <span class="server-vis-desc">Люди смогут найти сервер через поиск и зайти сразу.</span>
+              </label>
+              <label class="server-vis-card">
+                <input type="radio" name="serverHubVisibility" value="private">
+                <span class="server-vis-title">Приватный</span>
+                <span class="server-vis-desc">Вход через заявку. Владелец/админ принимает или отклоняет.</span>
+              </label>
+            </div>
+            <div class="server-hub-actions">
+              <button class="btn btn-primary" type="button" data-act="create-server">Создать сервер</button>
+            </div>
+          </section>
+
+          <section class="server-hub-pane" data-pane="search">
+            <div class="server-search-line">
+              <input class="inp" id="serverHubSearchInput" placeholder="Поиск публичных и приватных серверов..." autocomplete="off">
+              <button class="btn" type="button" data-act="search-server">Найти</button>
+            </div>
+            <div class="server-hub-results" id="serverHubSearchResults">
+              <div class="server-hub-empty">Введи название и нажми «Найти».</div>
+            </div>
+          </section>
+
+          <section class="server-hub-pane" data-pane="requests">
+            <div class="server-hub-request-tabs">
+              <button class="server-hub-subtab active" type="button" data-req-tab="incoming">Входящие</button>
+              <button class="server-hub-subtab" type="button" data-req-tab="outgoing">Мои заявки</button>
+            </div>
+            <div class="server-hub-results" id="serverHubRequestsList">
+              <div class="server-hub-empty">Загрузка...</div>
+            </div>
+          </section>
+        </div>
+      </div>
+    `;
+}
+
+async function openServerHubModal(initialTab = 'create') {
+    const existing = document.getElementById('serverHubOverlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay server-hub-overlay';
+    overlay.id = 'serverHubOverlay';
+    overlay.innerHTML = serverHubModalHtml();
+    document.body.appendChild(overlay);
+
+    const close = () => {
+        try { overlay.remove(); } catch (_) {}
+    };
+
+    const setTab = (tab) => {
+        overlay.querySelectorAll('.server-hub-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+        overlay.querySelectorAll('.server-hub-pane').forEach((p) => p.classList.toggle('active', p.dataset.pane === tab));
+        if (tab === 'requests') loadServerHubRequests(overlay, 'incoming');
+        if (tab === 'search') {
+            const input = overlay.querySelector('#serverHubSearchInput');
+            setTimeout(() => input?.focus(), 0);
+        }
+    };
+
+        // Use a single event listener on the overlay for all interactions (Event Delegation)
+    overlay.addEventListener('click', (e) => {
+        const target = e.target;
+        if (!(target instanceof Element)) return;
+
+        if (target === overlay || target.closest('[data-act="close"]')) {
+            e.preventDefault();
+            close();
+            return;
+        }
+
+        const tabBtn = target.closest('.server-hub-tab');
+        if (tabBtn) {
+            e.preventDefault();
+            setTab(tabBtn.dataset.tab || 'create');
+            return;
+        }
+
+        const subTab = target.closest('.server-hub-subtab');
+        if (subTab) {
+            e.preventDefault();
+
+            const kind = subTab.dataset.reqTab || 'incoming';
+
+            overlay
+                .querySelectorAll('.server-hub-subtab')
+                .forEach((btn) => {
+                    btn.classList.toggle('active', btn === subTab);
+                });
+
+            loadServerHubRequests(overlay, kind);
+            return;
+        }
+
+        const vis = target.closest('.server-vis-card');
+        if (vis) {
+            e.preventDefault();
+
+            overlay
+                .querySelectorAll('.server-vis-card')
+                .forEach((card) => {
+                    card.classList.toggle('active', card === vis);
+                });
+
+            const radio = vis.querySelector('input[type="radio"]');
+            if (radio) radio.checked = true;
+
+            return;
+        }
+
+        const actElement = target.closest('[data-act]');
+        if (!actElement) return;
+
+        const act = actElement.dataset.act;
+        e.preventDefault();
+
+        switch (act) {
+            case 'create-server': {
+                createServerFromHub(overlay, close);
+                return;
+            }
+
+            case 'search-server': {
+                searchServersFromHub(overlay);
+                return;
+            }
+
+            case 'join-public': {
+                const card = actElement.closest('[data-server-id]');
+                if (card) joinServerFromHub(overlay, card);
+                return;
+            }
+
+            case 'request-private': {
+                const card = actElement.closest('[data-server-id]');
+                if (card) requestServerFromHub(overlay, card);
+                return;
+            }
+
+            case 'preview-server': {
+                const card = actElement.closest('[data-server-id]');
+                if (card) previewServerFromHub(card);
+                return;
+            }
+
+            case 'accept-request': {
+                const request = actElement.closest('[data-request-id]');
+                if (request) decideJoinRequestFromHub(overlay, request, 'accept');
+                return;
+            }
+
+            case 'reject-request': {
+                const request = actElement.closest('[data-request-id]');
+                if (request) decideJoinRequestFromHub(overlay, request, 'reject');
+                return;
+            }
+
+            default:
+                return;
+        }
     });
 
-    if (!name) return;
+    overlay.querySelector('#serverHubSearchInput')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            searchServersFromHub(overlay);
+        }
+    });
+
+    overlay.querySelector('#serverHubCreateName')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            createServerFromHub(overlay, close);
+        }
+    });
+
+    setTab(initialTab);
+    if (initialTab === 'create') setTimeout(() => overlay.querySelector('#serverHubCreateName')?.focus(), 0);
+}
+
+async function createServerFromHub(overlay, close) {
+    const input = overlay.querySelector('#serverHubCreateName');
+    const name = (input?.value || '').trim();
+    const visibility = overlay.querySelector('input[name="serverHubVisibility"]:checked')?.value || 'public';
+    const isPublic = visibility !== 'private';
+
+    if (!name) {
+        showToast('Название сервера пустое');
+        input?.focus();
+        return;
+    }
 
     try {
         const res = await api('/api/servers', {
             method: 'POST',
-            body: JSON.stringify({ name })
+            body: JSON.stringify({ name, is_public: isPublic })
         });
         const servers = await api('/api/servers');
         renderServers(servers);
         const newId = Number(res?.id);
         const idToOpen = Number.isFinite(newId) && newId > 0 ? newId : (servers[0]?.id || null);
-        const srv = servers.find(x => x.id === idToOpen);
+        const srv = servers.find(x => Number(x.id) === Number(idToOpen));
         if (idToOpen) await openServer(idToOpen, srv?.name || name);
+        showToast(isPublic ? 'Публичный сервер создан' : 'Приватный сервер создан');
+        close?.();
     } catch (e) {
         console.error('[UI] Failed to create server', e);
-        alert('Не удалось создать сервер');
+        showToast('Не удалось создать сервер');
     }
+}
+
+function serverHubCard(row) {
+    const sid = Number(row?.id);
+    const name = (row?.name || `Сервер ${sid}`).toString();
+    const isPublic = row?.is_public !== false;
+    const members = Number(row?.members_count || 0);
+    const letter = (name.charAt(0) || 'S').toUpperCase();
+    return `
+      <div class="server-discover-card" data-server-id="${sid}" data-server-name="${escapeHtml(name)}" data-server-public="${isPublic ? '1' : '0'}" data-server-members="${members}">
+        <div class="server-discover-avatar">${escapeHtml(letter)}</div>
+        <div class="server-discover-main">
+          <div class="server-discover-title">${escapeHtml(name)}</div>
+          <div class="server-discover-meta">${serverVisibilityLabel(isPublic)} • участников: ${members}</div>
+          <div class="server-discover-desc">${isPublic ? 'Можно присоединиться сразу.' : 'Вход через заявку владельцу/админам.'}</div>
+        </div>
+        <div class="server-discover-actions">
+          <button class="btn btn-ghost" type="button" data-act="preview-server">Осмотр</button>
+          ${isPublic
+            ? `<button class="btn btn-primary" type="button" data-act="join-public">Войти</button>`
+            : `<button class="btn btn-primary" type="button" data-act="request-private">Заявка</button>`}
+        </div>
+      </div>
+    `;
+}
+
+async function searchServersFromHub(overlay) {
+    const input = overlay.querySelector('#serverHubSearchInput');
+    const box = overlay.querySelector('#serverHubSearchResults');
+    const q = (input?.value || '').trim();
+    if (!box) return;
+    box.innerHTML = '<div class="server-hub-empty">Поиск...</div>';
+
+    try {
+        const rows = await api(`/api/servers/discover?q=${encodeURIComponent(q)}&limit=30`);
+        const list = Array.isArray(rows) ? rows : [];
+        box.innerHTML = list.length
+            ? list.map(serverHubCard).join('')
+            : '<div class="server-hub-empty">Ничего не найдено.</div>';
+    } catch (e) {
+        console.error('[UI] Failed to discover servers', e);
+        box.innerHTML = '<div class="server-hub-empty bad">Не удалось выполнить поиск.</div>';
+    }
+}
+
+async function joinServerFromHub(overlay, card) {
+    const sid = Number(card?.dataset?.serverId);
+    if (!Number.isFinite(sid) || sid <= 0) return;
+    try {
+        await api(`/api/servers/${sid}/join`, { method: 'POST' });
+        const servers = await api('/api/servers');
+        renderServers(servers);
+        const srv = servers.find(x => Number(x.id) === sid);
+        await openServer(sid, srv?.name || card?.dataset?.serverName || 'Сервер');
+        showToast('Сервер добавлен');
+        overlay?.remove?.();
+    } catch (e) {
+        console.error('[UI] Failed to join server', e);
+        showToast('Не удалось войти на сервер');
+    }
+}
+
+async function requestServerFromHub(overlay, card) {
+    const sid = Number(card?.dataset?.serverId);
+    if (!Number.isFinite(sid) || sid <= 0) return;
+    try {
+        await api(`/api/servers/${sid}/join-request`, {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        showToast('Заявка отправлена');
+        card?.classList?.add('is-requested');
+    } catch (e) {
+        console.error('[UI] Failed to request join', e);
+        showToast('Не удалось отправить заявку');
+    }
+}
+
+function previewServerFromHub(card) {
+    if (!card) return;
+    const name = card.dataset.serverName || 'Сервер';
+    const isPublic = card.dataset.serverPublic === '1';
+    const members = card.dataset.serverMembers || '0';
+    alert(`${name}\n${serverVisibilityLabel(isPublic)}\nУчастников: ${members}`);
+}
+
+function joinRequestCard(row, mode) {
+    const id = Number(row?.id);
+    const serverName = (row?.server_name || 'Сервер').toString();
+    const requester = (row?.requester_username || 'Пользователь').toString();
+    const letter = (serverName.charAt(0) || 'S').toUpperCase();
+    const status = (row?.status || 'pending').toString();
+    const meta = mode === 'incoming'
+        ? `Заявка от ${requester}`
+        : `${serverVisibilityLabel(row?.server_is_public !== false)} • статус: ${status}`;
+
+    return `
+      <div class="server-discover-card request-card" data-request-id="${id}" data-server-id="${Number(row?.server_id)}" data-server-name="${escapeHtml(serverName)}">
+        <div class="server-discover-avatar">${escapeHtml(letter)}</div>
+        <div class="server-discover-main">
+          <div class="server-discover-title">${escapeHtml(serverName)}</div>
+          <div class="server-discover-meta">${escapeHtml(meta)}</div>
+          <div class="server-discover-desc">${escapeHtml(row?.created_at || '')}</div>
+        </div>
+        <div class="server-discover-actions">
+          <button class="btn btn-ghost" type="button" data-act="preview-server">Осмотр</button>
+          ${mode === 'incoming' ? `
+            <button class="btn btn-primary" type="button" data-act="accept-request">Принять</button>
+            <button class="btn btn-danger" type="button" data-act="reject-request">Отклонить</button>
+          ` : ''}
+        </div>
+      </div>
+    `;
+}
+
+async function loadServerHubRequests(overlay, mode = 'incoming') {
+    const box = overlay.querySelector('#serverHubRequestsList');
+    if (!box) return;
+    box.innerHTML = '<div class="server-hub-empty">Загрузка...</div>';
+
+    try {
+        const url = mode === 'outgoing' ? '/api/servers/join-requests/outgoing' : '/api/servers/join-requests/incoming';
+        const rows = await api(url);
+        const list = Array.isArray(rows) ? rows : [];
+        box.innerHTML = list.length
+            ? list.map((r) => joinRequestCard(r, mode)).join('')
+            : `<div class="server-hub-empty">${mode === 'incoming' ? 'Входящих заявок нет.' : 'У тебя нет заявок.'}</div>`;
+    } catch (e) {
+        console.error('[UI] Failed to load join requests', e);
+        box.innerHTML = '<div class="server-hub-empty bad">Не удалось загрузить заявки.</div>';
+    }
+}
+
+async function decideJoinRequestFromHub(overlay, card, action) {
+    const id = Number(card?.dataset?.requestId);
+    if (!Number.isFinite(id) || id <= 0) return;
+    try {
+        await api(`/api/servers/join-requests/${id}/${action}`, { method: 'POST' });
+        showToast(action === 'accept' ? 'Заявка принята' : 'Заявка отклонена');
+        await loadServerHubRequests(overlay, 'incoming');
+    } catch (e) {
+        console.error('[UI] Failed to update join request', e);
+        showToast('Не удалось обработать заявку');
+    }
+}
+
+async function createServerFlow() {
+    openServerHubModal('create');
 }
 
 async function loadMe() {
@@ -1199,6 +1721,16 @@ async function loadMe() {
     }
 }
 
+
+function syncDrawerOverlayState() {
+    const isOpen = document.body.classList.contains('channels-open') ||
+        document.body.classList.contains('servers-open') ||
+        document.body.classList.contains('members-open');
+    document.body.classList.toggle('drawer-open', isOpen);
+    const overlay = document.getElementById('uiOverlay');
+    if (overlay) overlay.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+}
+
 function showChannelsMenu() {
     const channelsPanel = document.querySelector('.panel.channels');
     if (channelsPanel) {
@@ -1207,6 +1739,7 @@ function showChannelsMenu() {
         hideServersMenu();
         hideMembersMenu();
         console.log('[UI] Channels menu shown');
+        syncDrawerOverlayState();
     }
 }
 
@@ -1216,6 +1749,7 @@ function hideChannelsMenu() {
         channelsPanel.classList.remove('show-channels');
         document.body.classList.remove('channels-open');
         console.log('[UI] Channels menu hidden');
+        syncDrawerOverlayState();
     }
 }
 
@@ -1234,9 +1768,9 @@ function toggleChannelsMenu() {
 
 function isTouchUi() {
     try {
-        return window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 600;
+        return window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 900;
     } catch (_) {
-        return window.innerWidth <= 600;
+        return window.innerWidth <= 900;
     }
 }
 
@@ -1248,6 +1782,7 @@ function showServersMenu() {
         // mutually exclusive
         hideChannelsMenu();
         hideMembersMenu();
+        syncDrawerOverlayState();
     }
 }
 
@@ -1256,6 +1791,7 @@ function hideServersMenu() {
     if (serversPanel) {
         serversPanel.classList.remove('show-servers');
         document.body.classList.remove('servers-open');
+        syncDrawerOverlayState();
     }
 }
 
@@ -1274,6 +1810,7 @@ function showMembersMenu() {
         document.body.classList.add('members-open');
         hideChannelsMenu();
         hideServersMenu();
+        syncDrawerOverlayState();
     }
 }
 
@@ -1282,6 +1819,7 @@ function hideMembersMenu() {
     if (membersPanel) {
         membersPanel.classList.remove('show-members');
         document.body.classList.remove('members-open');
+        syncDrawerOverlayState();
     }
 }
 
@@ -1293,10 +1831,35 @@ function toggleMembersMenu() {
     else showMembersMenu();
 }
 
+
+async function showMobileDmDrawer() {
+    try {
+        setUiModeDm();
+        await loadDmList();
+    } catch (e) {
+        console.warn('[UI] Failed to open mobile DM drawer', e);
+    }
+    hideServersMenu();
+    hideMembersMenu();
+    showChannelsMenu();
+}
+
+async function showMobileServerChannelsDrawer(serverId, serverName) {
+    if (serverId && Number(currentServerId || 0) !== Number(serverId)) {
+        await openServer(serverId, serverName || 'Сервер');
+    } else {
+        setUiModeServer();
+    }
+    hideServersMenu();
+    hideMembersMenu();
+    showChannelsMenu();
+}
+
 function closeAllDrawers() {
     hideChannelsMenu();
     hideServersMenu();
     hideMembersMenu();
+    syncDrawerOverlayState();
 }
 
 function ensureReplyBar() {
@@ -1501,13 +2064,211 @@ function refreshMessageReactions(messageId, { force = false } = {}) {
 }
 
 
+function closeAnyServerMenu() {
+    document.querySelectorAll('.server-menu-popover, .server-menu-backdrop').forEach((el) => el.remove());
+}
+
+function buildServerMenuButtonLabel(server) {
+    return isServerMuted(server?.id) ? 'Включить уведомления' : 'Отключить уведомления';
+}
+
+function openServerSettingsModal(server) {
+    closeAnyServerMenu();
+    const sid = Number(server?.id);
+    if (!Number.isFinite(sid) || sid <= 0) return;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    const muted = isServerMuted(sid);
+    overlay.innerHTML = `
+      <div class="modal server-settings-modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <div class="modal-title">Настройки сервера</div>
+          <button class="modal-close" type="button">✕</button>
+        </div>
+        <div class="modal-body server-settings-body">
+          <div class="server-settings-head">
+            <div class="server-settings-avatar">${escapeHtml(((server?.name || 'S').toString().trim().charAt(0) || 'S').toUpperCase())}</div>
+            <div class="server-settings-meta">
+              <div class="server-settings-name">${escapeHtml((server?.name || 'Сервер').toString())}</div>
+              <div class="server-settings-sub">Быстрые действия и локальные настройки.</div>
+            </div>
+          </div>
+
+          <div class="server-settings-section">
+            <div class="server-settings-row">
+              <div>
+                <div class="server-settings-label">Уведомления</div>
+                <div class="server-settings-note">Только для этого устройства.</div>
+              </div>
+              <button class="btn ${muted ? '' : 'btn-primary'}" type="button" data-act="toggle-notify">${muted ? 'Включить' : 'Отключить'}</button>
+            </div>
+          </div>
+
+          ${canManageChannels(sid) ? `
+          <div class="server-settings-section">
+            <div class="server-settings-title">Управление каналами</div>
+            <div class="server-settings-actions-grid">
+              <button class="btn" type="button" data-act="create-text">Создать текстовый канал</button>
+              <button class="btn" type="button" data-act="create-voice">Создать голосовой канал</button>
+            </div>
+          </div>
+
+          <div class="server-settings-section danger">
+            <div class="server-settings-title">Опасная зона</div>
+            <button class="btn btn-danger" type="button" data-act="delete-server">Удалить сервер</button>
+          </div>
+          ` : ''}
+        </div>
+      </div>`;
+
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('.modal-close')?.addEventListener('click', close);
+
+    overlay.querySelector('[data-act="toggle-notify"]')?.addEventListener('click', () => {
+        const nowMuted = toggleServerMuted(sid);
+        close();
+        showToast(nowMuted ? 'Уведомления сервера отключены' : 'Уведомления сервера включены');
+    });
+
+    overlay.querySelector('[data-act="create-text"]')?.addEventListener('click', async () => {
+        close();
+        await createChannelForServer(sid, 'text');
+    });
+
+    overlay.querySelector('[data-act="create-voice"]')?.addEventListener('click', async () => {
+        close();
+        await createChannelForServer(sid, 'voice');
+    });
+
+    overlay.querySelector('[data-act="delete-server"]')?.addEventListener('click', async () => {
+        close();
+        if (!confirm(`Удалить сервер «${(server?.name || 'сервер').toString()}»?`)) return;
+        try {
+            await api(`/api/servers/${sid}`, { method: 'DELETE' });
+            window.location.reload();
+        } catch (err) {
+            console.warn('[UI] delete server failed', err);
+            showToast('Не удалось удалить сервер');
+        }
+    });
+
+    document.body.appendChild(overlay);
+}
+
+
+function getCurrentServerForMenu() {
+    const sid = Number(currentServerId);
+    if (!Number.isFinite(sid) || sid <= 0) return null;
+    const fromList = (Array.isArray(lastServersSnapshot) ? lastServersSnapshot : [])
+        .find((s) => Number(s?.id) === sid);
+    return fromList || { id: sid, name: 'Сервер' };
+}
+
+function openCurrentServerMenu(anchorEl) {
+    const server = getCurrentServerForMenu();
+    if (!server) return;
+    openServerQuickMenu(server, anchorEl);
+}
+
+function openServerQuickMenu(server, anchorEl) {
+    closeAnyServerMenu();
+    const sid = Number(server?.id);
+    if (!Number.isFinite(sid) || sid <= 0 || !anchorEl) return;
+
+    const backdrop = document.createElement('button');
+    backdrop.type = 'button';
+    backdrop.className = 'server-menu-backdrop';
+    backdrop.setAttribute('aria-hidden', 'true');
+
+    const pop = document.createElement('div');
+    pop.className = 'server-menu-popover';
+    pop.innerHTML = `
+      <button type="button" class="server-menu-item" data-act="toggle-notify">${escapeHtml(buildServerMenuButtonLabel(server))}</button>
+      ${canManageChannels(sid) ? `<button type="button" class="server-menu-item" data-act="settings">Настройки сервера</button>` : ''}
+    `;
+
+    const rect = anchorEl.getBoundingClientRect();
+    pop.style.top = `${Math.round(rect.bottom + 8)}px`;
+    pop.style.left = `${Math.round(Math.max(12, rect.right - 220))}px`;
+
+    backdrop.addEventListener('click', closeAnyServerMenu);
+    pop.querySelector('[data-act="toggle-notify"]')?.addEventListener('click', () => {
+        const nowMuted = toggleServerMuted(sid);
+        closeAnyServerMenu();
+        showToast(nowMuted ? 'Уведомления сервера отключены' : 'Уведомления сервера включены');
+    });
+    pop.querySelector('[data-act="settings"]')?.addEventListener('click', () => {
+        closeAnyServerMenu();
+        openServerSettingsModal(server);
+    });
+
+    document.body.appendChild(backdrop);
+    document.body.appendChild(pop);
+}
+
+function normalizeServerSearchText(value) {
+    return (value ?? '')
+        .toString()
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
+}
+
+function serverMatchesSearch(server, query) {
+    if (!query) return true;
+    const name = normalizeServerSearchText(server?.name || '');
+    const description = normalizeServerSearchText(server?.description || '');
+    const id = normalizeServerSearchText(server?.id || '');
+    return name.includes(query) || description.includes(query) || id.includes(query);
+}
+
+function setupServerSearch() {
+    const input = document.getElementById('serverSearchInput');
+    if (!input || input.dataset.wired === '1') return;
+
+    input.dataset.wired = '1';
+    serverSearchQuery = normalizeServerSearchText(input.value || '');
+
+    input.addEventListener('input', () => {
+        serverSearchQuery = normalizeServerSearchText(input.value || '');
+        renderServers(lastServersSnapshot);
+    });
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            input.value = '';
+            serverSearchQuery = '';
+            renderServers(lastServersSnapshot);
+            input.blur();
+        }
+    });
+}
+
+
 function renderServers(servers) {
+    const sourceServers = Array.isArray(servers) ? servers : [];
+    lastServersSnapshot = sourceServers;
+
+    const searchInput = document.getElementById('serverSearchInput');
+    if (searchInput) {
+        serverSearchQuery = normalizeServerSearchText(searchInput.value || serverSearchQuery);
+    }
+
+    const query = normalizeServerSearchText(serverSearchQuery);
+    const visibleServers = query
+        ? sourceServers.filter((server) => serverMatchesSearch(server, query))
+        : sourceServers;
+
     console.log('[DEBUG] renderServers called', {
-        serversCount: servers?.length,
+        serversCount: sourceServers.length,
+        visibleServersCount: visibleServers.length,
         currentServerId,
+        serverSearchQuery: query,
         sessionServerId: sessionStorage.getItem("lastServerId")
     });
-    
+
     const serversList = document.getElementById('servers-list');
     if (!serversList) {
         console.error('[ERROR] servers-list element not found!');
@@ -1515,10 +2276,13 @@ function renderServers(servers) {
     }
 
     try { serverOwnerById.clear(); } catch (_) {}
-    
+    for (const server of sourceServers) {
+        try { serverOwnerById.set(Number(server.id), Number(server.owner_id)); } catch (_) {}
+    }
+
     serversList.innerHTML = '';
-    
-    if (!servers || servers.length === 0) {
+
+    if (!sourceServers.length) {
         serversList.innerHTML = `
             <div class="empty-servers">
                 <p>Нет серверов</p>
@@ -1527,51 +2291,47 @@ function renderServers(servers) {
         `;
         return;
     }
-    
-    servers.forEach(server => {
-        try { serverOwnerById.set(Number(server.id), Number(server.owner_id)); } catch (_) {}
+
+    if (!visibleServers.length) {
+        serversList.innerHTML = `
+            <div class="empty-servers">
+                <p>Ничего не найдено</p>
+            </div>
+        `;
+        return;
+    }
+
+    visibleServers.forEach(server => {
         const serverItem = document.createElement('div');
         const isActive = server.id === currentServerId;
         serverItem.className = `item server ${isActive ? 'active' : ''}`;
         serverItem.dataset.serverId = server.id;
         serverItem.dataset.testId = `server-${server.id}`;
-        
+
         const serverDesc = (server.description || '').toString().trim();
-        const isOwner = Number(server.owner_id) === Number(currentUser?.id);
+        const serverMuted = isServerMuted(server.id);
         serverItem.innerHTML = `
             <div class="avatar">${(server.name || 'S')[0]?.toUpperCase() || 'S'}</div>
             <div class="text">
                 <div class="title">${escapeHtml((server.name || '').toString())}</div>
-                ${serverDesc ? `<div class="sub">${escapeHtml(serverDesc)}</div>` : ``}
+                <div class="sub-row">
+                  ${serverDesc ? `<div class="sub">${escapeHtml(serverDesc)}</div>` : `<div class="sub">Сервер</div>`}
+                  ${serverMuted ? `<span class="server-muted-badge" title="Уведомления отключены">🔕</span>` : ''}
+                </div>
             </div>
-            ${isOwner ? `<button class="server-del" type="button" title="Удалить сервер">🗑</button>` : ``}
         `;
-
-        const delBtn = serverItem.querySelector('.server-del');
-        delBtn?.addEventListener('click', async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (!confirm('Удалить сервер?')) return;
-            try {
-                await api(`/api/servers/${server.id}`, { method: 'DELETE' });
-                window.location.reload();
-            } catch (err) {
-                console.warn('[UI] delete server failed', err);
-                showToast('Не удалось удалить сервер');
-            }
-        });
 
         serverItem.addEventListener('click', (e) => {
             e.stopPropagation();
             e.preventDefault();
-            
+
             console.log('[CLICK] Server clicked:', {
                 id: server.id,
                 name: server.name,
                 currentServerId,
                 isActive
             });
-            
+
             if (currentServerId === server.id) {
                 console.log(`[UI] Server ${server.id} already active`);
 
@@ -1579,44 +2339,32 @@ function renderServers(servers) {
                 if (location.hash === '#/friends' && window.closeFriends) {
                     window.closeFriends();
                     try { history.replaceState(null, '', location.pathname + location.search); } catch (_) { location.hash = ''; }
-                    // force refresh of channels/chat
-                    openServer(server.id, server.name);
-                    if (isTouchUi()) {
-                        hideServersMenu();
-                        hideChannelsMenu();
-                        hideMembersMenu();
-                    }
-                    return;
                 }
 
                 serverItem.classList.add('refreshing');
                 setTimeout(() => serverItem.classList.remove('refreshing'), 300);
 
                 if (isTouchUi()) {
-                    hideServersMenu();
-                    hideChannelsMenu();
-                    hideMembersMenu();
+                    showMobileServerChannelsDrawer(server.id, server.name).catch((err) => console.warn('[UI] mobile channel drawer failed', err));
                 }
 
                 return;
             }
-            
+
             console.log(`[UI] Opening server ${server.id} (${server.name})`);
-            openServer(server.id, server.name);
             if (isTouchUi()) {
-                hideServersMenu();
-                hideChannelsMenu();
-                hideMembersMenu();
+                showMobileServerChannelsDrawer(server.id, server.name).catch((err) => console.warn('[UI] mobile server open failed', err));
+            } else {
+                openServer(server.id, server.name);
             }
         });
-        
+
         serversList.appendChild(serverItem);
     });
-    
-    
+
+
 console.log('[DEBUG] Servers rendered:', serversList.children.length);
 }
-
 
 function canManageChannels(serverId) {
     const sid = Number(serverId);
@@ -1628,7 +2376,12 @@ function canManageChannels(serverId) {
 function updateChannelAdminUi() {
     const btn = document.getElementById('addChannelBtn');
     if (!btn) return;
-    btn.style.display = canManageChannels(currentServerId) ? '' : 'none';
+    const sid = Number(currentServerId);
+    const show = Number.isFinite(sid) && sid > 0;
+    btn.style.display = show ? '' : 'none';
+    btn.textContent = '⚙';
+    btn.title = 'Меню сервера';
+    btn.setAttribute('aria-label', 'Меню сервера');
 }
 
 async function createChannelFlow() {
@@ -1801,10 +2554,7 @@ async function openServer(serverId, serverName) {
             sessionStorage: sessionStorage.getItem("lastServerId")
         });
         
-        document.querySelectorAll('.item.server').forEach(item => {
-            const itemId = parseInt(item.dataset.serverId);
-            item.classList.toggle('active', itemId === serverId);
-        });
+        updateServerSelection(serverId);
         
         const chats = await api(`/api/servers/${serverId}/chats`);
         console.log(`[UI] Loaded ${chats.length} chats for server ${serverId}`);
@@ -1861,6 +2611,7 @@ function renderChannels(chats) {
     chats.forEach(chat => {
         try { chatNameById.set(chat.id, chat.name || `#${chat.id}`); } catch (_) {}
         try { chatKindById.set(chat.id, (chat && chat.kind) ? chat.kind : 'text'); } catch (_) {}
+        try { chatServerById.set(Number(chat.id), Number(chat?.server_id ?? currentServerId ?? 0)); } catch (_) {}
 
         const channelItem = document.createElement('div');
         const isActive = chat.id === currentChatId;
@@ -1966,6 +2717,7 @@ function renderChannels(chats) {
                 return;
             }
             openChat(chat.id, chat.name);
+            if (isTouchUi()) closeAllDrawers();
         });
 
         channelsList.appendChild(channelItem);
@@ -2229,8 +2981,11 @@ function setUiModeDm() {
 
     if (channelsList) channelsList.hidden = true;
     if (dmList) dmList.hidden = false;
-    // On desktop keep members panel visible (voice members are shown there).
-  if (membersPanel) membersPanel.hidden = (window.innerWidth <= 900);
+    // On desktop keep members panel visible and show DM participants there.
+    if (membersPanel) membersPanel.hidden = isTouchUi();
+    if (currentChatId) {
+        try { renderDmMembers(currentChatId); } catch (_) {}
+    }
 
     try { updateChannelAdminUi(); } catch (_) {}
 }
@@ -2562,6 +3317,9 @@ async function loadDmList() {
     try {
         const dms = await api('/api/dms');
         renderDmList(dms);
+        if (!currentServerId && currentChatId) {
+            try { renderDmMembers(currentChatId); } catch (_) {}
+        }
     } catch (e) {
         console.warn('[UI] Failed to load DM list', e);
         dmList.innerHTML = `<div class="muted" style="padding:12px;">Не удалось загрузить чаты</div>`;
@@ -2640,14 +3398,86 @@ function renderDmList(dms) {
 
         item.addEventListener('click', () => {
             openDmChat(chatId, otherName).catch((e) => console.warn('[UI] openDmChat failed', e));
+            if (isTouchUi()) closeAllDrawers();
         });
 
         dmList.appendChild(item);
     }
 }
 
+function renderDmMembers(chatId) {
+    const membersPanel = document.getElementById('membersPanel');
+    const membersWrap = document.getElementById('membersPanelMembers');
+    const membersList = document.getElementById('membersList');
+    const countEl = membersPanel?.querySelector('.count');
+    const titleEl = membersPanel?.querySelector('.panelHeader h3');
+    if (!membersPanel || !membersList) return;
+
+    const cid = Number(chatId);
+    const meta = dmMetaByChatId.get(cid) || {};
+    const otherName = (meta.otherName || chatNameById.get(cid) || 'Собеседник').toString();
+    const otherId = Number(meta.otherId || 0);
+    const meName = (currentUser?.username || 'Вы').toString();
+
+    if (titleEl) titleEl.innerHTML = `Участники <span class="count">(2)</span>`;
+    if (countEl) countEl.textContent = '(2)';
+    if (membersWrap) membersWrap.hidden = false;
+    membersPanel.hidden = isTouchUi();
+
+    membersList.innerHTML = '';
+    const block = document.createElement('div');
+    block.className = 'members-group-box dm-members-box';
+
+    const makeRow = ({ id, username, avatar_file_id, role, clickable = false }) => {
+        const el = document.createElement('div');
+        el.className = 'member dm-member online';
+        el.innerHTML = `
+          <div class="avatar small">${avatarInnerHtml(avatar_file_id, username)}</div>
+          <div class="text">
+            <div class="name">${escapeHtml(username)}</div>
+            <div class="role">${escapeHtml(role)}</div>
+          </div>`;
+        if (clickable && Number.isFinite(Number(id)) && Number(id) > 0) {
+            el.dataset.userId = String(id);
+            el.dataset.username = username;
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                showUserMenu({
+                    userId: Number(id),
+                    username,
+                    anchorEl: e?.target?.closest?.('.avatar') || el,
+                    allowDm: true,
+                    allowAddFriend: true,
+                    allowRemoveFriend: false,
+                });
+            });
+        }
+        return el;
+    };
+
+    block.appendChild(makeRow({
+        id: currentUser?.id,
+        username: meName,
+        avatar_file_id: currentUserProfile?.avatar_file_id,
+        role: 'Вы',
+        clickable: false,
+    }));
+
+    block.appendChild(makeRow({
+        id: otherId,
+        username: otherName,
+        avatar_file_id: null,
+        role: 'Личные сообщения',
+        clickable: true,
+    }));
+
+    membersList.appendChild(block);
+}
+
 async function openDmChat(chatId, otherName) {
     currentServerId = null;
+    updateServerSelection(null);
+    closeAnyServerMenu();
 
     // If user is in Friends view, chat UI is hidden. Ensure we exit Friends view.
     if (typeof window.closeFriends === 'function') {
@@ -2657,6 +3487,7 @@ async function openDmChat(chatId, otherName) {
     setUiModeDm();
     await loadDmList(); // refresh active state + order
     await openChat(chatId, otherName);
+    renderDmMembers(chatId);
 }
 
 window.lbLoadDmList = loadDmList;
@@ -3205,9 +4036,18 @@ function setupMessageComposer() {
     const form = document.getElementById('composer');
     const input = document.getElementById('message');
     const attachBtn = document.getElementById('attachBtn');
+    const mdAttachBtn = document.getElementById('mdAttachBtn');
     const fileInput = document.getElementById('fileInput');
+    const mdFileInput = document.getElementById('mdFileInput');
     const attachmentsEl = document.getElementById('attachments');
     const sendBtn = document.getElementById('sendBtn');
+
+    const resizeComposerInput = () => {
+        if (!input || input.tagName !== 'TEXTAREA') return;
+        input.style.height = 'auto';
+        input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+    };
+    resizeComposerInput();
 
     let isSubmitting = false;
     let pending = [];
@@ -3242,29 +4082,53 @@ function setupMessageComposer() {
         }
     };
 
+    const normalizeComposerFile = (file, fallbackName = '') => {
+        if (!file) return null;
+
+        let f = file;
+        let name = (f.name || fallbackName || '').toString().trim();
+
+        // some clipboard images have empty name
+        if (!name) {
+            const ext = (f.type && f.type.includes('/')) ? f.type.split('/')[1] : 'png';
+            name = `pasted_${Date.now()}_${Math.floor(Math.random() * 1000)}.${ext}`;
+        }
+
+        const lowerName = name.toLowerCase();
+        const rawType = (f.type || '').toString().toLowerCase().split(';')[0].trim();
+
+        // Generated/uploaded .md is intentionally sent as application/octet-stream.
+        // The .md filename is the source of truth; server will detect Markdown by extension.
+        // This avoids multipart/MIME edge-cases with text/markdown;charset=utf-8 and text/plain.
+        const shouldNormalizeMarkdown = lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
+        const safeType = shouldNormalizeMarkdown ? 'application/octet-stream' : (rawType || 'application/octet-stream');
+
+        try {
+            if (f.name !== name || (f.type || '').toString().toLowerCase() !== safeType) {
+                f = new File([f], name, { type: safeType, lastModified: f.lastModified || Date.now() });
+            }
+        } catch (_) {
+            // Some old browsers may not support File constructor for Blob-like objects.
+            try { f.name = name; } catch (_) {}
+        }
+
+        return { file: f, name, mime: shouldNormalizeMarkdown ? 'text/markdown' : safeType, size: f.size || 0 };
+    };
+
     const addFiles = (files) => {
         if (!files) return;
 
         const list = Array.from(files);
         let added = 0;
 
-        for (let f of list) {
-            if (!f) continue;
+        for (const src of list) {
+            const normalized = normalizeComposerFile(src);
+            if (!normalized) continue;
 
-            // some clipboard images have empty name
-            let name = (f.name || '').toString().trim();
-            if (!name) {
-                const ext = (f.type && f.type.includes('/')) ? f.type.split('/')[1] : 'png';
-                name = `pasted_${Date.now()}_${Math.floor(Math.random() * 1000)}.${ext}`;
-                try {
-                    f = new File([f], name, { type: f.type || 'application/octet-stream' });
-                } catch (_) {
-                    // ignore
-                }
-            }
+            const { file: f, name, mime, size } = normalized;
 
             // 50MB server limit
-            if ((f.size || 0) > 50 * 1024 * 1024) {
+            if ((size || 0) > 50 * 1024 * 1024) {
                 alert(`Файл слишком большой (лимит 50MB): ${name}`);
                 continue;
             }
@@ -3273,13 +4137,86 @@ function setupMessageComposer() {
                 key: `f_${++pendingSeq}`,
                 file: f,
                 name,
-                mime: (f.type || 'application/octet-stream').toLowerCase(),
-                size: f.size || 0,
+                mime,
+                size,
             });
             added++;
         }
 
         if (added) renderPending();
+    };
+
+    const addMarkdownTextAsPendingFile = (text, name) => {
+        const body = (text ?? '').toString();
+        if (!body.trim()) {
+            showToast('Markdown пустой');
+            return false;
+        }
+        const f = makeMarkdownFileFromText(body, name);
+        addFiles([f]);
+        return true;
+    };
+
+    const ensureMarkdownFileModal = () => {
+        let overlay = document.getElementById('mdFileModal');
+        if (overlay) return overlay;
+
+        overlay = document.createElement('div');
+        overlay.className = 'md-file-modal hidden';
+        overlay.id = 'mdFileModal';
+        overlay.innerHTML = `
+          <div class="md-file-dialog" role="dialog" aria-modal="true" aria-label="Markdown файл">
+            <div class="md-file-head">
+              <div>
+                <div class="md-file-title">Markdown-файл</div>
+                <div class="md-file-sub">Сделай текст сам или загрузи готовый .md</div>
+              </div>
+              <button class="md-file-x" type="button" data-act="close">✕</button>
+            </div>
+            <div class="md-file-body">
+              <label class="md-file-label">Имя файла</label>
+              <input class="md-file-name" type="text" maxlength="80" placeholder="message.md" value="message.md">
+              <label class="md-file-label">Содержимое</label>
+              <textarea class="md-file-text" spellcheck="false" placeholder="# Заголовок\n\nТекст, код, списки..."></textarea>
+            </div>
+            <div class="md-file-actions">
+              <button class="btn btn-ghost" type="button" data-act="upload">Загрузить готовый .md</button>
+              <button class="btn btn-primary" type="button" data-act="add">Добавить как файл</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const close = () => overlay.classList.add('hidden');
+        overlay.addEventListener('click', (ev) => {
+            if (ev.target === overlay) close();
+            const btn = ev.target?.closest?.('[data-act]');
+            if (!btn) return;
+            const act = btn.getAttribute('data-act');
+            if (act === 'close') {
+                close();
+                return;
+            }
+            if (act === 'upload') {
+                close();
+                mdFileInput?.click?.();
+                return;
+            }
+            if (act === 'add') {
+                const nameEl = overlay.querySelector('.md-file-name');
+                const textEl = overlay.querySelector('.md-file-text');
+                const ok = addMarkdownTextAsPendingFile(textEl?.value || '', nameEl?.value || 'message.md');
+                if (ok) {
+                    if (textEl) textEl.value = '';
+                    close();
+                }
+            }
+        });
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape' && !overlay.classList.contains('hidden')) close();
+        });
+
+        return overlay;
     };
 
     attachBtn?.addEventListener('click', () => {
@@ -3290,9 +4227,28 @@ function setupMessageComposer() {
         fileInput.click();
     });
 
+    mdAttachBtn?.addEventListener('click', () => {
+        const overlay = ensureMarkdownFileModal();
+        overlay.classList.remove('hidden');
+        overlay.querySelector('.md-file-text')?.focus?.();
+    });
+
     fileInput?.addEventListener('change', () => {
         addFiles(fileInput.files);
         fileInput.value = '';
+    });
+
+    mdFileInput?.addEventListener('change', () => {
+        const picked = Array.from(mdFileInput.files || []).filter(f => {
+            const n = (f?.name || '').toString().toLowerCase();
+            const m = (f?.type || '').toString().toLowerCase();
+            return n.endsWith('.md') || n.endsWith('.markdown') || m === 'text/markdown' || m === 'text/plain';
+        });
+        if (!picked.length && mdFileInput.files?.length) {
+            showToast('Выбери .md/.markdown файл');
+        }
+        addFiles(picked);
+        mdFileInput.value = '';
     });
 
     input?.addEventListener('paste', (e) => {
@@ -3328,6 +4284,7 @@ function setupMessageComposer() {
         const msg = {
             id: payload?.id,
             chat_id: currentChatId,
+            sender_id: currentUser?.id,
             sender_username: currentUser?.username || 'Вы',
             content: c,
             timestamp: payload?.timestamp || Date.now(),
@@ -3380,6 +4337,35 @@ function setupMessageComposer() {
     const uploadQueueEl = document.getElementById('uploadQueue');
     let uploadSeq = 1;
     const uploadJobs = []; // {jobId, chatId, serverId, text, replyId, replyPreview, files:[{file, name, mime, size, fileId}], status, loadedBytes, totalBytes, xhrs:[], err?:string}
+    const UPLOAD_PARALLEL_LIMIT = 3;
+
+    const ensureUploadQueueStyles = () => {
+        if (document.getElementById('lbUploadQueueStyle')) return;
+        const st = document.createElement('style');
+        st.id = 'lbUploadQueueStyle';
+        st.textContent = `
+.upload-queue{padding:10px 12px;border-top:1px solid rgba(255,255,255,.07);border-bottom:1px solid rgba(255,255,255,.07);background:rgba(0,0,0,.14)}
+.upload-job{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 0}
+.upload-job+.upload-job{border-top:1px solid rgba(255,255,255,.06)}
+.upload-job .u-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px}
+.upload-job .u-name{font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.upload-job .u-pct{font-size:12px;font-weight:900;color:var(--accent,#a855f7);white-space:nowrap}
+.upload-job .u-sub{font-size:12px;opacity:.78;line-height:1.35}
+.upload-job .u-bar{height:7px;border-radius:999px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:7px}
+.upload-job .u-bar>i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--accent,#8b5cf6),#d946ef);transition:width .16s ease}
+.upload-job .u-files{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.upload-job .u-file{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center;font-size:11px;opacity:.82}
+.upload-job .u-file-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.upload-job .u-file-bar{height:4px;border-radius:999px;background:rgba(255,255,255,.10);overflow:hidden;margin-top:3px}
+.upload-job .u-file-bar>i{display:block;height:100%;background:rgba(168,85,247,.9)}
+.upload-job .u-file-state{text-align:right;white-space:nowrap;color:#b9c7ff}
+.upload-job .u-actions{display:flex;align-items:center;gap:6px}
+.upload-job .u-btn{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--text,#fff);border-radius:10px;padding:7px 10px;cursor:pointer;font-size:12px;font-weight:700}
+.upload-job .u-btn:hover{background:rgba(255,255,255,.10)}
+`;
+        document.head.appendChild(st);
+    };
+    ensureUploadQueueStyles();
 
     const guessUploadActivity = (filesArr) => {
         const items = Array.isArray(filesArr) ? filesArr : [];
@@ -3421,20 +4407,55 @@ function setupMessageComposer() {
             const total = Number(j.totalBytes || 0);
             const loaded = Number(j.loadedBytes || 0);
             const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((loaded / total) * 100))) : 0;
-            const name = j.files.length === 1
-                ? (j.files[0]?.name || j.files[0]?.file?.name || 'file')
-                : `${j.files.length} файлов`;
+            const files = Array.isArray(j.files) ? j.files : [];
+            const doneCount = files.filter(f => f && f.fileId).length;
+            const activeSet = new Set(Array.isArray(j.activeIndexes) ? j.activeIndexes : []);
+            const activeCount = activeSet.size;
+            const name = files.length === 1
+                ? (files[0]?.name || files[0]?.file?.name || 'file')
+                : `${files.length} файлов`;
 
-            const sub = j.status === 'uploading'
-                ? `${pct}% • ${formatBytes(loaded)} / ${formatBytes(total)}`
-                : (j.status === 'sending' ? 'Отправка сообщения…' : (j.status === 'failed' ? (j.err || 'Ошибка') : (j.status === 'canceled' ? 'Отменено' : '')));
+            let sub = '';
+            if (j.status === 'uploading') {
+                sub = `${doneCount}/${files.length} файлов • ${formatBytes(loaded)} / ${formatBytes(total)} • потоков: ${activeCount || Math.min(UPLOAD_PARALLEL_LIMIT, files.length)}`;
+            } else if (j.status === 'sending') {
+                sub = 'Файлы загружены, отправка сообщения…';
+            } else if (j.status === 'failed') {
+                sub = j.err || 'Ошибка';
+            } else if (j.status === 'canceled') {
+                sub = 'Отменено';
+            }
+
+            const progress = Array.isArray(j.fileProgress) ? j.fileProgress : [];
+            const shownFiles = files.slice(0, 5).map((it, idx) => {
+                const size = Number(it?.size || it?.file?.size || 0);
+                const loadedOne = Math.max(0, Math.min(size || Number(progress[idx] || 0), Number(progress[idx] || 0)));
+                const fpct = size > 0 ? Math.max(0, Math.min(100, Math.round((loadedOne / size) * 100))) : (it?.fileId ? 100 : 0);
+                const state = it?.fileId ? 'готово' : (activeSet.has(idx) ? `${fpct}%` : (j.status === 'failed' ? '—' : 'очередь'));
+                return `
+                  <div class="u-file">
+                    <div class="u-file-main">
+                      <div class="u-file-name">${escapeHtml(it?.name || it?.file?.name || 'file')}</div>
+                      <div class="u-file-bar"><i style="width:${fpct}%"></i></div>
+                    </div>
+                    <div class="u-file-state">${escapeHtml(state)}</div>
+                  </div>
+                `;
+            }).join('');
+            const more = files.length > 5
+                ? `<div class="u-file"><div class="u-file-name">Ещё ${files.length - 5} файлов в очереди</div><div class="u-file-state"></div></div>`
+                : '';
 
             return `
               <div class="upload-job" data-job="${j.jobId}">
                 <div class="u-left">
-                  <div class="u-name">${escapeHtml(name)}</div>
+                  <div class="u-head">
+                    <div class="u-name">${escapeHtml(name)}</div>
+                    <div class="u-pct">${pct}%</div>
+                  </div>
                   <div class="u-sub">${escapeHtml(sub)}</div>
                   <div class="u-bar"><i style="width:${pct}%"></i></div>
+                  <div class="u-files">${shownFiles}${more}</div>
                 </div>
                 <div class="u-actions">
                   ${j.status === 'uploading' || j.status === 'sending'
@@ -3466,11 +4487,32 @@ function setupMessageComposer() {
         });
     };
 
+    const describeUploadError = (err) => {
+        const status = Number(err?.status || 0);
+        const detail = (err?.detail || '').toString();
+
+        if (detail === 'file_too_large' || status === 413) return 'Файл слишком большой';
+        if (detail === 'storage_create_failed') return 'Сервер не может создать storage/files. Проверь права на папку storage или запуск сервера';
+        if (detail === 'temp_file_create_failed') return 'Сервер не может создать временный файл в storage/files';
+        if (detail === 'temp_file_write_failed' || detail === 'temp_file_flush_failed') return 'Сервер не может записать файл в storage/files';
+        if (detail === 'storage_rename_failed') return 'Сервер не может переместить файл в хранилище';
+        if (detail === 'db_insert_failed') return 'Файл не был сохранён: ошибка записи в БД';
+        if (detail === 'unauthorized' || status === 401) return 'Сессия устарела';
+        if (detail === 'forbidden' || detail === 'no_chat_access' || status === 403) return 'Нет доступа загрузить файл в этот чат';
+        if (detail === 'unsupported_file_type' || detail === 'bad_mime' || status === 415) return 'Тип файла не принят сервером';
+        if (detail === 'missing_file' || detail === 'bad_request' || status === 400) return 'Файл не принят сервером';
+        if (detail) return detail;
+        if (status) return `Не удалось загрузить файл (${status})`;
+        if (String(err?.message || '').includes('upload_network_error')) return 'Ошибка сети при загрузке';
+        if (String(err?.message || '').includes('upload_aborted')) return 'Загрузка отменена';
+        return 'Не удалось загрузить файл';
+    };
+
     const uploadFileXHR = (file, chatId, onProgress, attachXhr) => {
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open('POST', '/api/files', true);
-            xhr.responseType = 'json';
+            xhr.responseType = 'text';
 
             const token = localStorage.getItem('auth_token');
             if (token) {
@@ -3486,15 +4528,24 @@ function setupMessageComposer() {
             };
 
             xhr.onload = () => {
+                const raw = (() => {
+                    try { return xhr.responseText || xhr.response || ''; } catch (_) { return ''; }
+                })();
+                const parsed = (() => {
+                    try { return raw ? JSON.parse(raw) : null; } catch (_) { return null; }
+                })();
+
                 const ok = xhr.status >= 200 && xhr.status < 300;
                 if (!ok) {
-                    reject(new Error(`upload_failed:${xhr.status}`));
+                    const err = new Error(`upload_failed:${xhr.status}`);
+                    err.status = xhr.status;
+                    err.detail = parsed?.detail || parsed?.error || raw || '';
+                    err.response = parsed || raw;
+                    reject(err);
                     return;
                 }
-                const resp = xhr.response || (() => {
-                    try { return JSON.parse(xhr.responseText || '{}'); } catch (_) { return null; }
-                })();
-                resolve(resp);
+
+                resolve(parsed || {});
             };
 
             xhr.onerror = () => reject(new Error('upload_network_error'));
@@ -3522,44 +4573,88 @@ function setupMessageComposer() {
         renderUploadQueue();
     };
 
+    const recalcUploadJobProgress = (job) => {
+        const progress = Array.isArray(job.fileProgress) ? job.fileProgress : [];
+        job.loadedBytes = progress.reduce((sum, n) => sum + (Number(n || 0) || 0), 0);
+        if (job.totalBytes > 0) job.loadedBytes = Math.min(job.loadedBytes, job.totalBytes);
+    };
+
     const startUploadJob = async (job) => {
         job.status = 'uploading';
         job.loadedBytes = 0;
         job.totalBytes = job.files.reduce((a, it) => a + (Number(it.size || it.file?.size || 0) || 0), 0);
         job.xhrs = [];
+        job.fileProgress = job.files.map(() => 0);
+        job.activeIndexes = [];
         renderUploadQueue();
 
         wsSendState('upload_state', 'start', job.activity);
 
-        let doneBytes = 0;
-        try {
-            for (const it of job.files) {
-                if (job.status === 'canceled') throw new Error('canceled');
+        let nextIndex = 0;
+        const concurrency = Math.max(1, Math.min(UPLOAD_PARALLEL_LIMIT, job.files.length));
+        const takeNextIndex = () => {
+            if (job.status === 'canceled') return -1;
+            if (nextIndex >= job.files.length) return -1;
+            const idx = nextIndex;
+            nextIndex += 1;
+            return idx;
+        };
 
+        const worker = async () => {
+            while (true) {
+                const idx = takeNextIndex();
+                if (idx < 0) return;
+
+                const it = job.files[idx];
+                if (!it) continue;
                 const f = it.file;
                 if (!f) continue;
 
-                const res = await uploadFileXHR(f, job.chatId, (loaded, total) => {
-                    const curTotal = Number(total || it.size || f.size || 0);
-                    const curLoaded = Number(loaded || 0);
-                    // Progress is: doneBytes + current file loaded
-                    job.loadedBytes = Math.min(job.totalBytes, doneBytes + Math.min(curLoaded, curTotal || curLoaded));
-                    renderUploadQueue();
-                }, (xhr) => {
-                    job.xhrs.push(xhr);
-                });
-
-                const id = res?.id;
-                if (!id) throw new Error('upload_failed');
-                it.fileId = id;
-
-                doneBytes += Number(it.size || f.size || 0);
-                job.loadedBytes = Math.min(job.totalBytes, doneBytes);
+                job.activeIndexes = Array.from(new Set([...(job.activeIndexes || []), idx]));
                 renderUploadQueue();
+
+                try {
+                    const res = await uploadFileXHR(f, job.chatId, (loaded, total) => {
+                        const curTotal = Number(total || it.size || f.size || 0);
+                        const curLoaded = Number(loaded || 0);
+                        job.fileProgress[idx] = Math.min(curTotal || curLoaded, curLoaded);
+                        recalcUploadJobProgress(job);
+                        renderUploadQueue();
+                    }, (xhr) => {
+                        job.xhrs.push(xhr);
+                    });
+
+                    const id = res?.id ?? res?.file_id ?? res?.fileId;
+                    if (!id) {
+                        const err = new Error('upload_failed:no_file_id');
+                        err.detail = 'Сервер не вернул ID файла';
+                        throw err;
+                    }
+                    it.fileId = id;
+                    job.fileProgress[idx] = Number(it.size || f.size || 0) || job.fileProgress[idx] || 0;
+                    recalcUploadJobProgress(job);
+                    renderUploadQueue();
+                } finally {
+                    job.activeIndexes = (job.activeIndexes || []).filter(v => v !== idx);
+                    renderUploadQueue();
+                }
             }
+        };
+
+        try {
+            const workers = Array.from({ length: concurrency }, () => worker());
+            await Promise.all(workers);
 
             if (job.status === 'canceled') throw new Error('canceled');
 
+            const missing = job.files.find(it => !it.fileId);
+            if (missing) {
+                const err = new Error('upload_failed:missing_file_id');
+                err.detail = 'Не все файлы были загружены';
+                throw err;
+            }
+
+            job.loadedBytes = job.totalBytes;
             job.status = 'sending';
             renderUploadQueue();
 
@@ -3580,7 +4675,6 @@ function setupMessageComposer() {
             const combined = (job.text ? job.text : '') + (markers.length ? ((job.text ? '\n' : '') + markers.join('')) : '');
             await sendMessage(combined, { replyId: job.replyId, replyPreview: job.replyPreview });
 
-            // done
             wsSendState('upload_state', 'stop', job.activity);
             const idx = uploadJobs.findIndex(j => j.jobId === job.jobId);
             if (idx >= 0) uploadJobs.splice(idx, 1);
@@ -3590,8 +4684,15 @@ function setupMessageComposer() {
                 job.status = 'canceled';
             } else {
                 job.status = 'failed';
-                job.err = 'Не удалось отправить';
+                job.err = describeUploadError(e);
+                console.warn('[UPLOAD] job failed', e);
             }
+            try {
+                for (const x of (job.xhrs || [])) {
+                    try { x.abort(); } catch (_) {}
+                }
+            } catch (_) {}
+            job.activeIndexes = [];
             wsSendState('upload_state', 'stop', job.activity);
             renderUploadQueue();
         }
@@ -3601,10 +4702,24 @@ function setupMessageComposer() {
         e.preventDefault();
         e.stopImmediatePropagation();
 
-        const text = (input?.value || '').trim();
+        const rawInputText = (input?.value || '').toString();
+        let text = rawInputText.trim();
         const files = pending.slice();
 
         if (!text && files.length === 0) return;
+
+        if (text.length > MESSAGE_TEXT_FILE_THRESHOLD) {
+            const f = makeMarkdownFileFromText(rawInputText, buildMarkdownAttachmentName('message'));
+            files.unshift({
+                key: `auto_md_${Date.now()}`,
+                file: f,
+                name: f.name || buildMarkdownAttachmentName('message'),
+                mime: 'text/markdown',
+                size: Number(f.size || 0),
+            });
+            text = '';
+            showToast('Длинный текст отправится как .md файл');
+        }
         if (!currentChatId) {
             alert('Ошибка: не выбран чат для отправки');
             return;
@@ -3620,7 +4735,10 @@ function setupMessageComposer() {
         }
 
         // optimistic UI
-        if (input) input.value = '';
+        if (input) {
+            input.value = '';
+            resizeComposerInput();
+        }
         pending = [];
         renderPending();
 
@@ -3636,7 +4754,10 @@ function setupMessageComposer() {
                 await sendMessage(text, { replyId: replyIdSnap, replyPreview: replyPreviewSnap });
             } catch (error) {
                 console.error('[APP] Failed to send message:', error);
-                if (input && text) input.value = text;
+                if (input && text) {
+                    input.value = text;
+                    resizeComposerInput();
+                }
                 showToast('Не удалось отправить');
             } finally {
                 isSubmitting = false;
@@ -3663,6 +4784,8 @@ function setupMessageComposer() {
             loadedBytes: 0,
             totalBytes: 0,
             xhrs: [],
+            fileProgress: [],
+            activeIndexes: [],
             activity: guessUploadActivity(files)
         };
 
@@ -3692,7 +4815,10 @@ function setupMessageComposer() {
         }, 1500);
     };
 
-    input?.addEventListener('input', touchTyping);
+    input?.addEventListener('input', () => {
+        resizeComposerInput();
+        touchTyping();
+    });
     input?.addEventListener('blur', () => {
         if (!typingActive) return;
         typingActive = false;
@@ -3773,6 +4899,38 @@ function formatBytes(bytes) {
     }
     const s = (i === 0) ? String(Math.round(v)) : v.toFixed(v >= 10 ? 1 : 2);
     return `${s} ${units[i]}`;
+}
+
+
+function isGoneError(err) {
+    return Number(err?.status) === 410;
+}
+
+function markAttachmentExpired(att, text = 'Файл больше недоступен') {
+    if (!att || att.dataset.expired === '1') return;
+
+    att.dataset.expired = '1';
+    att.classList.add('is-expired');
+    att.removeAttribute('data-links-wired');
+
+    const name = (att.getAttribute('data-file-name') || 'Вложение').toString();
+    const mime = (att.getAttribute('data-file-mime') || '').toString();
+    const size = (att.getAttribute('data-file-size') || '').toString();
+    const lowerName = name.toLowerCase();
+    const ext = lowerName.includes('.') ? lowerName.split('.').pop() : '';
+    const badge = (ext || (mime.split('/')[1] || mime.split('/')[0] || 'file')).toString().slice(0, 6).toUpperCase();
+    const meta = [size ? formatBytes(size) : '', 'истёк срок хранения'].filter(Boolean).join(' • ');
+
+    att.innerHTML = `
+      <div class="att-expired" title="${escapeHtml(text)}">
+        <span class="att-expired-icon" aria-hidden="true">⌛</span>
+        <span class="att-expired-main">
+          <span class="att-expired-name">${escapeHtml(name)}</span>
+          <span class="att-expired-meta">${escapeHtml(meta || text)}</span>
+        </span>
+        <span class="att-expired-badge">${escapeHtml(badge || 'FILE')}</span>
+      </div>
+    `;
 }
 
 function ensureAttachmentViewer() {
@@ -3943,18 +5101,65 @@ function ensureAttachmentViewer() {
                 this.metaEl.textContent = [badge, sz].filter(Boolean).join(' • ');
             }
 
-let rawHref = `/api/files/${id}/raw`;
-let dlHref = `/api/files/${id}`;
+let rawHref = '';
+let dlHref = '';
 let previewHref = `/api/files/${id}/preview`;
+let originalAvailable = true;
 try {
     const links = await getFileLinks(id);
-    if (links?.raw_url) rawHref = links.raw_url;
-    if (links?.download_url) dlHref = links.download_url;
+    originalAvailable = links?.original_available !== false && links?.download_available !== false;
+    rawHref = (links?.raw_url || '').toString();
+    dlHref = (links?.download_url || '').toString();
     if (links?.preview_url) previewHref = links.preview_url;
-} catch (_) {}
+} catch (err) {
+    if (isGoneError(err)) {
+        if (this.bodyEl) {
+            this.bodyEl.innerHTML = `<div class="av-unknown"><div class="av-unknown-name">${escapeHtml(name)}</div><div class="av-unknown-hint">Файл больше недоступен: истёк срок хранения.</div></div>`;
+            this.mediaEl = null;
+            this.setZoom(1);
+            this.setZoomButtons(false);
+        }
+        if (this.dlEl) {
+            this.dlEl.href = '#';
+            delete this.dlEl.dataset.fileId;
+            delete this.dlEl.dataset.fileName;
+        }
+        if (this.openEl) this.openEl.href = '#';
+        overlay.classList.remove('hidden');
+        return;
+    }
+}
 
-if (this.dlEl) this.dlEl.href = dlHref;
-if (this.openEl) this.openEl.href = rawHref;
+if (this.dlEl) {
+    if (dlHref && originalAvailable) {
+        this.dlEl.href = dlHref;
+        this.dlEl.dataset.fileId = String(id);
+        this.dlEl.dataset.fileName = name;
+        this.dlEl.classList.remove('is-disabled');
+        this.dlEl.removeAttribute('aria-disabled');
+        this.dlEl.title = 'Скачать';
+    } else {
+        this.dlEl.href = '#';
+        delete this.dlEl.dataset.fileId;
+        delete this.dlEl.dataset.fileName;
+        this.dlEl.classList.add('is-disabled');
+        this.dlEl.setAttribute('aria-disabled', 'true');
+        this.dlEl.title = 'Оригинал файла удалён';
+    }
+}
+if (this.openEl) {
+    if (rawHref && originalAvailable) {
+        this.openEl.href = rawHref;
+        this.openEl.classList.remove('is-disabled');
+        this.openEl.removeAttribute('aria-disabled');
+        this.openEl.title = 'Открыть в браузере';
+    } else {
+        this.openEl.href = '#';
+        this.openEl.classList.add('is-disabled');
+        this.openEl.setAttribute('aria-disabled', 'true');
+        this.openEl.title = 'Оригинал файла удалён';
+    }
+}
 
             if (this.bodyEl) {
                 this.bodyEl.innerHTML = '';
@@ -3965,10 +5170,51 @@ if (this.openEl) this.openEl.href = rawHref;
                     const img = document.createElement('img');
                     img.className = 'av-media av-img';
                     img.alt = name;
-                    img.src = rawHref;
                     img.loading = 'lazy';
                     img.decoding = 'async';
-                    img.addEventListener('load', () => { if (this.zoom === 1) this.fitViewerToImage(img); });
+
+                    const previewSrc = previewHref || rawHref;
+                    const rawSrc = rawHref || '';
+                    let triedRaw = false;
+                    if (!originalAvailable && this.metaEl) {
+                        const currentMeta = this.metaEl.textContent || '';
+                        this.metaEl.textContent = currentMeta ? `${currentMeta} • оригинал удалён` : 'оригинал удалён';
+                    }
+
+                    const sameUrl = (a, b) => {
+                        try { return new URL(a, location.href).href === new URL(b, location.href).href; }
+                        catch (_) { return String(a || '') === String(b || ''); }
+                    };
+
+                    const tryRaw = () => {
+                        if (triedRaw || !rawSrc || sameUrl(img.src, rawSrc)) return;
+                        triedRaw = true;
+                        const pre = new Image();
+                        pre.onload = () => { img.src = rawSrc; };
+                        pre.onerror = () => {};
+                        pre.src = rawSrc;
+                    };
+
+                    img.src = previewSrc;
+                    img.addEventListener('load', () => {
+                        if (this.zoom === 1) this.fitViewerToImage(img);
+                        tryRaw();
+                    });
+                    img.addEventListener('error', () => {
+                        if (!triedRaw && rawSrc && !sameUrl(img.src, rawSrc)) {
+                            triedRaw = true;
+                            img.src = rawSrc;
+                            return;
+                        }
+                        if (this.bodyEl) {
+                            const hint = originalAvailable
+                                ? 'Не удалось открыть изображение в предпросмотре. Попробуй скачать файл.'
+                                : 'Оригинал файла удалён. Превью тоже недоступно.';
+                            this.bodyEl.innerHTML = '<div class="av-unknown"><div class="av-unknown-name">' + escapeHtml(name) + '</div><div class="av-unknown-hint">' + escapeHtml(hint) + '</div></div>';
+                            this.mediaEl = null;
+                            this.setZoomButtons(false);
+                        }
+                    });
                     img.addEventListener('dblclick', () => {
                         if (this.zoom === 1) this.setZoom(2);
                         else this.setZoom(1);
@@ -4009,6 +5255,11 @@ if (this.openEl) this.openEl.href = rawHref;
 
     // buttons
     overlay.querySelector('#avClose')?.addEventListener('click', close);
+    overlay.querySelector('#avDownload')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        triggerSignedAttachmentDownload(e.currentTarget);
+    });
     overlay.querySelector('#avZoomIn')?.addEventListener('click', () => {
         const v = attachmentViewer;
         if (v && v.mediaEl && v.mediaEl.tagName === 'IMG') v.bumpZoom(0.25);
@@ -4152,7 +5403,89 @@ async function openArchiveViewer({ id, name }) {
         v.metaEl.textContent = `Файлов: ${entries.length}`;
     } catch (e) {
         v.metaEl.textContent = '';
-        v.bodyEl.innerHTML = `<div class="muted" style="padding:12px;">Просмотр содержимого недоступен. Нужен эндпоинт <b>/api/files/:id/archive</b> (минимум для .zip).</div>`;
+        if (isGoneError(e)) {
+            v.bodyEl.innerHTML = `<div class="muted" style="padding:12px;">Файл больше недоступен: истёк срок хранения.</div>`;
+        } else {
+            v.bodyEl.innerHTML = `<div class="muted" style="padding:12px;">Просмотр содержимого недоступен.</div>`;
+        }
+    }
+}
+
+const textAttachmentPreviewCache = new Map();
+
+async function toggleTextAttachmentPreview(att) {
+    if (!att) return;
+    const already = att.querySelector('.text-attachment-preview');
+
+    document.querySelectorAll('.text-attachment-preview').forEach(el => {
+        if (el !== already) el.remove();
+    });
+    document.querySelectorAll('.msg-attachment.text-open').forEach(el => {
+        if (el !== att) el.classList.remove('text-open');
+    });
+
+    if (already) {
+        already.remove();
+        att.classList.remove('text-open');
+        return;
+    }
+
+    const id = att.getAttribute('data-file-id');
+    const name = att.getAttribute('data-file-name') || 'text.md';
+    const mime = att.getAttribute('data-file-mime') || '';
+    const box = document.createElement('div');
+    box.className = 'text-attachment-preview loading';
+    box.innerHTML = `<div class="text-preview-head"><span>${escapeHtml(name)}</span><span>Загрузка…</span></div>`;
+    att.appendChild(box);
+    att.classList.add('text-open');
+
+    try {
+        const links = await getFileLinks(id);
+        const rawUrl = links?.raw_url || links?.download_url;
+        if (!rawUrl || links?.download_available === false) throw new Error('no_raw_url');
+
+        const res = await fetch(rawUrl, {
+            method: 'GET',
+            headers: { 'Range': `bytes=0-${TEXT_ATTACHMENT_PREVIEW_BYTES - 1}` },
+            credentials: 'same-origin',
+        });
+        if (!res.ok && res.status !== 206) throw new Error(`text_fetch_${res.status}`);
+
+        let txt = await res.text();
+        let clipped = false;
+        if (txt.length > TEXT_ATTACHMENT_MAX_RENDER_CHARS) {
+            txt = txt.slice(0, TEXT_ATTACHMENT_MAX_RENDER_CHARS);
+            clipped = true;
+        }
+        const contentRange = res.headers.get('content-range') || '';
+        if (res.status === 206 || /\/\d+/.test(contentRange)) clipped = true;
+
+        textAttachmentPreviewCache.set(String(id), { name, mime, text: txt, clipped });
+
+        const isMd = isMarkdownAttachmentFile(name, mime);
+        const renderedBody = isMd
+            ? renderMarkdownText(txt, { full: false })
+            : `<pre class="text-preview-body is-plain">${escapeHtml(txt)}</pre>`;
+
+        box.className = 'text-attachment-preview open' + (isMd ? ' markdown-open' : '');
+        const headLabel = isMd ? (clipped ? 'Markdown-фрагмент' : 'Markdown') : (clipped ? 'Показан фрагмент' : 'Открыто');
+        box.innerHTML = `
+          <div class="text-preview-head">
+            <span>${escapeHtml(name)}</span>
+            <div class="text-preview-actions">
+              ${isMd ? '<button type="button" class="text-preview-full">В большое окно</button>' : ''}
+              <button type="button" class="text-preview-collapse">Свернуть</button>
+              <span>${headLabel}</span>
+            </div>
+          </div>
+          <div class="text-preview-body ${isMd ? 'is-markdown' : 'is-plain-wrap'}">${renderedBody}</div>
+        `;
+    } catch (err) {
+        box.className = 'text-attachment-preview error';
+        box.innerHTML = `
+          <div class="text-preview-head"><span>${escapeHtml(name)}</span><span>Ошибка</span></div>
+          <div class="text-preview-error">Не удалось открыть предпросмотр. Скачивание может работать.</div>
+        `;
     }
 }
 
@@ -4164,7 +5497,12 @@ function setupAttachmentUi() {
     // open viewer (image click / file-row click)
     container.addEventListener('click', (e) => {
         const dl = e.target?.closest?.('.att-dl');
-        if (dl) return; // download
+        if (dl) {
+            e.preventDefault();
+            e.stopPropagation();
+            triggerSignedAttachmentDownload(dl);
+            return;
+        }
 
         const archBtn = e.target?.closest?.('.att-archive');
         if (archBtn) {
@@ -4172,10 +5510,53 @@ function setupAttachmentUi() {
             e.stopPropagation();
             const att = archBtn.closest('.msg-attachment');
             if (!att) return;
+            if (att.dataset.expired === '1') {
+                showToast('Файл больше недоступен');
+                return;
+            }
             openArchiveViewer({
                 id: att.getAttribute('data-file-id'),
                 name: att.getAttribute('data-file-name')
             });
+            return;
+        }
+
+        const collapseText = e.target?.closest?.('.text-preview-collapse');
+        if (collapseText) {
+            e.preventDefault();
+            e.stopPropagation();
+            const att = collapseText.closest('.msg-attachment');
+            att?.querySelector?.('.text-attachment-preview')?.remove?.();
+            att?.classList?.remove?.('text-open');
+            return;
+        }
+
+        const fullText = e.target?.closest?.('.text-preview-full');
+        if (fullText) {
+            e.preventDefault();
+            e.stopPropagation();
+            const att = fullText.closest('.msg-attachment');
+            const id = att?.getAttribute?.('data-file-id');
+            const cached = id ? textAttachmentPreviewCache.get(String(id)) : null;
+            if (cached?.text) {
+                openFullMarkdownText(cached.name || 'Markdown', cached.text, cached.clipped ? 'Показан загруженный фрагмент файла' : 'Полный загруженный текст');
+            } else {
+                showToast('Сначала открой предпросмотр файла');
+            }
+            return;
+        }
+
+        const textBtn = e.target?.closest?.('.att-text-toggle');
+        if (textBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const att = textBtn.closest('.msg-attachment');
+            if (!att) return;
+            if (att.dataset.expired === '1') {
+                showToast('Файл больше недоступен');
+                return;
+            }
+            toggleTextAttachmentPreview(att).catch(() => showToast('Не удалось открыть текстовый файл'));
             return;
         }
 
@@ -4198,6 +5579,10 @@ function setupAttachmentUi() {
         if (img) {
             const att = img.closest('.msg-attachment');
             if (!att) return;
+            if (att.dataset.expired === '1') {
+                showToast('Файл больше недоступен');
+                return;
+            }
             const v = ensureAttachmentViewer();
             const msgEl = att.closest('.message');
             const sender = msgEl?.querySelector('.author .name')?.textContent?.trim() || '';
@@ -4217,6 +5602,10 @@ function setupAttachmentUi() {
         if (row) {
             const att = row.closest('.msg-attachment');
             if (!att) return;
+            if (att.dataset.expired === '1') {
+                showToast('Файл больше недоступен');
+                return;
+            }
             const v = ensureAttachmentViewer();
             const msgEl = att.closest('.message');
             const sender = msgEl?.querySelector('.author .name')?.textContent?.trim() || '';
@@ -4238,6 +5627,10 @@ function setupAttachmentUi() {
         if (!vtag) return;
         const att = vtag.closest('.msg-attachment');
         if (!att) return;
+        if (att.dataset.expired === '1') {
+            showToast('Файл больше недоступен');
+            return;
+        }
         const v = ensureAttachmentViewer();
         const msgEl = att.closest('.message');
         const sender = msgEl?.querySelector('.author .name')?.textContent?.trim() || '';
@@ -4275,6 +5668,85 @@ async function getFileLinks(fileId) {
     const expMs = now + Math.max(1, ttl) * 1000;
     _fileLinkCache.set(id, { expMs, data });
     return data;
+}
+
+function isDisabledFileAction(el) {
+    return !!el?.closest?.('.is-disabled,[aria-disabled="true"]');
+}
+
+async function triggerSignedAttachmentDownload(linkEl) {
+    const el = linkEl;
+    if (!el) return;
+    if (isDisabledFileAction(el)) {
+        showToast('Оригинал файла удалён. Доступно только превью.');
+        return;
+    }
+    if (el.dataset.downloading === '1') return;
+
+    const att = el.closest?.('.msg-attachment');
+    const fileId = (el.dataset.fileId || att?.getAttribute?.('data-file-id') || '').toString().trim();
+    const fileName = (el.dataset.fileName || att?.getAttribute?.('data-file-name') || '').toString().trim();
+
+    if (!fileId) {
+        const fallbackHref = (el.getAttribute('href') || '').trim();
+        if (!fallbackHref || fallbackHref === '#') {
+            showToast('Не удалось скачать файл');
+            return;
+        }
+        const fallbackLink = document.createElement('a');
+        fallbackLink.href = fallbackHref;
+        if (fileName) fallbackLink.download = fileName;
+        fallbackLink.rel = 'noopener';
+        fallbackLink.style.display = 'none';
+        document.body.appendChild(fallbackLink);
+        fallbackLink.click();
+        setTimeout(() => { try { fallbackLink.remove(); } catch (_) {} }, 0);
+        return;
+    }
+
+    el.dataset.downloading = '1';
+    el.classList.add('is-loading');
+
+    try {
+        const links = await getFileLinks(fileId);
+        const href = (links?.download_url || '').toString().trim();
+        if (!href || links?.download_available === false || links?.original_available === false) {
+            showToast('Оригинал файла удалён. Доступно только превью.');
+            return;
+        }
+
+        if (att) {
+            att.querySelectorAll?.('a.att-dl')?.forEach?.((a) => {
+                a.href = href;
+                a.dataset.fileId = fileId;
+                if (fileName) a.dataset.fileName = fileName;
+            });
+        }
+
+        el.href = href;
+        el.dataset.fileId = fileId;
+        if (fileName) el.dataset.fileName = fileName;
+
+        const a = document.createElement('a');
+        a.href = href;
+        if (fileName) a.download = fileName;
+        a.rel = 'noopener';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { try { a.remove(); } catch (_) {} }, 0);
+    } catch (err) {
+        console.warn('[ATTACH] signed download failed', err);
+        if (isGoneError(err)) {
+            if (att) markAttachmentExpired(att);
+            showToast('Файл больше недоступен');
+        } else {
+            showToast('Не удалось скачать файл');
+        }
+    } finally {
+        delete el.dataset.downloading;
+        el.classList.remove('is-loading');
+    }
 }
 
 function wireAttachments(root) {
@@ -4318,19 +5790,86 @@ root.querySelectorAll?.('.msg-attachment')?.forEach?.((att) => {
     getFileLinks(id).then((links) => {
         if (!links) return;
 
+        const originalAvailable = links?.original_available !== false && links?.download_available !== false && !!links.download_url;
+        att.classList.toggle('is-thumb-only', !originalAvailable && links?.thumb_available === true);
+
         // download buttons (there can be multiple in one attachment)
         att.querySelectorAll?.('a.att-dl')?.forEach?.((a) => {
-            if (links.download_url) a.href = links.download_url;
+            const fileName = att.getAttribute('data-file-name');
+            if (originalAvailable) {
+                a.dataset.fileId = String(id);
+                if (fileName) a.dataset.fileName = fileName;
+                if (links.download_url) a.href = links.download_url;
+                a.classList.remove('is-disabled');
+                a.removeAttribute('aria-disabled');
+                a.title = 'Скачать';
+            } else {
+                a.href = '#';
+                delete a.dataset.fileId;
+                delete a.dataset.fileName;
+                a.classList.add('is-disabled');
+                a.setAttribute('aria-disabled', 'true');
+                a.title = 'Оригинал файла удалён';
+            }
         });
 
         // image preview + raw
         const img = att.querySelector?.('img.att-img');
         if (img) {
-            if (links.preview_url) {
-                img.src = links.preview_url;
-                try { img.removeAttribute('data-src'); } catch (_) {}
+            const rawUrl = (links.raw_url || '').toString();
+            const previewUrl = (links.preview_url || rawUrl || '').toString();
+
+            if (rawUrl) img.setAttribute('data-raw-src', rawUrl);
+
+            const holder = img.closest?.('.att-preview-image');
+            const setOverlayLabel = (className, text) => {
+                if (!holder) return;
+                holder.querySelectorAll('.att-thumb-only-label, .att-broken-label').forEach((el) => el.remove());
+                const label = document.createElement('div');
+                label.className = className;
+                label.textContent = text;
+                holder.appendChild(label);
+            };
+
+            const markThumbOnlyLoaded = () => {
+                if (!originalAvailable && links?.thumb_available === true && holder && !holder.querySelector('.att-thumb-only-label')) {
+                    setOverlayLabel('att-thumb-only-label', 'Оригинал удалён, доступно только превью');
+                }
+            };
+
+            if (img.dataset.fallbackWired !== '1') {
+                img.dataset.fallbackWired = '1';
+                img.addEventListener('load', () => {
+                    img.classList.remove('is-broken');
+                    markThumbOnlyLoaded();
+                });
+                img.addEventListener('error', () => {
+                    const fallback = (img.getAttribute('data-raw-src') || '').toString();
+                    let current = '';
+                    let next = '';
+                    try { current = new URL(img.currentSrc || img.src || '', location.href).href; } catch (_) { current = img.currentSrc || img.src || ''; }
+                    try { next = new URL(fallback || '', location.href).href; } catch (_) { next = fallback || ''; }
+
+                    if (originalAvailable && fallback && current !== next && img.dataset.rawTried !== '1') {
+                        img.dataset.rawTried = '1';
+                        img.src = fallback;
+                    } else {
+                        img.classList.add('is-broken');
+                        setOverlayLabel(
+                            'att-broken-label',
+                            originalAvailable
+                                ? 'Не удалось открыть предпросмотр. Скачивание может работать.'
+                                : 'Оригинал удалён. Превью недоступно.'
+                        );
+                    }
+                });
             }
-            if (links.raw_url) img.setAttribute('data-raw-src', links.raw_url);
+
+            if (previewUrl) {
+                img.src = previewUrl;
+                try { img.removeAttribute('data-src'); } catch (_) {}
+                if (img.complete && img.naturalWidth > 0) markThumbOnlyLoaded();
+            }
         }
 
         // video
@@ -4348,41 +5887,780 @@ root.querySelectorAll?.('.msg-attachment')?.forEach?.((att) => {
             a.src = links.raw_url;
             try { a.removeAttribute('data-src'); } catch (_) {}
         }
-    }).catch(() => {
-        // ignore
+    }).catch((err) => {
+        if (isGoneError(err)) {
+            markAttachmentExpired(att);
+        }
     });
 });
 
 }
 
-function renderMessageContent(content) {
-    const raw = (content ?? '').toString();
 
-    const renderTextWithLinks = (text) => {
-        const s = (text ?? '').toString();
-        const urlRe = /\bhttps?:\/\/[^\s<]+/gi;
-        if (!urlRe.test(s)) return escapeHtml(s);
-        urlRe.lastIndex = 0;
-        let out = '';
-        let last = 0;
-        for (const m of s.matchAll(urlRe)) {
-            const start = m.index ?? 0;
-            out += escapeHtml(s.slice(last, start));
-            const url = m[0];
-            const safeUrl = url.replace(/["'<>\s]/g, '');
-            out += `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
-            last = start + url.length;
+function trimAutoLinkPunctuation(url) {
+    let clean = (url || '').toString();
+    let tail = '';
+
+    while (/[.,!?;:]$/.test(clean)) {
+        tail = clean.slice(-1) + tail;
+        clean = clean.slice(0, -1);
+    }
+
+    while (/[)\]]$/.test(clean)) {
+        const ch = clean.slice(-1);
+        const opens = ch === ')' ? (clean.match(/\(/g) || []).length : (clean.match(/\[/g) || []).length;
+        const closes = ch === ')' ? (clean.match(/\)/g) || []).length : (clean.match(/\]/g) || []).length;
+        if (closes <= opens) break;
+        tail = ch + tail;
+        clean = clean.slice(0, -1);
+    }
+
+    return { clean, tail };
+}
+
+function isSafeMessageUrl(url) {
+    return /^https?:\/\//i.test((url || '').toString().trim());
+}
+
+const MD_HARD_PLAIN_CHARS = 90000;
+const MD_HARD_PLAIN_LINES = 1200;
+const MD_HARD_MARKERS = 3500;
+const MD_MAX_RENDER_CHARS = 14000;
+const MD_MAX_RENDER_LINES = 360;
+const MD_MAX_INLINE_CHARS = 1200;
+const MD_MAX_BLOCKS = 360;
+const MD_MAX_LIST_ITEMS = 180;
+
+const MESSAGE_TEXT_FILE_THRESHOLD = 4000;
+const TEXT_ATTACHMENT_PREVIEW_BYTES = 64 * 1024;
+const TEXT_ATTACHMENT_MAX_RENDER_CHARS = 72 * 1024;
+
+
+function countMarkdownMarkersFast(src) {
+    let n = 0;
+    for (let i = 0; i < src.length; i++) {
+        const c = src.charCodeAt(i);
+        // *, _, ~, `, [, ], #, >, |, newline
+        if (c === 42 || c === 95 || c === 126 || c === 96 || c === 91 || c === 93 || c === 35 || c === 62 || c === 124 || c === 10) {
+            n++;
+            if (n > MD_HARD_MARKERS) return n;
         }
-        out += escapeHtml(s.slice(last));
+    }
+    return n;
+}
+
+function shouldRenderMarkdownAsPlain(src) {
+    if (!src) return false;
+    if (src.length > MD_HARD_PLAIN_CHARS) return true;
+
+    let lines = 1;
+    let currentLine = 0;
+    let maxLine = 0;
+    for (let i = 0; i < src.length; i++) {
+        if (src.charCodeAt(i) === 10) {
+            lines++;
+            if (currentLine > maxLine) maxLine = currentLine;
+            currentLine = 0;
+            if (lines > MD_HARD_PLAIN_LINES) return true;
+        } else {
+            currentLine++;
+            if (currentLine > 2600) return true;
+        }
+    }
+    if (currentLine > maxLine) maxLine = currentLine;
+    if (maxLine > 2600) return true;
+
+    return countMarkdownMarkersFast(src) > MD_HARD_MARKERS;
+}
+
+function renderPlainTextFast(text, reason = '') {
+    const src = (text ?? '').toString().replace(/\r\n?/g, '\n');
+    if (!src) return '';
+    const note = reason
+        ? `<div class="msg-md-note">${escapeHtml(reason)}</div>`
+        : '';
+    return `<div class="msg-md msg-md-safe-plain">${note}<pre class="msg-md-plain">${escapeHtml(src)}</pre></div>`;
+}
+
+function isTextAttachmentFile(name, mime) {
+    const n = (name || '').toString().toLowerCase();
+    const m = (mime || '').toString().toLowerCase().split(';')[0].trim();
+    if (m.startsWith('text/')) return true;
+    if (m === 'application/json' || m === 'application/xml' || m === 'application/yaml' || m === 'application/x-yaml') return true;
+    return /\.(md|markdown|txt|log|json|csv|tsv|xml|yaml|yml|sql|rs|js|jsx|ts|tsx|css|scss|html|htm|toml|ini|cfg|conf|env|sh|bash|bat|ps1|py|java|kt|go|c|cpp|h|hpp|cs|php|rb|lua|r|swift|dart)$/i.test(n);
+}
+
+function isMarkdownAttachmentFile(name, mime) {
+    const n = (name || '').toString().toLowerCase();
+    const m = (mime || '').toString().toLowerCase().split(';')[0].trim();
+    return m === 'text/markdown' || n.endsWith('.md') || n.endsWith('.markdown');
+}
+
+function buildMarkdownAttachmentName(prefix = 'message') {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '_' + pad(d.getHours()) + '-' + pad(d.getMinutes()) + '-' + pad(d.getSeconds());
+    return prefix + '_' + stamp + '.md';
+}
+
+function makeMarkdownFileFromText(text, name) {
+    const body = (text ?? '').toString().replace(/\r\n?/g, '\n');
+    const safeName = (name || buildMarkdownAttachmentName()).toString().trim() || buildMarkdownAttachmentName();
+    const finalName = safeName.toLowerCase().endsWith('.md') ? safeName : (safeName + '.md');
+
+    // Use text/plain for the multipart body for maximum server compatibility.
+    // The .md extension is enough for LaBerry UI to treat it as Markdown/text.
+    try {
+        return new File([body], finalName, { type: 'text/plain', lastModified: Date.now() });
+    } catch (_) {
+        const blob = new Blob([body], { type: 'application/octet-stream' });
+        blob.name = finalName;
+        blob.lastModified = Date.now();
+        return blob;
+    }
+}
+
+function applyInlineMarksSafe(escaped) {
+    let html = (escaped ?? '').toString();
+    if (html.length > MD_MAX_INLINE_CHARS) return html;
+
+    html = html.replace(/\*\*([^*\n]{1,180})\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/__([^_\n]{1,180})__/g, '<strong>$1</strong>');
+    html = html.replace(/~~([^~\n]{1,180})~~/g, '<del>$1</del>');
+    html = html.replace(/(^|[^*])\*([^*\n]{1,120})\*(?!\*)/g, '$1<em>$2</em>');
+    html = html.replace(/(^|[^_])_([^_\n]{1,120})_(?!_)/g, '$1<em>$2</em>');
+    return html;
+}
+
+function renderInlineMarkdownSafe(text) {
+    const src = (text ?? '').toString();
+    if (!src) return '';
+    if (src.length > MD_MAX_INLINE_CHARS) return escapeHtml(src);
+
+    // Один проход по строке. Без тяжёлых regex на длинных пастах.
+    const tokenRe = /`([^`\n]{1,260})`|\[([^\]\n]{1,120})\]\((https?:\/\/[^\s)<>]{1,500})\)|(https?:\/\/[^\s<]{1,650})/gi;
+    let out = '';
+    let pos = 0;
+    let guard = 0;
+
+    for (const m of src.matchAll(tokenRe)) {
+        guard++;
+        if (guard > 24) break;
+
+        const start = m.index ?? 0;
+        if (start < pos) continue;
+
+        out += applyInlineMarksSafe(escapeHtml(src.slice(pos, start)));
+
+        if (m[1] !== undefined) {
+            out += `<code class="msg-md-code">${escapeHtml(m[1])}</code>`;
+            pos = start + m[0].length;
+            continue;
+        }
+
+        if (m[2] && m[3] && isSafeMessageUrl(m[3])) {
+            const safeUrl = m[3].replace(/["'<>\s]/g, '');
+            out += `<a class="msg-link" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(m[2])}</a>`;
+            pos = start + m[0].length;
+            continue;
+        }
+
+        const rawUrl = (m[4] || '').toString();
+        const { clean, tail } = trimAutoLinkPunctuation(rawUrl);
+        const safeUrl = clean.replace(/["'<>\s]/g, '');
+
+        if (isSafeMessageUrl(safeUrl)) {
+            out += `<a class="msg-link" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(clean)}</a>${applyInlineMarksSafe(escapeHtml(tail))}`;
+        } else {
+            out += applyInlineMarksSafe(escapeHtml(rawUrl));
+        }
+
+        pos = start + rawUrl.length;
+    }
+
+    out += applyInlineMarksSafe(escapeHtml(src.slice(pos)));
+    return out;
+}
+
+
+function splitMarkdownTableRow(line) {
+    let raw = (line ?? '').toString().trim();
+    if (!raw.includes('|')) return [];
+
+    if (raw.startsWith('|')) raw = raw.slice(1);
+    if (raw.endsWith('|')) raw = raw.slice(0, -1);
+
+    const cells = [];
+    let cur = '';
+    let escaped = false;
+    for (const ch of raw) {
+        if (escaped) {
+            cur += ch;
+            escaped = false;
+            continue;
+        }
+        if (ch === '\\') {
+            escaped = true;
+            cur += ch;
+            continue;
+        }
+        if (ch === '|') {
+            cells.push(cur.trim());
+            cur = '';
+            continue;
+        }
+        cur += ch;
+    }
+    cells.push(cur.trim());
+    return cells;
+}
+
+function parseMarkdownTableSeparator(line) {
+    const cells = splitMarkdownTableRow(line);
+    if (cells.length < 2) return null;
+
+    const aligns = [];
+    for (const cell of cells) {
+        const c = cell.trim();
+        if (!/^:?-{3,}:?$/.test(c)) return null;
+        if (c.startsWith(':') && c.endsWith(':')) aligns.push('center');
+        else if (c.endsWith(':')) aligns.push('right');
+        else aligns.push('left');
+    }
+    return aligns;
+}
+
+function isMarkdownTableStart(lines, index) {
+    if (!Array.isArray(lines) || index + 1 >= lines.length) return false;
+    const head = splitMarkdownTableRow(lines[index]);
+    if (head.length < 2) return false;
+    const aligns = parseMarkdownTableSeparator(lines[index + 1]);
+    return !!aligns && aligns.length >= 2;
+}
+
+function renderMarkdownTableBlock(tableRows, aligns) {
+    if (!tableRows.length) return '';
+    const header = tableRows[0];
+    const body = tableRows.slice(1);
+    const colCount = Math.min(Math.max(header.length, aligns.length), 12);
+    const alignAttr = (idx) => {
+        const a = aligns[idx] || 'left';
+        return a === 'center' || a === 'right' ? ` style="text-align:${a}"` : '';
+    };
+    const normalizeCells = (row) => {
+        const out = row.slice(0, colCount);
+        while (out.length < colCount) out.push('');
         return out;
     };
+
+    const thead = normalizeCells(header)
+        .map((cell, idx) => `<th${alignAttr(idx)}>${renderInlineMarkdownSafe(cell)}</th>`)
+        .join('');
+    const tbody = body
+        .map((row) => `<tr>${normalizeCells(row).map((cell, idx) => `<td${alignAttr(idx)}>${renderInlineMarkdownSafe(cell)}</td>`).join('')}</tr>`)
+        .join('');
+
+    return `<div class="msg-md-table-wrap"><table class="msg-md-table"><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table></div>`;
+}
+
+function isMarkdownBlockStart(line) {
+    return /^\s*```/.test(line)
+        || /^\s{0,3}#{1,3}\s+/.test(line)
+        || /^\s{0,3}([-*_])\s*\1\s*\1[\s\1]*$/.test(line)
+        || /^\s{0,3}>\s?/.test(line)
+        || /^\s{0,3}(?:[-*+]\s+|\d{1,4}[.)]\s+)/.test(line);
+}
+
+function renderPlainTextPreserveNewlines(text) {
+    const src = (text ?? '').toString().replace(/\r\n?/g, '\n');
+    if (!src) return '';
+    if (shouldRenderMarkdownAsPlain(src)) {
+        return renderPlainTextFast(src, 'Длинная Markdown-паста показана как текст, чтобы не подвесить страницу.');
+    }
+    return `<div class="msg-md"><p class="msg-md-p">${src.split('\n').map(renderInlineMarkdownSafe).join('<br>')}</p></div>`;
+}
+
+function renderMarkdownText(text, opts = {}) {
+    const srcOriginal = (text ?? '').toString().replace(/\r\n?/g, '\n');
+    if (!srcOriginal.trim()) return '';
+
+    try {
+        const full = !!opts.full;
+        const maxChars = full ? 90000 : MD_MAX_RENDER_CHARS;
+        const maxLines = full ? 1200 : MD_MAX_RENDER_LINES;
+        let src = srcOriginal;
+        let clipped = false;
+
+        if (src.length > maxChars) {
+            src = src.slice(0, maxChars);
+            clipped = true;
+        }
+
+        let lines = src.split('\n');
+        if (lines.length > maxLines) {
+            lines = lines.slice(0, maxLines);
+            clipped = true;
+        }
+
+        const blocks = [];
+        let i = 0;
+
+        const pushBlock = (html) => {
+            if (blocks.length < MD_MAX_BLOCKS) blocks.push(html);
+        };
+
+        const skipBlank = () => {
+            while (i < lines.length && !lines[i].trim()) i++;
+        };
+
+        while (i < lines.length && blocks.length < MD_MAX_BLOCKS) {
+            skipBlank();
+            if (i >= lines.length) break;
+
+            const line = lines[i];
+
+            const fence = line.match(/^\s*```+\s*([^`\s]{0,32})?.*$/i);
+            if (fence) {
+                const lang = (fence[1] || '').trim();
+                i++;
+                const code = [];
+                let codeChars = 0;
+                const maxCodeChars = full ? 40000 : 9000;
+                while (i < lines.length && !/^\s*```+\s*$/.test(lines[i])) {
+                    const ln = lines[i];
+                    codeChars += ln.length + 1;
+                    if (codeChars <= maxCodeChars) code.push(ln);
+                    i++;
+                }
+                if (i < lines.length && /^\s*```+\s*$/.test(lines[i])) i++;
+                if (codeChars > maxCodeChars) code.push('…код обрезан для безопасности интерфейса');
+                pushBlock(`<pre class="msg-md-pre"${lang ? ` data-lang="${escapeHtml(lang)}"` : ''}><code>${escapeHtml(code.join('\n'))}</code></pre>`);
+                continue;
+            }
+
+            const h = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+            if (h) {
+                const level = Math.min(3, h[1].length);
+                pushBlock(`<h${level} class="msg-md-h msg-md-h${level}">${renderInlineMarkdownSafe(h[2])}</h${level}>`);
+                i++;
+                continue;
+            }
+
+            if (/^\s{0,3}([-*_])\s*\1\s*\1[\s\1]*$/.test(line)) {
+                pushBlock('<hr class="msg-md-hr">');
+                i++;
+                continue;
+            }
+
+            if (isMarkdownTableStart(lines, i)) {
+                const aligns = parseMarkdownTableSeparator(lines[i + 1]) || [];
+                const tableRows = [splitMarkdownTableRow(lines[i])];
+                i += 2;
+                const maxTableRows = full ? 160 : 60;
+                while (i < lines.length && lines[i].trim() && lines[i].includes('|') && tableRows.length < maxTableRows) {
+                    const cells = splitMarkdownTableRow(lines[i]);
+                    if (cells.length < 2) break;
+                    tableRows.push(cells);
+                    i++;
+                }
+                while (i < lines.length && lines[i].trim() && lines[i].includes('|')) i++;
+                pushBlock(renderMarkdownTableBlock(tableRows, aligns));
+                continue;
+            }
+
+            if (/^\s{0,3}>\s?/.test(line)) {
+                const q = [];
+                while (i < lines.length && q.length < 80 && /^\s{0,3}>\s?/.test(lines[i])) {
+                    q.push(lines[i].replace(/^\s{0,3}>\s?/, ''));
+                    i++;
+                }
+                while (i < lines.length && /^\s{0,3}>\s?/.test(lines[i])) i++;
+                pushBlock(`<blockquote class="msg-md-quote">${q.map(renderInlineMarkdownSafe).join('<br>')}</blockquote>`);
+                continue;
+            }
+
+            if (/^\s{0,3}[-*+]\s+/.test(line)) {
+                const items = [];
+                while (i < lines.length && items.length < MD_MAX_LIST_ITEMS) {
+                    const m = lines[i].match(/^\s{0,3}[-*+]\s+(.+)$/);
+                    if (!m) break;
+                    items.push(`<li>${renderInlineMarkdownSafe(m[1])}</li>`);
+                    i++;
+                }
+                while (i < lines.length && /^\s{0,3}[-*+]\s+/.test(lines[i])) i++;
+                pushBlock(`<ul class="msg-md-list">${items.join('')}</ul>`);
+                continue;
+            }
+
+            if (/^\s{0,3}\d{1,4}[.)]\s+/.test(line)) {
+                const items = [];
+                while (i < lines.length && items.length < MD_MAX_LIST_ITEMS) {
+                    const m = lines[i].match(/^\s{0,3}\d{1,4}[.)]\s+(.+)$/);
+                    if (!m) break;
+                    items.push(`<li>${renderInlineMarkdownSafe(m[1])}</li>`);
+                    i++;
+                }
+                while (i < lines.length && /^\s{0,3}\d{1,4}[.)]\s+/.test(lines[i])) i++;
+                pushBlock(`<ol class="msg-md-list">${items.join('')}</ol>`);
+                continue;
+            }
+
+            const para = [];
+            let paraChars = 0;
+            while (i < lines.length && lines[i].trim() && !isMarkdownBlockStart(lines[i])) {
+                paraChars += lines[i].length + 1;
+                if (para.length < 80 && paraChars <= (full ? 9000 : 4500)) para.push(lines[i]);
+                i++;
+            }
+
+            if (para.length) {
+                pushBlock(`<p class="msg-md-p">${para.map(renderInlineMarkdownSafe).join('<br>')}</p>`);
+                continue;
+            }
+
+            i++;
+        }
+
+        if (clipped || i < lines.length || blocks.length >= MD_MAX_BLOCKS) {
+            pushBlock('<div class="msg-md-note">Показан форматированный фрагмент. Полный текст можно открыть кнопкой рядом с сообщением/файлом.</div>');
+        }
+
+        return `<div class="msg-md">${blocks.join('')}</div>`;
+    } catch (err) {
+        console.warn('[Markdown] fallback to plain text', err);
+        return renderPlainTextFast(srcOriginal, 'Markdown не обработан: показан обычный текст.');
+    }
+}
+
+function normalizeUrlForPreview(rawUrl) {
+    try {
+        const { clean } = trimAutoLinkPunctuation((rawUrl || '').toString().trim());
+        if (!isSafeMessageUrl(clean)) return null;
+        const u = new URL(clean, window.location.href);
+        if (!/^https?:$/i.test(u.protocol)) return null;
+        return u;
+    } catch (_) {
+        return null;
+    }
+}
+
+function extractMessageUrls(rawText) {
+    const LINK_PREVIEW_SCAN_CHARS = 16000;
+    const src = (rawText || '').toString();
+    const scan = src.length > LINK_PREVIEW_SCAN_CHARS ? src.slice(0, LINK_PREVIEW_SCAN_CHARS) : src;
+    const cleaned = scan
+        .replace(/\[\[file[:=]\d+\|[^\]]*\]\]/g, ' ')
+        .replace(/\[\[file:\d+\]\][^\]]*\]\]/g, ' ');
+    const out = [];
+    const seen = new Set();
+    const re = /https?:\/\/[^\s<>"']{3,1200}/gi;
+    let m;
+    while ((m = re.exec(cleaned)) !== null && out.length < 4) {
+        const u = normalizeUrlForPreview(m[0]);
+        if (!u) continue;
+        const key = u.href;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(u);
+    }
+    return out;
+}
+
+function youtubeVideoIdFromUrl(u) {
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'youtu.be') {
+        const id = u.pathname.split('/').filter(Boolean)[0] || '';
+        return /^[a-zA-Z0-9_-]{6,32}$/.test(id) ? id : null;
+    }
+    if (host === 'youtube.com' || host === 'm.youtube.com' || host === 'music.youtube.com' || host === 'youtube-nocookie.com') {
+        const v = u.searchParams.get('v');
+        if (v && /^[a-zA-Z0-9_-]{6,32}$/.test(v)) return v;
+        const parts = u.pathname.split('/').filter(Boolean);
+        const known = ['shorts', 'embed', 'live', 'v'];
+        if (known.includes(parts[0]) && parts[1] && /^[a-zA-Z0-9_-]{6,32}$/.test(parts[1])) return parts[1];
+    }
+    return null;
+}
+
+function rutubeVideoIdFromUrl(u) {
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host !== 'rutube.ru') return null;
+    const parts = u.pathname.split('/').filter(Boolean);
+    const idx = parts.indexOf('video');
+    const id = idx >= 0 ? parts[idx + 1] : null;
+    return id && /^[a-zA-Z0-9_-]{8,80}$/.test(id) ? id : null;
+}
+
+function vimeoVideoIdFromUrl(u) {
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host !== 'vimeo.com' && host !== 'player.vimeo.com') return null;
+    const parts = u.pathname.split('/').filter(Boolean);
+    const id = parts.find((p) => /^\d{5,20}$/.test(p));
+    return id || null;
+}
+
+function googleDriveFileIdFromUrl(u) {
+    const host = u.hostname.toLowerCase();
+    if (!host.endsWith('drive.google.com') && !host.endsWith('docs.google.com')) return null;
+
+    const byQuery = u.searchParams.get('id');
+    if (byQuery && /^[a-zA-Z0-9_-]{10,200}$/.test(byQuery)) return byQuery;
+
+    const parts = u.pathname.split('/').filter(Boolean);
+    const dIdx = parts.indexOf('d');
+    if (dIdx >= 0 && parts[dIdx + 1] && /^[a-zA-Z0-9_-]{10,200}$/.test(parts[dIdx + 1])) {
+        return parts[dIdx + 1];
+    }
+
+    return null;
+}
+
+function providerNameForUrl(u) {
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host.includes('youtube.com') || host === 'youtu.be') return 'YouTube';
+    if (host.includes('rutube.ru')) return 'RuTube';
+    if (host.includes('vimeo.com')) return 'Vimeo';
+    if (host.includes('drive.google.com') || host.includes('docs.google.com')) return 'Google Drive';
+    if (host.includes('disk.yandex.') || host.includes('yadi.sk')) return 'Яндекс Диск';
+    if (host.includes('yandex.')) return 'Яндекс';
+    return host;
+}
+
+function linkHostText(u) {
+    try { return u.hostname.replace(/^www\./, ''); } catch (_) { return 'внешний сайт'; }
+}
+
+function renderExternalWarningCard(u, opts = {}) {
+    const provider = opts.provider || providerNameForUrl(u);
+    const title = opts.title || 'Внешняя ссылка';
+    const hint = opts.hint || 'Предпросмотр недоступен. Проверь адрес перед переходом.';
+    const href = escapeHtml(u.href);
+    const host = escapeHtml(linkHostText(u));
+
+    return `
+      <div class="link-embed link-warning-card">
+        <div class="link-card-mark">!</div>
+        <div class="link-card-main">
+          <div class="link-card-provider">${escapeHtml(provider)}</div>
+          <div class="link-card-title">${escapeHtml(title)}</div>
+          <div class="link-card-url">${host}</div>
+          <div class="link-card-hint">${escapeHtml(hint)}</div>
+          <div class="link-card-actions">
+            <a class="link-card-open external-confirm" href="${href}" target="_blank" rel="noopener noreferrer" data-external-url="${href}" data-external-provider="${escapeHtml(provider)}">Перейти</a>
+          </div>
+        </div>
+      </div>
+    `;
+}
+
+function renderKnownLinkEmbed(u) {
+    const ytId = youtubeVideoIdFromUrl(u);
+    if (ytId) {
+        const embed = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(ytId)}`;
+        return `
+          <div class="link-embed link-video-embed" data-provider="youtube">
+            <div class="link-embed-head">
+              <span class="link-provider">YouTube</span>
+              <a class="link-open-direct" href="${escapeHtml(u.href)}" target="_blank" rel="noopener noreferrer">Открыть</a>
+            </div>
+            <div class="link-frame-wrap">
+              <iframe class="link-frame" src="${escapeHtml(embed)}" title="YouTube video" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+            </div>
+          </div>
+        `;
+    }
+
+    const rtId = rutubeVideoIdFromUrl(u);
+    if (rtId) {
+        const embed = `https://rutube.ru/play/embed/${encodeURIComponent(rtId)}`;
+        return `
+          <div class="link-embed link-video-embed" data-provider="rutube">
+            <div class="link-embed-head">
+              <span class="link-provider">RuTube</span>
+              <a class="link-open-direct" href="${escapeHtml(u.href)}" target="_blank" rel="noopener noreferrer">Открыть</a>
+            </div>
+            <div class="link-frame-wrap">
+              <iframe class="link-frame" src="${escapeHtml(embed)}" title="RuTube video" loading="lazy" allow="clipboard-write; encrypted-media; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+            </div>
+          </div>
+        `;
+    }
+
+    const vmId = vimeoVideoIdFromUrl(u);
+    if (vmId) {
+        const embed = `https://player.vimeo.com/video/${encodeURIComponent(vmId)}`;
+        return `
+          <div class="link-embed link-video-embed" data-provider="vimeo">
+            <div class="link-embed-head">
+              <span class="link-provider">Vimeo</span>
+              <a class="link-open-direct" href="${escapeHtml(u.href)}" target="_blank" rel="noopener noreferrer">Открыть</a>
+            </div>
+            <div class="link-frame-wrap">
+              <iframe class="link-frame" src="${escapeHtml(embed)}" title="Vimeo video" loading="lazy" allow="autoplay; fullscreen; picture-in-picture; clipboard-write" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+            </div>
+          </div>
+        `;
+    }
+
+    const driveId = googleDriveFileIdFromUrl(u);
+    if (driveId) {
+        // Google Drive often blocks iframe preview for private/limited files.
+        // A compact warning card is safer than a large broken frame.
+        return renderExternalWarningCard(u, {
+            provider: 'Google Drive',
+            title: 'Внешний файл Google Drive',
+            hint: 'Предпросмотр зависит от доступа к файлу. Открывай только если доверяешь отправителю.'
+        });
+    }
+
+    const host = u.hostname.toLowerCase();
+    if (host.includes('disk.yandex.') || host.includes('yadi.sk') || host.includes('yandex.')) {
+        return renderExternalWarningCard(u, {
+            provider: providerNameForUrl(u),
+            title: 'Внешний контент',
+            hint: 'Авто-предпросмотр для этой ссылки не включён. Перейди вручную, если доверяешь отправителю.'
+        });
+    }
+
+    return renderExternalWarningCard(u);
+}
+
+function renderLinkEmbedsForMessage(rawText) {
+    const urls = extractMessageUrls(rawText);
+    if (!urls.length) return '';
+
+    const cards = [];
+    for (const u of urls) {
+        const card = renderKnownLinkEmbed(u);
+        if (card) cards.push(card);
+    }
+
+    if (!cards.length) return '';
+    return `<div class="message-link-embeds">${cards.join('')}</div>`;
+}
+
+let externalGuardReady = false;
+
+function setupExternalLinkGuards() {
+    if (externalGuardReady) return;
+    externalGuardReady = true;
+
+    document.addEventListener('click', (e) => {
+        const link = e.target?.closest?.('a.external-confirm');
+        if (!link) return;
+
+        const url = (link.dataset.externalUrl || link.href || '').toString();
+        const provider = (link.dataset.externalProvider || 'внешний сайт').toString();
+        if (!url) return;
+
+        const ok = window.confirm(`Открыть внешнюю ссылку (${provider})?\n\n${url}\n\nLaBerry не контролирует этот сайт.`);
+        if (!ok) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    }, true);
+}
+
+
+function ensureMarkdownFullViewer() {
+    let overlay = document.getElementById('markdownFullViewer');
+    if (overlay) return overlay;
+
+    overlay = document.createElement('div');
+    overlay.id = 'markdownFullViewer';
+    overlay.className = 'modal-overlay hidden markdown-full-overlay';
+    overlay.innerHTML = `
+      <div class="markdown-full-dialog" role="dialog" aria-modal="true" aria-label="Полный Markdown">
+        <div class="markdown-full-head">
+          <div>
+            <div class="markdown-full-title">Markdown</div>
+            <div class="markdown-full-sub" data-md-full-meta></div>
+          </div>
+          <button type="button" class="modal-close" data-md-full-close>✕</button>
+        </div>
+        <div class="markdown-full-body" data-md-full-body></div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.classList.add('hidden');
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay || e.target.closest('[data-md-full-close]')) close();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !overlay.classList.contains('hidden')) close();
+    });
+    return overlay;
+}
+
+
+function openFullMarkdownText(title, raw, metaText = '') {
+    const overlay = ensureMarkdownFullViewer();
+    const body = overlay.querySelector('[data-md-full-body]');
+    const meta = overlay.querySelector('[data-md-full-meta]');
+    const titleEl = overlay.querySelector('.markdown-full-title');
+    const src = (raw ?? '').toString();
+    if (titleEl) titleEl.textContent = title || 'Markdown';
+    if (body) body.innerHTML = renderMarkdownText(src, { full: true });
+    if (meta) meta.textContent = metaText || `${src.split('\n').length} строк · ${formatBytes(new Blob([src]).size)}`;
+    overlay.classList.remove('hidden');
+}
+
+function openFullMarkdownMessage(messageId) {
+    const id = Number(messageId);
+    if (!Number.isFinite(id) || id <= 0) return;
+    const cached = window.__lbMsgCache?.get?.(id);
+    const raw = (cached?.content || '').toString();
+    if (!raw) return;
+
+    const overlay = ensureMarkdownFullViewer();
+    const body = overlay.querySelector('[data-md-full-body]');
+    const meta = overlay.querySelector('[data-md-full-meta]');
+    if (meta) meta.textContent = `Сообщение #${id} · ${raw.split('\n').length} строк · ${formatBytes(new Blob([raw]).size)}`;
+    if (body) body.innerHTML = renderMarkdownText(raw, { full: true });
+    overlay.classList.remove('hidden');
+}
+
+if (!window.__lbMarkdownFullWired) {
+    window.__lbMarkdownFullWired = true;
+    document.addEventListener('click', (e) => {
+        const btn = e.target?.closest?.('.msg-md-open-full');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        openFullMarkdownMessage(btn.dataset.msgId);
+    });
+}
+
+function shouldRenderLinkEmbedsForMessage(rawText) {
+    const src = (rawText || '').toString();
+    if (!src) return false;
+    if (shouldRenderMarkdownAsPlain(src)) return false;
+    if (src.length > 2800) return false;
+
+    let lines = 1;
+    for (let i = 0; i < src.length; i++) {
+        if (src.charCodeAt(i) === 10) {
+            lines++;
+            if (lines > 70) return false;
+        }
+    }
+
+    return true;
+}
+
+
+function renderMessageContent(content) {
+    const raw = (content ?? '').toString();
 
     // Support both canonical and broken legacy markers.
     // canonical: [[file:ID|NAME|MIME|SIZE]]
     // broken:    [[file:ID]]NAME|MIME|SIZE]]
     const reAny = /\[\[file[:=](\d+)\|([^|]*)\|([^|]*)\|(\d+)\]\]|\[\[file[:=](\d+)\]\]([^|\]]*)\|([^|\]]*)\|(\d+)\]\]/g;
     if (!reAny.test(raw)) {
-        return renderTextWithLinks(raw);
+        const body = renderMarkdownText(raw);
+        const embeds = shouldRenderLinkEmbedsForMessage(raw) ? renderLinkEmbedsForMessage(raw) : '';
+        return body + embeds;
     }
 
     reAny.lastIndex = 0;
@@ -4417,7 +6695,7 @@ function renderMessageContent(content) {
 
     for (const m of raw.matchAll(reAny)) {
         const start = m.index ?? 0;
-        out += renderTextWithLinks(raw.slice(last, start));
+        out += renderMarkdownText(raw.slice(last, start));
 
         // canonical groups: 1-4, broken groups: 5-8
         const isCanonical = m[1] !== undefined && m[1] !== null;
@@ -4430,12 +6708,13 @@ function renderMessageContent(content) {
         try { name = decodeURIComponent(encName); } catch (_) { name = encName; }
         if (!name) name = `file_${id}`;
 
-        const isGif = mime === 'image/gif';
-        const isImage = mime.startsWith('image/') && mime !== 'image/svg+xml';
-        const isVideo = mime.startsWith('video/');
-        const isAudio = mime.startsWith('audio/');
-        const isMedia = isImage || isVideo || isAudio;
         const lowerName = (name || '').toString().toLowerCase();
+        const isGif = mime === 'image/gif' || lowerName.endsWith('.gif');
+        const isImage = (mime.startsWith('image/') && mime !== 'image/svg+xml') || /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(lowerName);
+        const isVideo = mime.startsWith('video/') || /\.(mp4|webm|mov|m4v|avi|mkv)$/i.test(lowerName);
+        const isAudio = mime.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac|aac)$/i.test(lowerName);
+        const isMedia = isImage || isVideo || isAudio;
+        const isTextDoc = (!isMedia) && isTextAttachmentFile(name, mime);
         const isArchive = (!isMedia) && (
             mime === 'application/zip' || mime === 'application/x-zip-compressed' ||
             lowerName.endsWith('.zip') || lowerName.endsWith('.rar') || lowerName.endsWith('.7z') ||
@@ -4443,9 +6722,9 @@ function renderMessageContent(content) {
         );
         const sizeText = formatBytes(size);
 
-        const href = `/api/files/${id}`; // download
-        const rawHref = `/api/files/${id}/raw`; // inline / stream
-        const previewHref = isGif ? rawHref : `/api/files/${id}/preview`;
+        const href = '#'; // resolved on click via signed link
+        const rawHref = `/api/files/${encodeURIComponent(id)}/raw`; // inline / stream
+        const previewHref = isGif ? rawHref : `/api/files/${encodeURIComponent(id)}/preview`;
         const badge = fileBadge(name, mime);
         const mediaKindClass = isImage ? 'media-image' : isVideo ? 'media-video' : isAudio ? 'media-audio' : 'file-generic';
 
@@ -4459,16 +6738,19 @@ function renderMessageContent(content) {
                     ? `<div class="att-preview att-preview-audio"><div class="att-audio-shell"><div class="att-audio-icon" aria-hidden="true">♫</div><div class="att-audio-main"><div class="att-audio-title" title="${escapeHtml(name)}">${escapeHtml(name)}</div><div class="att-audio-sub">${escapeHtml(badge)}${sizeText ? ` • ${escapeHtml(sizeText)}` : ''}</div><audio class="att-audio" controls preload="metadata"></audio></div></div><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`
                     : '';
 
-        const rowHtml = isAudio
+        const rowHtml = isMedia
             ? ''
-            : `<div class="file-row"><span class="file-badge">${escapeHtml(badge)}</span><span class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="file-meta">${sizeText ? escapeHtml(sizeText) : ''}</span>${isArchive ? `<button type="button" class="att-archive" data-act="archive" title="Посмотреть содержимое">📦</button>` : ''}<a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`;
+            : `<div class="file-row"><span class="file-badge">${escapeHtml(badge)}</span><span class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span><span class="file-meta">${sizeText ? escapeHtml(sizeText) : ''}</span>${isTextDoc ? `<button type="button" class="att-text-toggle" title="Развернуть текст">Открыть</button>` : ''}${isArchive ? `<button type="button" class="att-archive" data-act="archive" title="Посмотреть содержимое">📦</button>` : ''}<a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`;
 
-        out += `<div class="msg-attachment ${isMedia ? 'media' : 'file'} ${mediaKindClass} ${isVideo ? 'hover-dl' : ''}" ${attData}>${previewHtml}${rowHtml}</div>`;
+        out += `<div class="msg-attachment ${isMedia ? 'media' : 'file'} ${mediaKindClass} ${isTextDoc ? 'text-doc' : ''} ${isVideo ? 'hover-dl' : ''}" ${attData}>${previewHtml}${rowHtml}</div>`;
 
         last = start + m[0].length;
     }
 
-    out += renderTextWithLinks(raw.slice(last));
+    out += renderMarkdownText(raw.slice(last));
+    if (shouldRenderLinkEmbedsForMessage(raw)) {
+        out += renderLinkEmbedsForMessage(raw);
+    }
     return out;
 }
 
@@ -4577,6 +6859,14 @@ function addMessage(msg, opts = {}) {
         </div>
     `;
 
+    try {
+        const midForFull = Number(msg?.id);
+        const rawForFull = (msg?.content || '').toString();
+        if (Number.isFinite(midForFull) && midForFull > 0 && rawForFull.length > 3500 && !rawForFull.includes('[[file:')) {
+            div.querySelector('.text')?.insertAdjacentHTML('beforeend', `<button type="button" class="msg-md-open-full" data-msg-id="${escapeHtml(midForFull)}">Открыть полную Markdown-пасту</button>`);
+        }
+    } catch (_) {}
+
     if (div.querySelector('.msg-attachment')) div.classList.add('has-attachment');
     if (div.querySelector('.msg-attachment.media')) div.classList.add('has-media');
 
@@ -4595,6 +6885,7 @@ function addMessage(msg, opts = {}) {
     }
 
     wireAttachments(div);
+    wireAvatarFallbacks(div);
 
     // user menu on avatar/name
     if (senderId && !isCurrentUser) {
@@ -4706,15 +6997,28 @@ function addMessage(msg, opts = {}) {
             if (!isCurrentUser) return;
             const ok = await askConfirmModal({ title: 'Удаление сообщения', text: 'Удалить сообщение? Это действие нельзя отменить.', okText: 'Удалить', cancelText: 'Отмена', danger: true });
             if (!ok) return;
+            btn.disabled = true;
+            btn.classList.add('is-loading');
+
             try {
                 await api(`/api/messages/${mid}`, { method: 'DELETE' });
+
+                document.querySelectorAll(`.message[data-msg-id="${mid}"]`).forEach((el) => {
+                    try { el.remove(); } catch (_) {}
+                });
+
+                showToast('Сообщение удалено');
             } catch (err) {
                 console.warn('[UI] delete message failed', err);
-                return;
+                const status = err?.status ? ` (${err.status})` : '';
+                const msgText = (err?.message || '').toString();
+                const detailMatch = msgText.match(/\{\s*"detail"\s*:\s*"([^"]+)"\s*\}/);
+                const detail = detailMatch ? `: ${detailMatch[1]}` : '';
+                showToast(`Не удалось удалить сообщение${status}${detail}`);
+            } finally {
+                btn.disabled = false;
+                btn.classList.remove('is-loading');
             }
-            try {
-                div.remove();
-            } catch (_) {}
             return;
         }
 
@@ -4879,13 +7183,14 @@ async function initializeApp() {
         // global buttons
         document.getElementById('settingsBtn')?.addEventListener('click', openSettings);
         document.getElementById('pinsBtn')?.addEventListener('click', () => openPinsModal());
-        document.getElementById('addChannelBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); createChannelFlow(); });
+        document.getElementById('addChannelBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openCurrentServerMenu(e.currentTarget); });
         document.getElementById('dmCallBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); startDmCall(); });
+        setupServerSearch();
         document.addEventListener('click', (e) => {
             const t = e.target;
             if (t && t.id === 'addServerBtn') {
                 e.preventDefault();
-                createServerFlow();
+                openServerHubModal('create');
             }
         });
 
@@ -4893,14 +7198,22 @@ async function initializeApp() {
         document.getElementById('mobileServersBtn')?.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            toggleServersMenu();
+            if (document.body.classList.contains('servers-open')) {
+                hideServersMenu();
+                return;
+            }
+            hideChannelsMenu();
+            hideMembersMenu();
+            showServersMenu();
         });
 
-        document.getElementById('mobileChannelsBtn')?.addEventListener('click', (e) => {
+        document.getElementById('friendsBtn')?.addEventListener('click', (e) => {
+            if (!isTouchUi()) return;
             e.preventDefault();
             e.stopPropagation();
-            toggleChannelsMenu();
+            showMobileDmDrawer().catch((err) => console.warn('[UI] mobile friends drawer failed', err));
         });
+
 
         document.getElementById('mobileMembersBtn')?.addEventListener('click', (e) => {
             e.preventDefault();
@@ -4912,10 +7225,17 @@ async function initializeApp() {
             closeAllDrawers();
         });
 
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape' && document.body.classList.contains('drawer-open')) {
+                closeAllDrawers();
+            }
+        });
+
 
         setupWebSocketHandlers();
         setupMessageComposer();
         setupMessagesInfiniteScroll();
+        setupExternalLinkGuards();
         wireMessagesAutoScroll();
         ensureJumpToPresentBtn();
         updateJumpBtn();

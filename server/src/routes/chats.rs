@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
@@ -33,7 +34,9 @@ pub struct ChatRow {
 
     // computed for list
     pub unread_count: i64,
+    pub has_unread: bool,
     pub last_message_id: Option<i64>,
+    pub last_read_message_id: Option<i64>,
     pub last_message_preview: Option<String>,
 }
 
@@ -394,8 +397,10 @@ async fn get_one(
         created_at: r.get("created_at"),
         kind: r.get::<String, _>("kind"),
         unread_count: 0,
+        has_unread: false,
         last_message_id: None,
         last_message_preview: None,
+        last_read_message_id: None,
     };
 
     (StatusCode::OK, Json(chat)).into_response()
@@ -546,10 +551,30 @@ async fn mark_read(
 ) -> impl IntoResponse {
     let db = &st.db;
 
-    let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+    let access = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT 1
+        FROM chats c
+        WHERE c.id = ?
+          AND (
+            EXISTS (
+                SELECT 1
+                FROM chat_participants p
+                WHERE p.chat_id = c.id AND p.user_id = ?
+            )
+            OR (
+                c.server_id IS NOT NULL AND c.is_private = 0 AND EXISTS (
+                    SELECT 1
+                    FROM server_members sm
+                    WHERE sm.server_id = c.server_id AND sm.user_id = ?
+                )
+            )
+          )
+        LIMIT 1
+        "#,
     )
     .bind(chat_id)
+    .bind(me.id)
     .bind(me.id)
     .fetch_optional(db)
     .await
@@ -557,7 +582,7 @@ async fn mark_read(
     .flatten()
     .is_some();
 
-    if !member {
+    if !access {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -569,7 +594,16 @@ async fn mark_read(
     .await
     .unwrap_or(0);
 
-    let last_read = body.last_read_message_id.unwrap_or(max_id).max(0).min(max_id);
+    let requested = body.last_read_message_id.unwrap_or(max_id).max(0).min(max_id);
+
+    let last_read = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND id <= ?",
+    )
+    .bind(chat_id)
+    .bind(requested)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
 
     let now = auth::now_iso();
     let q = sqlx::query(
@@ -625,7 +659,18 @@ async fn list_my(
                 LIMIT 1
             ) AS last_message_preview,
             (
-                SELECT COUNT(*)
+                SELECT COALESCE(MAX(m.id), 0)
+                FROM messages m
+                WHERE m.chat_id = c.id
+                  AND m.id <= COALESCE((
+                    SELECT r.last_read_message_id
+                    FROM chat_reads r
+                    WHERE r.chat_id = c.id AND r.user_id = ?
+                    LIMIT 1
+                  ), 0)
+            ) AS last_read_message_id,
+            CASE WHEN EXISTS(
+                SELECT 1
                 FROM messages m
                 WHERE m.chat_id = c.id
                   AND m.id > COALESCE((
@@ -634,13 +679,15 @@ async fn list_my(
                     WHERE r.chat_id = c.id AND r.user_id = ?
                     LIMIT 1
                   ), 0)
-            ) AS unread_count
+                LIMIT 1
+            ) THEN 1 ELSE 0 END AS unread_count
         FROM chats c
         JOIN chat_participants p ON p.chat_id = c.id
         WHERE p.user_id = ?
         ORDER BY COALESCE(last_message_id, c.id) DESC
         "#,
     )
+    .bind(me.id)
     .bind(me.id)
     .bind(me.id)
     .fetch_all(db)
@@ -657,7 +704,9 @@ async fn list_my(
             created_at: r.get("created_at"),
             kind: r.get::<String, _>("kind"),
             unread_count: r.get::<i64, _>("unread_count"),
+            has_unread: r.get::<i64, _>("unread_count") > 0,
             last_message_id: r.try_get("last_message_id").ok(),
+            last_read_message_id: r.try_get("last_read_message_id").ok(),
             last_message_preview: r.try_get("last_message_preview").ok(),
         })
         .collect::<Vec<_>>();

@@ -1,5 +1,5 @@
 import { api } from "./api.js?v=10";
-import { showUserMenu } from "./user-menu.js?v=8";
+import { showUserMenu } from "./user-menu.js?v=9";
 
 let friendsOpen = false;
 

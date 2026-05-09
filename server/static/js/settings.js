@@ -190,6 +190,7 @@ export function createSettingsUI(opts = {}) {
 
     let currentSettings = { ...DEFAULT_SETTINGS };
     let saveTimer = null;
+    let toastTimer = null;
 
     const closeSections = () => {
         const modal = overlay?.querySelector('.settings-modal');
@@ -203,6 +204,8 @@ export function createSettingsUI(opts = {}) {
 
     const close = () => {
         if (!overlay) return;
+        closeSettingHelp();
+        overlay.querySelector('.settings-save-toast')?.remove();
         overlay.classList.add('hidden');
         closeSections();
         document.removeEventListener('keydown', onEsc);
@@ -243,6 +246,7 @@ export function createSettingsUI(opts = {}) {
         overlay = mountOverlay();
         bindOverlay();
         overlay.classList.remove('hidden');
+        closeSettingHelp();
         closeSections();
 
         document.addEventListener('keydown', onEsc);
@@ -301,32 +305,44 @@ export function createSettingsUI(opts = {}) {
     };
 
     const setBody = (html) => {
+        closeSettingHelp();
         const body = overlay?.querySelector('#settingsBody');
         if (!body) return;
         body.innerHTML = html;
     };
 
     const showInline = (type, text) => {
-        const body = overlay?.querySelector('#settingsBody');
-        if (!body) return;
+        if (!overlay) return;
 
-        let box = body.querySelector('.settings-inline');
-        if (!box) {
-            box = document.createElement('div');
-            box.className = 'settings-inline';
-            body.prepend(box);
+        const modal = overlay.querySelector('.settings-modal') || overlay;
+        let toast = overlay.querySelector('.settings-save-toast');
+
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.className = 'settings-save-toast';
+            modal.appendChild(toast);
         }
 
-        box.className = `settings-inline ${type}`;
-        box.textContent = text;
+        toast.className = `settings-save-toast ${type || 'ok'}`;
+        toast.textContent = text || 'Сохранено';
+        toast.classList.remove('is-hide');
+        toast.classList.add('is-show');
 
-        setTimeout(() => {
-            if (box && box.parentElement) box.remove();
-        }, 2500);
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+            toast.classList.remove('is-show');
+            toast.classList.add('is-hide');
+            setTimeout(() => {
+                if (toast && toast.parentElement && toast.classList.contains('is-hide')) {
+                    toast.remove();
+                }
+            }, 180);
+        }, 1600);
     };
 
     const navigate = async (section) => {
         if (!overlay) return;
+        closeSettingHelp();
         activeSection = section;
         setActiveNav(section);
 
@@ -409,6 +425,18 @@ export function createSettingsUI(opts = {}) {
 
         const s = normalizeSettings(currentSettings);
 
+        const currentEmail = (me?.email || '').toString();
+        const pendingEmail = (me?.email_pending || '').toString();
+        const emailVerified = !!me?.email_verified;
+        const emailInputValue = pendingEmail || currentEmail;
+        const emailStateClass = pendingEmail ? 'pending' : (currentEmail && emailVerified ? 'verified' : 'unverified');
+        const emailStateText = pendingEmail
+            ? `Ожидает подтверждения: ${pendingEmail}`
+            : (currentEmail ? (emailVerified ? 'Email подтверждён' : 'Email не подтверждён') : 'Email не указан');
+        const emailHintText = pendingEmail
+            ? 'Введите код из письма, чтобы применить новый email.'
+            : (currentEmail && !emailVerified ? 'Отправьте код, чтобы подтвердить текущий email.' : 'Email меняется только через код подтверждения.');
+
         setBody(`
           <div class="settings-section">
             <div class="settings-card">
@@ -462,17 +490,37 @@ export function createSettingsUI(opts = {}) {
             </div>
 
             <div class="settings-card">
-              <h4>Контакты и ключи</h4>
-              <div class="form-row">
-                <label>Email</label>
-                <input class="inp" id="meEmail" placeholder="email (опционально)" value="${escapeHtml(me?.email || '')}">
+              <h4>Email</h4>
+              <div class="email-verify-state ${emailStateClass}">
+                <div class="email-verify-dot"></div>
+                <div class="email-verify-main">
+                  <div class="email-verify-title">${escapeHtml(emailStateText)}</div>
+                  <div class="email-verify-desc">${escapeHtml(emailHintText)}</div>
+                </div>
               </div>
+
+              <div class="form-row">
+                <label>Email адрес</label>
+                <input class="inp" id="meEmail" type="email" autocomplete="email" placeholder="name@example.com" value="${escapeHtml(emailInputValue)}">
+              </div>
+              <div class="email-code-actions">
+                <button class="btn btn-secondary" id="requestEmailCode" type="button">Отправить код</button>
+                <div class="email-code-msg" id="emailCodeMsg"></div>
+              </div>
+              <div class="email-code-confirm ${pendingEmail ? 'is-visible' : ''}" id="emailConfirmBox">
+                <input class="inp" id="emailCode" inputmode="numeric" maxlength="6" placeholder="6-значный код">
+                <button class="btn" id="confirmEmailCode" type="button">Подтвердить</button>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <h4>Публичный ключ</h4>
               <div class="form-row">
                 <label>Публичный ключ</label>
                 <textarea class="inp" id="mePubKey" rows="3" placeholder="публичный ключ (опционально)">${escapeHtml(me?.public_encryption_key || '')}</textarea>
               </div>
               <div class="form-actions">
-                <button class="btn btn-secondary" id="saveProfile" type="button">Сохранить</button>
+                <button class="btn btn-secondary" id="saveProfile" type="button">Сохранить ключ</button>
               </div>
             </div>
 
@@ -605,23 +653,102 @@ export function createSettingsUI(opts = {}) {
             });
         }
 
-        overlay.querySelector('#saveProfile')?.addEventListener('click', async () => {
+        const emailMsg = overlay.querySelector('#emailCodeMsg');
+        const emailConfirmBox = overlay.querySelector('#emailConfirmBox');
+        const setEmailMsg = (type, text) => {
+            if (!emailMsg) return;
+            emailMsg.className = `email-code-msg ${type || ''}`;
+            emailMsg.textContent = text || '';
+        };
+
+        overlay.querySelector('#requestEmailCode')?.addEventListener('click', async () => {
+            const btn = overlay.querySelector('#requestEmailCode');
             const email = (overlay.querySelector('#meEmail')?.value || '').trim();
+
+            if (!email || !email.includes('@') || !email.includes('.')) {
+                setEmailMsg('err', 'Введите корректный email');
+                showInline('err', 'Введите корректный email');
+                return;
+            }
+
+            try {
+                if (btn) btn.disabled = true;
+                setEmailMsg('', 'Отправляю код...');
+
+                const res = await api('/api/users/me/email/request_code', {
+                    method: 'POST',
+                    body: JSON.stringify({ email, purpose: 'change_email' }),
+                });
+
+                if (emailConfirmBox) emailConfirmBox.classList.add('is-visible');
+
+                if (res?.debug_code) {
+                    setEmailMsg('ok', `Debug-код: ${res.debug_code}`);
+                } else if (res?.mail_sent) {
+                    setEmailMsg('ok', 'Код отправлен. Проверьте почту.');
+                } else if (res?.delivery === 'not_configured') {
+                    setEmailMsg('err', 'Отправка почты не настроена на сервере.');
+                } else {
+                    setEmailMsg('err', 'Код создан, но письмо не отправлено.');
+                }
+
+                showInline(res?.mail_sent || res?.debug_code ? 'ok' : 'err', res?.mail_sent || res?.debug_code ? 'Код отправлен' : 'Почта не настроена');
+            } catch (e) {
+                console.warn('[SETTINGS] email code request failed', e);
+                const detail = e?.data?.detail || 'Не удалось отправить код';
+                setEmailMsg('err', detail);
+                showInline('err', detail);
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        });
+
+        overlay.querySelector('#confirmEmailCode')?.addEventListener('click', async () => {
+            const btn = overlay.querySelector('#confirmEmailCode');
+            const code = (overlay.querySelector('#emailCode')?.value || '').trim();
+
+            if (!/^\d{6}$/.test(code)) {
+                setEmailMsg('err', 'Введите 6 цифр');
+                showInline('err', 'Введите 6 цифр');
+                return;
+            }
+
+            try {
+                if (btn) btn.disabled = true;
+                await api('/api/users/me/email/confirm_code', {
+                    method: 'POST',
+                    body: JSON.stringify({ code, purpose: 'change_email' }),
+                });
+
+                const updated = await api('/api/users/me');
+                setCurrentUser(updated);
+                showInline('ok', 'Email подтверждён');
+                await renderAccount();
+            } catch (e) {
+                console.warn('[SETTINGS] email confirm failed', e);
+                const detail = e?.data?.detail || 'Не удалось подтвердить email';
+                setEmailMsg('err', detail);
+                showInline('err', detail);
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        });
+
+        overlay.querySelector('#saveProfile')?.addEventListener('click', async () => {
             const public_encryption_key = (overlay.querySelector('#mePubKey')?.value || '').trim();
 
             try {
                 const updated = await api('/api/users/me', {
                     method: 'PUT',
                     body: JSON.stringify({
-                        email: email || null,
                         public_encryption_key: public_encryption_key || null,
                     })
                 });
                 setCurrentUser(updated);
-                showInline('ok', 'Профиль сохранён');
+                showInline('ok', 'Ключ сохранён');
             } catch (e) {
                 console.warn('[SETTINGS] profile save failed', e);
-                showInline('err', 'Не удалось сохранить профиль');
+                showInline('err', 'Не удалось сохранить ключ');
             }
         });
 
@@ -872,6 +999,96 @@ export function createSettingsUI(opts = {}) {
         bindToggle('#notifyMentions', 'notify_mentions');
     };
 
+
+    const settingRow = ({ title, desc = '', help = '' }) => `
+      <div class="setting-copy">
+        <div class="setting-head">
+          <div class="setting-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+          ${help ? `<button class="setting-help" type="button" aria-label="Подробнее: ${escapeHtml(title)}" data-help-title="${escapeHtml(title)}" data-help-text="${escapeHtml(help)}">?</button>` : ''}
+        </div>
+        ${desc ? `<div class="setting-desc">${escapeHtml(desc)}</div>` : ''}
+      </div>
+    `;
+
+    const closeSettingHelp = () => {
+        document.querySelectorAll('.setting-help-popover').forEach((el) => el.remove());
+        document.querySelectorAll('.setting-help-backdrop').forEach((el) => el.remove());
+    };
+
+    const openSettingHelp = (btn) => {
+        if (!overlay || !btn) return;
+        closeSettingHelp();
+
+        const title = btn.getAttribute('data-help-title') || 'Подсказка';
+        const text = btn.getAttribute('data-help-text') || '';
+        const rect = btn.getBoundingClientRect();
+
+        const pop = document.createElement('div');
+        pop.className = 'setting-help-popover';
+        pop.innerHTML = `
+          <button class="setting-help-close" type="button" aria-label="Закрыть">✕</button>
+          <div class="setting-help-title">${escapeHtml(title)}</div>
+          <div class="setting-help-text">${escapeHtml(text)}</div>
+        `;
+        (overlay.querySelector('.settings-modal') || overlay).appendChild(pop);
+
+        const margin = 10;
+        const popRect = pop.getBoundingClientRect();
+        let left = rect.right - popRect.width;
+        if (left < margin) left = margin;
+        if (left + popRect.width > window.innerWidth - margin) {
+            left = window.innerWidth - popRect.width - margin;
+        }
+
+        let top = rect.bottom + 8;
+        if (top + popRect.height > window.innerHeight - margin) {
+            top = rect.top - popRect.height - 8;
+        }
+        if (top < margin) top = margin;
+
+        pop.style.left = `${left}px`;
+        pop.style.top = `${top}px`;
+
+        const onClose = (ev) => {
+            if (ev.target === pop || pop.contains(ev.target)) return;
+            closeSettingHelp();
+            document.removeEventListener('mousedown', onClose, true);
+            document.removeEventListener('touchstart', onClose, true);
+            document.removeEventListener('keydown', onEsc, true);
+        };
+        const onEsc = (ev) => {
+            if (ev.key === 'Escape') {
+                closeSettingHelp();
+                document.removeEventListener('mousedown', onClose, true);
+                document.removeEventListener('touchstart', onClose, true);
+                document.removeEventListener('keydown', onEsc, true);
+            }
+        };
+
+        pop.querySelector('.setting-help-close')?.addEventListener('click', () => {
+            closeSettingHelp();
+            document.removeEventListener('mousedown', onClose, true);
+            document.removeEventListener('touchstart', onClose, true);
+            document.removeEventListener('keydown', onEsc, true);
+        });
+
+        setTimeout(() => {
+            document.addEventListener('mousedown', onClose, true);
+            document.addEventListener('touchstart', onClose, true);
+            document.addEventListener('keydown', onEsc, true);
+        }, 0);
+    };
+
+    const bindSettingHelps = () => {
+        overlay?.querySelectorAll('.setting-help').forEach((btn) => {
+            btn.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                openSettingHelp(btn);
+            });
+        });
+    };
+
     const renderAppearance = async () => {
         setHeader('Внешний вид');
 
@@ -882,18 +1099,20 @@ export function createSettingsUI(opts = {}) {
             <div class="settings-card">
               <h4>Тема</h4>
               <div class="setting-row">
-                <div class="setting-copy">
-                  <div class="setting-title">Цветовая схема</div>
-                </div>
+                ${settingRow({
+                    title: 'Цветовая схема',
+                    help: 'Переключает основную тему интерфейса между тёмной и светлой.'
+                })}
                 <select class="inp" id="themeSel">
                   <option value="dark">Тёмная</option>
                   <option value="light">Светлая</option>
                 </select>
               </div>
               <div class="setting-row">
-                <div class="setting-copy">
-                  <div class="setting-title">Показывать статус в шапке</div>
-                </div>
+                ${settingRow({
+                    title: 'Показывать статус в шапке',
+                    help: 'Показывает ваш текущий статус в верхней части интерфейса.'
+                })}
                 <label class="switch">
                   <input type="checkbox" id="headerStatus" ${s.show_header_status ? 'checked' : ''}>
                   <span class="slider"></span>
@@ -904,10 +1123,11 @@ export function createSettingsUI(opts = {}) {
             <div class="settings-card">
               <h4>Интерфейс</h4>
               <div class="setting-row setting-row-range">
-                <div class="setting-copy">
-                  <div class="setting-title">Масштаб интерфейса</div>
-                  <div class="setting-desc">80% — больше помещается, 130% — крупнее</div>
-                </div>
+                ${settingRow({
+                    title: 'Масштаб интерфейса',
+                    desc: '80% — больше помещается, 130% — крупнее',
+                    help: 'Уменьшает или увеличивает размер интерфейса. 100% — стандартный размер.'
+                })}
                 <div class="range-wrap">
                   <input type="range" id="fontScale" min="80" max="130" step="5" value="${Math.round((s.font_scale || 1) * 100)}">
                   <div class="range-val" id="fontScaleVal">${Math.round((s.font_scale || 1) * 100)}%</div>
@@ -918,18 +1138,20 @@ export function createSettingsUI(opts = {}) {
             <div class="settings-card">
               <h4>Сообщения</h4>
               <div class="setting-row">
-                <div class="setting-copy">
-                  <div class="setting-title">Компактный режим</div>
-                </div>
+                ${settingRow({
+                    title: 'Компактный режим',
+                    help: 'Делает сообщения плотнее: меньше отступы и компактнее блоки в чате.'
+                })}
                 <label class="switch">
                   <input type="checkbox" id="compactMode" ${s.compact_mode ? 'checked' : ''}>
                   <span class="slider"></span>
                 </label>
               </div>
               <div class="setting-row">
-                <div class="setting-copy">
-                  <div class="setting-title">Показывать время</div>
-                </div>
+                ${settingRow({
+                    title: 'Показывать время',
+                    help: 'Показывает время отправки рядом с каждым сообщением.'
+                })}
                 <label class="switch">
                   <input type="checkbox" id="showTime" ${s.show_timestamps ? 'checked' : ''}>
                   <span class="slider"></span>
@@ -938,6 +1160,7 @@ export function createSettingsUI(opts = {}) {
             </div>
           </div>
         `);
+        bindSettingHelps();
 
         const themeSel = overlay.querySelector('#themeSel');
         if (themeSel) {
@@ -1107,10 +1330,11 @@ export function createSettingsUI(opts = {}) {
           <div class="settings-section">
             <div class="settings-card">
               <div class="setting-row">
-                <div>
-                  <div class="setting-title">Режим разработчика</div>
-                  <div class="setting-desc">для логов/UI</div>
-                </div>
+                ${settingRow({
+                    title: 'Режим разработчика',
+                    desc: 'Логи и UI',
+                    help: 'Добавляет технические элементы интерфейса и служебную информацию для отладки.'
+                })}
                 <label class="switch">
                   <input type="checkbox" id="devMode" ${s.developer_mode ? 'checked' : ''}>
                   <span class="slider"></span>
@@ -1119,6 +1343,7 @@ export function createSettingsUI(opts = {}) {
             </div>
           </div>
         `);
+        bindSettingHelps();
 
         const dev = overlay.querySelector('#devMode');
         if (dev) {

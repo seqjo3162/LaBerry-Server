@@ -6,6 +6,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use regex::Regex;
 use sqlx::Row;
 use sqlx::QueryBuilder;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +14,8 @@ use std::collections::{HashMap, HashSet};
 use crate::{auth, server::AppState};
 use crate::middleware::auth_guard::AuthUser;
 use crate::ws::RoomId;
+
+const MAX_MESSAGE_CHARS: usize = 4000;
 
 #[derive(Serialize)]
 pub struct DmChatView {
@@ -27,6 +30,7 @@ pub struct DmChatView {
 #[derive(Deserialize, Default)]
 pub struct ListQuery {
     pub limit: Option<i64>,
+    pub before_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +91,10 @@ async fn is_blocked_pair(db: &sqlx::SqlitePool, a: i64, b: i64) -> bool {
 }
 
 async fn can_dm(db: &sqlx::SqlitePool, me: i64, other: i64) -> bool {
+    if crate::ai_client::is_ai_user(db, other).await {
+        return true;
+    }
+
     let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = ? LIMIT 1")
         .bind(other)
         .fetch_optional(db)
@@ -194,6 +202,9 @@ async fn get_or_create_with(
     .ok()
     .flatten()
     {
+        if crate::ai_client::is_ai_user(db, other_id).await {
+            crate::ai_client::spawn_start_dm_if_enabled(st.clone(), chat_id, me.id);
+        }
         return (StatusCode::OK, Json(serde_json::json!({"chat_id": chat_id}))).into_response();
     }
 
@@ -232,6 +243,10 @@ async fn get_or_create_with(
     .bind(&created_at)
     .execute(db)
     .await;
+
+    if crate::ai_client::is_ai_user(db, other_id).await {
+        crate::ai_client::spawn_start_dm_if_enabled(st.clone(), chat_id, me.id);
+    }
 
     (StatusCode::OK, Json(serde_json::json!({"chat_id": chat_id}))).into_response()
 }
@@ -337,43 +352,82 @@ async fn list_messages(
     State(st): State<AppState>,
     me: AuthUser,
     Path(chat_id): Path<i64>,
+    Query(q): Query<ListQuery>,
 ) -> impl IntoResponse {
     let db = &st.db;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
 
     if !ensure_dm_participant(db, chat_id, me.id).await {
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let rows = sqlx::query(
-        r#"
-        SELECT m.id,
-               m.chat_id,
-               m.sender_id,
-               u.username AS sender_username,
-               up.avatar_file_id AS sender_avatar_file_id,
-               m.content,
-               m.timestamp,
-               m.reply_to_message_id,
-               ru.id AS r_id,
-               ru.username AS r_sender_username,
-               rup.avatar_file_id AS r_sender_avatar_file_id,
-               rm.sender_id AS r_sender_id,
-               rm.content AS r_content
-        FROM messages m
-        JOIN users u ON u.id = m.sender_id
-        LEFT JOIN user_profile up ON up.user_id = u.id
-        LEFT JOIN messages rm ON rm.id = m.reply_to_message_id
-        LEFT JOIN users ru ON ru.id = rm.sender_id
-        LEFT JOIN user_profile rup ON rup.user_id = ru.id
-        WHERE m.chat_id = ?
-        ORDER BY m.id DESC
-        LIMIT 200
-        "#,
-    )
-    .bind(chat_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    let rows = if let Some(before_id) = q.before_id {
+        sqlx::query(
+            r#"
+            SELECT m.id,
+                   m.chat_id,
+                   m.sender_id,
+                   u.username AS sender_username,
+                   up.avatar_file_id AS sender_avatar_file_id,
+                   m.content,
+                   m.timestamp,
+                   m.reply_to_message_id,
+                   ru.id AS r_id,
+                   ru.username AS r_sender_username,
+                   rup.avatar_file_id AS r_sender_avatar_file_id,
+                   rm.sender_id AS r_sender_id,
+                   rm.content AS r_content
+            FROM messages m
+            JOIN users u ON u.id = m.sender_id
+            LEFT JOIN user_profile up ON up.user_id = u.id
+            LEFT JOIN messages rm ON rm.id = m.reply_to_message_id
+            LEFT JOIN users ru ON ru.id = rm.sender_id
+            LEFT JOIN user_profile rup ON rup.user_id = ru.id
+            WHERE m.chat_id = ?
+              AND m.id < ?
+            ORDER BY m.id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(chat_id)
+        .bind(before_id)
+        .bind(limit)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default()
+    } else {
+        sqlx::query(
+            r#"
+            SELECT m.id,
+                   m.chat_id,
+                   m.sender_id,
+                   u.username AS sender_username,
+                   up.avatar_file_id AS sender_avatar_file_id,
+                   m.content,
+                   m.timestamp,
+                   m.reply_to_message_id,
+                   ru.id AS r_id,
+                   ru.username AS r_sender_username,
+                   rup.avatar_file_id AS r_sender_avatar_file_id,
+                   rm.sender_id AS r_sender_id,
+                   rm.content AS r_content
+            FROM messages m
+            JOIN users u ON u.id = m.sender_id
+            LEFT JOIN user_profile up ON up.user_id = u.id
+            LEFT JOIN messages rm ON rm.id = m.reply_to_message_id
+            LEFT JOIN users ru ON ru.id = rm.sender_id
+            LEFT JOIN user_profile rup ON rup.user_id = ru.id
+            WHERE m.chat_id = ?
+            ORDER BY m.id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(chat_id)
+        .bind(limit)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default()
+    };
 
     let mut out = Vec::with_capacity(rows.len());
 
@@ -533,6 +587,37 @@ async fn send_message(
     if content_trimmed.is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    if content_trimmed.chars().count() > MAX_MESSAGE_CHARS {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "detail": "message_too_long",
+                "max_chars": 4000
+            })),
+        )
+            .into_response();
+    }
+
+    if let Some(reply_to_id) = body.reply_to_id {
+        let reply_ok = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM messages WHERE id = ? AND chat_id = ? LIMIT 1",
+        )
+        .bind(reply_to_id)
+        .bind(chat_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+        if !reply_ok {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"detail":"reply_to_message_not_in_chat"})),
+            )
+                .into_response();
+        }
+    }
 
     let timestamp = auth::now_iso();
 
@@ -555,6 +640,37 @@ async fn send_message(
     };
 
     let message_id = r.last_insert_rowid();
+
+    // Привязка загруженных файлов к сообщению ЛС, чтобы cleanup не удалил их как temporary.
+    if let Ok(re) = Regex::new(r"\[\[file[:=](\d+)\|") {
+        let mut file_ids: Vec<i64> = re
+            .captures_iter(content_trimmed)
+            .filter_map(|c| c.get(1).and_then(|m| m.as_str().parse::<i64>().ok()))
+            .collect();
+        file_ids.sort_unstable();
+        file_ids.dedup();
+
+        for fid in file_ids {
+            let _ = sqlx::query(
+                r#"
+                UPDATE files
+                SET message_id = ?,
+                    storage_kind = 'message',
+                    expires_at = NULL
+                WHERE id = ?
+                  AND chat_id = ?
+                  AND uploaded_by = ?
+                  AND (message_id IS NULL OR message_id = 0)
+                "#,
+            )
+            .bind(message_id)
+            .bind(fid)
+            .bind(chat_id)
+            .bind(me.id)
+            .execute(db)
+            .await;
+        }
+    }
 
     let sender_avatar_file_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT avatar_file_id FROM user_profile WHERE user_id = ? LIMIT 1",
@@ -614,6 +730,8 @@ async fn send_message(
     });
 
     st.hub.broadcast_room(&RoomId::Channel(chat_id), &out);
+
+    crate::ai_client::spawn_dm_reply(st.clone(), chat_id, me.id, message_id);
 
     (
         StatusCode::OK,

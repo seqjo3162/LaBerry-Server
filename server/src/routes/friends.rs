@@ -264,9 +264,10 @@ async fn request_friend(
     .is_some();
 
     if already_pending {
+        let accepted = crate::ai_client::auto_accept_friend_request_if_ai(st.clone(), sender_id, receiver_id).await;
         return (
             StatusCode::OK,
-            Json(serde_json::json!({ "status": "ok", "dedup": true })),
+            Json(serde_json::json!({ "status": "ok", "dedup": true, "accepted": accepted })),
         )
             .into_response();
     }
@@ -308,9 +309,15 @@ async fn request_friend(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
+    let accepted = if inserted {
+        crate::ai_client::auto_accept_friend_request_if_ai(st.clone(), sender_id, receiver_id).await
+    } else {
+        false
+    };
+
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "status": "ok", "inserted": inserted })),
+        Json(serde_json::json!({ "status": "ok", "inserted": inserted, "accepted": accepted })),
     )
         .into_response()
 }

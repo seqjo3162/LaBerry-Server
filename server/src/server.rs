@@ -15,8 +15,10 @@ use axum::{
     http::{header, HeaderMap, StatusCode, Method, HeaderValue},
     response::IntoResponse,
     routing::get,
+    Json,
     Router,
 };
+
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
@@ -124,6 +126,30 @@ pub async fn run_server(
     }
 
     // ------------------------------
+    // Background cleanup: temporary chat files
+    // ------------------------------
+    {
+        let cleanup_state = state.clone();
+        let cleanup_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            // Run once on startup, then hourly.
+            crate::routes::files::cleanup_expired_files(&cleanup_state).await;
+
+            let mut tick = interval(Duration::from_secs(60 * 60));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        crate::routes::files::cleanup_expired_files(&cleanup_state).await;
+                    }
+                    _ = cleanup_shutdown.notified() => {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // ------------------------------
     // Main (public) server
     // ------------------------------
     println!("[SERVER] Building main router...");
@@ -218,12 +244,14 @@ pub fn build_router(state: AppState) -> Router {
     let router = Router::new()
         .route("/", get(crate::routes::pages::index))
         .route("/app", get(crate::routes::pages::app))
+        .route("/start", get(crate::routes::pages::start))
         .route("/admin", get(crate::routes::pages::admin_hint))
         .route("/admin/", get(crate::routes::pages::admin_hint))
         .route("/health", get(|| async { "OK" }))
         .route("/ws", get(ws_main))
         .route("/ws/health", get(ws_health))
         .route("/verify", get(crate::routes::auth::verify_token))
+        .route("/api/system/status", get(system_status))
         .nest("/api/auth", crate::routes::auth::router())
         .nest("/api/users", crate::routes::users::router())
         .nest("/api/friends", crate::routes::friends::router())
@@ -366,13 +394,21 @@ fn admin_bind_addr() -> anyhow::Result<SocketAddr> {
 pub fn build_admin_router(state: AppState) -> Router {
     use axum::response::Redirect;
 
+    let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("server")
+        .join("static");
+
     Router::new()
         // convenience: open http://127.0.0.1:<LB_ADMIN_PORT>/ and land in /admin/
-        // NOTE: axum route matching is strict about trailing slashes, so we handle both
-        // /admin and /admin/ explicitly.
         .route("/", get(|| async { Redirect::to("/admin/") }))
         .route("/admin", get(|| async { Redirect::to("/admin/") }))
         .nest("/admin/", crate::routes::admin_panel::router())
+        .nest_service(
+            "/static",
+            ServeDir::new(static_dir.clone())
+                .fallback(ServeFile::new(static_dir.join("index.html"))),
+        )
         .with_state(state)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         // Security headers
@@ -420,6 +456,30 @@ pub fn build_admin_router(state: AppState) -> Router {
         )
         .layer(CatchPanicLayer::new())
 }
+
+
+
+async fn system_status() -> impl IntoResponse {
+    let maintenance = std::env::var("LB_MAINTENANCE_MODE")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+
+    let message = std::env::var("LB_MAINTENANCE_TEXT")
+        .unwrap_or_else(|_| "На сервере идут технические работы. Возможны перебои или временная недоступность.".to_string());
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "maintenance": maintenance,
+            "message": message
+        })),
+    )
+}
+
 // ======================================================
 // 💓 WS Health monitor
 // ======================================================

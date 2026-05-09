@@ -1,19 +1,22 @@
-use crate::server::{AdminSession, AppState};
+use crate::{auth, server::{AdminSession, AppState}};
 
 use anyhow::Context;
 use axum::{
     extract::{Form, Path, Query, State},
+    Json,
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Router,
 };
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use password_hash::{PasswordHash, PasswordVerifier};
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::{env, net::IpAddr};
+use std::{env, net::IpAddr, path::PathBuf};
+use tokio::{fs, fs::File};
+use tokio_util::io::ReaderStream;
 
 // =============================
 // Router
@@ -25,17 +28,30 @@ pub fn router() -> Router<AppState> {
         .route("/login", get(login_get).post(login_post))
         .route("/logout", post(logout_post))
         .route("/users", get(users_list))
+        .route("/users/:id/card", get(admin_user_card_fragment))
+        .route("/users/:id/details", get(admin_user_details_fragment))
         .route("/users/:id/ban", post(user_ban))
+        .route("/users/:id/unban", post(user_unban))
         .route("/users/:id/ban_forever", post(user_ban_forever))
         .route("/users/:id/purge", post(user_purge_content))
+        .route("/reports/:id/status", post(admin_report_status))
         .route("/test-users", get(test_users_page).post(test_users_delete))
         .route("/servers", get(servers_list))
         .route("/servers/:id/delete", post(server_delete))
+        .route("/servers/:id/add_all_users", post(server_add_all_users))
+        .route("/center", get(center_page))
+        .route("/files/:id/raw", get(admin_file_raw))
+        .route("/profile-files/:id/raw", get(admin_profile_file_raw))
         .route("/db", get(db_tools_page))
         .route("/db/wipe_messages", post(db_wipe_messages_post))
         .route("/db/wipe_servers", post(db_wipe_servers_post))
         .route("/db/reset_keep_users", post(db_reset_keep_users_post))
         .route("/db/vacuum", post(db_vacuum_post))
+        .route("/db/cleanup_expired_files", post(db_cleanup_expired_files_post))
+        .route("/homie/health", get(homie_health_get))
+        .route("/homie/tools", get(homie_tools_get))
+        .route("/homie/chat", post(homie_chat_post))
+        .route("/homie/reset", post(homie_reset_post))
 }
 
 // =============================
@@ -104,20 +120,20 @@ fn verify_admin_password(pw: &str) -> anyhow::Result<()> {
         if constant_time_eq(pw, &plain) {
             return Ok(());
         }
-        anyhow::bail!("Wrong admin password");
+        anyhow::bail!("Неверный пароль администратора");
     }
 
     if let Ok(hash) = env::var("LB_ADMIN_PASSWORD_HASH") {
-        let parsed = PasswordHash::new(&hash).context("Invalid LB_ADMIN_PASSWORD_HASH")?;
+        let parsed = PasswordHash::new(&hash).context("Некорректный LB_ADMIN_PASSWORD_HASH")?;
         let argon2 = argon2::Argon2::default();
         argon2
             .verify_password(pw.as_bytes(), &parsed)
-            .context("Wrong admin password")?;
+            .context("Неверный пароль администратора")?;
         return Ok(());
     }
 
     anyhow::bail!(
-        "Admin password is not configured (set LB_ADMIN_PASSWORD_HASH or LB_ADMIN_PASSWORD)"
+        "Пароль администратора не настроен (укажи LB_ADMIN_PASSWORD_HASH или LB_ADMIN_PASSWORD)"
     );
 }
 
@@ -127,6 +143,119 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+fn escape_html_lines(s: &str) -> String {
+    escape_html(s).replace("\r\n", "\n").replace('\r', "\n").replace('\n', "<br>")
+}
+
+fn admin_sanitize_filename(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        let ok = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
+        if ok { out.push(ch); } else if ch.is_whitespace() { out.push('_'); } else { out.push('_'); }
+    }
+    if out.is_empty() { "file".to_string() } else { out }
+}
+
+fn admin_format_bytes(size: i64) -> String {
+    if size <= 0 { return "размер неизвестен".to_string(); }
+    let mut v = size as f64;
+    let units = ["Б", "КБ", "МБ", "ГБ"];
+    let mut idx = 0usize;
+    while v >= 1024.0 && idx + 1 < units.len() { v /= 1024.0; idx += 1; }
+    if idx == 0 { format!("{} {}", size, units[idx]) } else { format!("{:.1} {}", v, units[idx]) }
+}
+
+fn url_decode_component_lossy(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let val = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if let (Some(a), Some(b)) = (val(bytes[i + 1]), val(bytes[i + 2])) {
+                out.push((a << 4) | b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn render_admin_file_marker(file_id: i64, encoded_name: &str, mime: &str, size: i64) -> String {
+    let name = url_decode_component_lossy(encoded_name);
+    let safe_name = escape_html(&name);
+    let clean_mime = if mime.trim().is_empty() { "application/octet-stream" } else { mime.trim() };
+    let safe_mime = escape_html(clean_mime);
+    let size_text = escape_html(&admin_format_bytes(size));
+    let type_label = if clean_mime.starts_with("image/") { "IMG" }
+        else if clean_mime.starts_with("video/") { "VID" }
+        else if clean_mime.starts_with("audio/") { "AUD" }
+        else if name.to_ascii_lowercase().ends_with(".md") { "MD" }
+        else { "FILE" };
+
+    format!(
+        r#"<div class='admin-file-card'>
+  <div class='admin-file-type'>{type_label}</div>
+  <div class='admin-file-main'>
+    <div class='admin-file-name'>{safe_name}</div>
+    <div class='admin-file-meta'>#{file_id} · {safe_mime} · {size_text}</div>
+  </div>
+  <a class='admin-file-action' href='/admin/files/{file_id}/raw' target='_blank' rel='noopener'>Скачать</a>
+</div>"#,
+        type_label = escape_html(type_label), safe_name = safe_name, file_id = file_id,
+        safe_mime = safe_mime, size_text = size_text,
+    )
+}
+
+fn render_admin_message_html(content: &str) -> String {
+    let trimmed = content.trim();
+    if trimmed.is_empty() { return "<span class='muted'>[вложение или пустое сообщение]</span>".to_string(); }
+
+    let re = Regex::new(r"\[\[file:(\d+)\|([^|\]]+)(?:\|([^|\]]*))?(?:\|(\d+))?\]\]").unwrap();
+    let mut out = String::new();
+    let mut last = 0usize;
+    let mut found = false;
+
+    for cap in re.captures_iter(content) {
+        let Some(m) = cap.get(0) else { continue; };
+        if m.start() > last {
+            let part = &content[last..m.start()];
+            if !part.trim().is_empty() {
+                out.push_str("<div class='admin-message-text'>");
+                out.push_str(&escape_html_lines(part.trim()));
+                out.push_str("</div>");
+            }
+        }
+        let id = cap.get(1).and_then(|x| x.as_str().parse::<i64>().ok()).unwrap_or(0);
+        let name = cap.get(2).map(|x| x.as_str()).unwrap_or("file");
+        let mime = cap.get(3).map(|x| x.as_str()).unwrap_or("application/octet-stream");
+        let size = cap.get(4).and_then(|x| x.as_str().parse::<i64>().ok()).unwrap_or(0);
+        if id > 0 { out.push_str(&render_admin_file_marker(id, name, mime, size)); found = true; }
+        else { out.push_str(&escape_html_lines(m.as_str())); }
+        last = m.end();
+    }
+
+    if last < content.len() {
+        let part = &content[last..];
+        if !part.trim().is_empty() {
+            out.push_str("<div class='admin-message-text'>");
+            out.push_str(&escape_html_lines(part.trim()));
+            out.push_str("</div>");
+        }
+    }
+    if found || !out.trim().is_empty() { out } else { escape_html_lines(content) }
 }
 
 fn cookie_get(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -166,7 +295,12 @@ fn url_encode_component(s: &str) -> String {
 }
 
 fn admin_redirect_with_msg(path: &str, msg: &str) -> impl IntoResponse {
-    let p = format!("{}?msg={}", path, url_encode_component(msg));
+    let sep = if path.contains('?') {
+        if path.ends_with('?') || path.ends_with('&') { "" } else { "&" }
+    } else {
+        "?"
+    };
+    let p = format!("{}{}msg={}", path, sep, url_encode_component(msg));
     Redirect::to(&p)
 }
 
@@ -183,61 +317,486 @@ fn now_ts() -> i64 {
     Utc::now().timestamp()
 }
 
+fn fmt_admin_dt(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return "—".to_string();
+    }
+
+    if let Ok(ts) = s.parse::<i64>() {
+        if let Some(dt) = Utc.timestamp_opt(ts, 0).single() {
+            return dt.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+        }
+    }
+
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return dt
+            .with_timezone(&Utc)
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+    }
+
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        let dt = chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
+        return dt.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    }
+
+    s.to_string()
+}
+
 fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
     let msg_html = msg
         .filter(|m| !m.trim().is_empty())
         .map(|m| format!("<div class='msg'>{}</div>", escape_html(m)))
         .unwrap_or_default();
 
+    let show_top_nav = !title.contains("Центр") && !title.contains("Вход");
+    let nav = if show_top_nav {
+        [
+            ("/admin/users", "Пользователи", title.contains("Пользователи")),
+            ("/admin/servers", "Серверы", title.contains("Серверы")),
+            ("/admin/center", "Центр", title.contains("Центр")),
+            ("/admin/db", "База данных", title.contains("База данных")),
+        ]
+        .iter()
+        .map(|(href, label, active)| {
+            let cls = if *active { "nav-link active" } else { "nav-link" };
+            format!("<a href='{href}' class='{cls}'>{label}</a>")
+        })
+        .collect::<Vec<_>>()
+        .join("")
+    } else {
+        String::new()
+    };
+
+
+    let center_script = if title.contains("Центр") {
+        "<script src='/static/js/admin-center.js?v=6' defer></script>"
+    } else {
+        ""
+    };
+    let users_script = if title.contains("Центр") || title.contains("Пользователи") {
+        "<script src='/static/js/admin-users.js?v=2' defer></script>"
+    } else {
+        ""
+    };
     let html = format!(
         r#"<!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>{title}</title>
 <style>
-body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b0d12; color:#e6e6e6; margin:0; }}
-header {{ padding:14px 18px; background:#121624; border-bottom:1px solid #202742; display:flex; gap:12px; align-items:center; }}
-header a {{ color:#cfe2ff; text-decoration:none; padding:6px 10px; border:1px solid #2a355c; border-radius:10px; }}
-header a:hover {{ background:#1b2240; }}
-main {{ padding:18px; max-width:1200px; margin:0 auto; }}
-.card {{ background:#121624; border:1px solid #202742; border-radius:16px; padding:14px; margin-bottom:14px; }}
-input, button {{ font-size:14px; }}
-input[type=text], input[type=password] {{ width:100%; max-width:520px; padding:10px 12px; border-radius:12px; border:1px solid #2a355c; background:#0b0d12; color:#e6e6e6; }}
-button {{ padding:9px 12px; border-radius:12px; border:1px solid #2a355c; background:#1b2240; color:#e6e6e6; cursor:pointer; }}
-button:hover {{ background:#242d57; }}
+:root {{
+  --bg:#090c14;
+  --panel:#10162a;
+  --panel-2:#0d1324;
+  --border:#243152;
+  --text:#f2f5ff;
+  --muted:#97a4c5;
+  --accent:#7c5cff;
+  --danger:#8f2f46;
+  --danger-bg:#2d1420;
+  --ok:#1c6b3d;
+  --ok-bg:#0e2418;
+}}
+* {{ box-sizing:border-box; }}
+body {{ font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; }}
+header {{ position:sticky; top:0; z-index:20; padding:12px 18px; background:#0f1425; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }}
+.brand {{ font-weight:800; font-size:26px; letter-spacing:-0.03em; }}
+.nav {{ display:flex; gap:10px; flex-wrap:wrap; }}
+.nav-link {{ color:#dbe6ff; text-decoration:none; padding:10px 14px; border:1px solid var(--border); border-radius:14px; background:#121933; }}
+.nav-link.active {{ background:#1b2850; border-color:#4d67b1; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.05); }}
+.nav-link:hover {{ background:#182243; }}
+header form {{ margin-left:auto; }}
+main {{ padding:18px; max-width:1280px; margin:0 auto; }}
+.card {{ background:linear-gradient(180deg,#11172a 0%, #0d1324 100%); border:1px solid var(--border); border-radius:18px; padding:16px; margin-bottom:14px; box-shadow:0 20px 50px rgba(0,0,0,0.18); }}
+.card h2, .card h3 {{ margin:0 0 12px 0; }}
+.small {{ color:var(--muted); font-size:12px; }}
+input, button, textarea, select {{ font-size:14px; font-family:inherit; }}
+input[type=text], input[type=password], textarea, select {{ width:100%; max-width:640px; padding:11px 13px; border-radius:14px; border:1px solid var(--border); background:#090d18; color:var(--text); outline:none; }}
+input[type=text]:focus, input[type=password]:focus, textarea:focus, select:focus {{ border-color:#6452d7; box-shadow:0 0 0 3px rgba(124,92,255,0.15); }}
+button {{ padding:10px 14px; border-radius:14px; border:1px solid var(--border); background:#182243; color:var(--text); cursor:pointer; }}
+button:hover {{ background:#202c57; }}
+.btn-soft {{ background:#151d37; }}
+.btn-danger {{ background:var(--danger-bg); border-color:var(--danger); }}
+.btn-danger:hover {{ background:#3a1a29; }}
 .table {{ width:100%; border-collapse:collapse; }}
-.table th, .table td {{ border-bottom:1px solid #202742; padding:10px 8px; text-align:left; vertical-align:top; }}
-.small {{ color:#9aa6c3; font-size:12px; }}
-.row-actions form {{ display:inline-block; margin:0 6px 6px 0; }}
-.msg {{ background:#1b2240; border:1px solid #2a355c; padding:10px 12px; border-radius:12px; margin-bottom:14px; }}
-.warn {{ background:#2b1d1d; border:1px solid #5c2a2a; padding:10px 12px; border-radius:12px; margin-top:10px; }}
+.table th, .table td {{ border-bottom:1px solid var(--border); padding:12px 8px; text-align:left; vertical-align:top; }}
+.msg {{ background:#182243; border:1px solid #31467c; padding:11px 13px; border-radius:14px; margin-bottom:14px; }}
+.hstack {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
+.search-row {{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
+.search-row form {{ display:flex; gap:10px; flex:1 1 560px; flex-wrap:wrap; }}
+.search-row input[type=text] {{ flex:1 1 340px; max-width:none; }}
+.pill {{ display:inline-flex; align-items:center; gap:8px; padding:7px 11px; border-radius:999px; border:1px solid var(--border); background:#0f1322; color:#cdd7f6; font-size:12px; }}
+.users-list, .servers-list, .db-list {{ display:flex; flex-direction:column; gap:12px; }}
+.user-card, .server-row-card {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; border:1px solid var(--border); background:#0d1120; border-radius:16px; padding:14px; }}
+.user-main, .server-main {{ min-width:0; }}
+.user-top, .server-top {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:8px; }}
+.user-title, .server-title {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-width:0; }}
+.user-id, .server-id {{ color:#8fb4ff; font-weight:700; }}
+.user-name, .server-name {{ font-size:18px; font-weight:700; word-break:break-word; }}
+.user-email, .server-meta {{ color:var(--muted); word-break:break-all; }}
+.user-meta {{ color:var(--muted); font-size:12px; }}
+.user-fields {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:10px; }}
+.user-field {{ border:1px solid var(--border); background:#10182d; border-radius:14px; padding:10px 12px; min-width:0; }}
+.user-field-label {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }}
+.user-field-value {{ word-break:break-word; line-height:1.45; }}
+.user-field-value.mono {{ font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }}
+.status-badge {{ display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid var(--border); }}
+.status-active {{ background:var(--ok-bg); color:#98e2b8; border-color:#214d35; }}
+.status-banned {{ background:#251316; color:#ffb4bf; border-color:#5a2730; }}
+.test-badge {{ background:#161d31; color:#9ec0ff; border-color:#2f4478; }}
+.user-actions, .server-actions {{ display:flex; flex-wrap:wrap; gap:8px; align-content:flex-start; justify-content:flex-end; }}
+.inline-form {{ display:inline-flex; margin:0; }}
+.empty-state {{ padding:26px 18px; border:1px dashed var(--border); border-radius:16px; color:var(--muted); text-align:center; }}
+.db-card {{ border:1px solid var(--border); border-radius:18px; padding:16px; background:#0d1324; }}
+.db-card h3 {{ margin-bottom:8px; }}
+.danger-note {{ color:#ffb9c7; }}
+.center-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:16px; min-height:72vh; }}
+.center-sidebar, .center-main {{ background:linear-gradient(180deg,#10162a 0%, #0d1324 100%); border:1px solid var(--border); border-radius:20px; box-shadow:0 18px 40px rgba(0,0,0,0.22); }}
+.center-sidebar {{ padding:14px; display:flex; flex-direction:column; gap:10px; }}
+.center-main {{ padding:16px; }}
+.center-nav-item {{ display:block; padding:14px 15px; border:1px solid var(--border); border-radius:16px; background:#121933; text-decoration:none; color:var(--text); transition:background .16s ease,border-color .16s ease,transform .16s ease; }}
+.center-nav-item:hover {{ background:#182243; border-color:#36508d; transform:translateY(-1px); }}
+.center-nav-item strong {{ display:block; margin-bottom:6px; font-size:18px; }}
+.center-nav-item .small {{ line-height:1.45; }}
+.center-nav-item.active {{ background:linear-gradient(180deg,#19264a 0%, #131d39 100%); border-color:#4d67b1; }}
+.center-hero {{ display:flex; justify-content:space-between; align-items:flex-start; gap:14px; padding:16px; border:1px solid var(--border); border-radius:18px; background:#0b1020; margin-bottom:14px; flex-wrap:wrap; }}
+.center-hero-title {{ margin:0; font-size:28px; letter-spacing:-0.03em; }}
+.center-hero-sub {{ color:var(--muted); max-width:720px; line-height:1.45; margin-top:8px; }}
+.center-stat-row {{ display:flex; gap:10px; flex-wrap:wrap; }}
+.center-stat {{ min-width:128px; padding:12px 14px; border-radius:16px; border:1px solid var(--border); background:#121933; }}
+.center-stat-label {{ color:var(--muted); font-size:12px; margin-bottom:6px; }}
+.center-stat-value {{ font-size:24px; font-weight:800; line-height:1; }}
+.center-workspace {{ display:grid; grid-template-columns:340px minmax(0,1fr); gap:14px; min-height:58vh; }}
+.center-column {{ display:flex; flex-direction:column; gap:14px; min-width:0; }}
+.center-panel {{ border:1px solid var(--border); border-radius:18px; background:#0b1020; overflow:hidden; }}
+.center-panel-header {{ display:flex; justify-content:space-between; align-items:center; gap:10px; padding:14px 16px; border-bottom:1px solid var(--border); background:#11182d; flex-wrap:wrap; }}
+.center-panel-title {{ font-size:18px; font-weight:800; }}
+.center-panel-sub {{ color:var(--muted); font-size:12px; }}
+.center-panel-body {{ padding:14px; }}
+.center-filter-row {{ display:flex; gap:8px; flex-wrap:wrap; }}
+.center-chip {{ display:inline-flex; align-items:center; gap:7px; padding:7px 10px; border-radius:999px; border:1px solid var(--border); background:#131a30; color:#d9e3ff; font-size:12px; }}
+.center-queue-list {{ display:flex; flex-direction:column; gap:10px; }}
+.center-queue-item {{ border:1px solid var(--border); border-radius:16px; padding:12px; background:#11182d; }}
+.center-queue-top {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }}
+.center-queue-title {{ font-weight:800; line-height:1.3; }}
+.center-queue-meta {{ color:var(--muted); font-size:12px; line-height:1.45; }}
+.center-status {{ display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid var(--border); white-space:nowrap; }}
+.center-status-new {{ background:#1a2647; color:#aecaff; border-color:#39508a; }}
+.center-status-live {{ background:#10261b; color:#97e0b6; border-color:#28533a; }}
+.center-status-warn {{ background:#2a1d10; color:#ffc98f; border-color:#6f4b24; }}
+.center-status-muted {{ background:#151b2f; color:#b4c0df; border-color:#2e3a63; }}
+.center-mini-list {{ display:flex; flex-direction:column; gap:8px; }}
+.center-mini-item {{ display:flex; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid var(--border); border-radius:14px; background:#11182d; }}
+.center-mini-main {{ min-width:0; }}
+.center-mini-title {{ font-weight:700; margin-bottom:4px; word-break:break-word; }}
+.center-mini-meta {{ color:var(--muted); font-size:12px; }}
+.center-mini-side {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
+.center-feed-list {{ display:flex; flex-direction:column; gap:10px; }}
+.center-feed-item {{ border:1px solid var(--border); border-radius:16px; padding:12px 14px; background:#11182d; }}
+.center-feed-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:8px; flex-wrap:wrap; }}
+.center-feed-author {{ font-weight:800; }}
+.center-feed-loc {{ color:#9eb7ff; font-size:12px; margin-top:4px; }}
+.center-feed-time {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
+.center-feed-text {{ line-height:1.55; color:#eef2ff; word-break:break-word; }}
+.admin-message-text {{ margin:6px 0; }}
+.admin-file-card {{ display:flex; align-items:center; gap:12px; border:1px solid #314068; border-radius:14px; background:#0d1428; padding:10px 12px; margin:8px 0; max-width:720px; }}
+.admin-file-type {{ width:42px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; background:#172241; color:#c084fc; font-weight:900; font-size:12px; border:1px solid #3b4a77; flex:0 0 auto; }}
+.admin-file-main {{ min-width:0; flex:1; }}
+.admin-file-name {{ font-weight:800; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.admin-file-meta {{ color:var(--muted); font-size:12px; margin-top:3px; }}
+.admin-file-action {{ flex:0 0 auto; text-decoration:none; border:1px solid #4d67b1; color:#eef2ff; background:#172241; padding:7px 10px; border-radius:10px; font-size:12px; font-weight:800; }}
+.admin-file-action:hover {{ border-color:#8b5cf6; color:#fff; }}
+
+.center-empty {{ padding:28px 18px; border:1px dashed var(--border); border-radius:16px; color:var(--muted); text-align:center; background:#0f1527; }}
+.center-split {{ display:grid; grid-template-columns:minmax(0,1fr) 280px; gap:14px; }}
+.center-note-card {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; }}
+.center-note-card h3 {{ margin:0 0 10px 0; }}
+.center-note-list {{ display:flex; flex-direction:column; gap:8px; }}
+.center-note-line {{ color:var(--muted); font-size:13px; line-height:1.45; }}
+.panel-shell {{ display:grid; grid-template-columns:280px minmax(0,1fr); gap:16px; min-height:76vh; }}
+.panel-sidebar {{ display:flex; flex-direction:column; gap:10px; padding:14px; border:1px solid var(--border); border-radius:20px; background:linear-gradient(180deg,#10162a 0%, #0d1324 100%); }}
+.panel-stage {{ min-width:0; border:1px solid var(--border); border-radius:20px; background:linear-gradient(180deg,#10162a 0%, #0d1324 100%); box-shadow:0 18px 40px rgba(0,0,0,0.22); overflow:hidden; }}
+.panel-stage-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--border); background:#11182d; flex-wrap:wrap; }}
+.panel-stage-title {{ font-size:22px; font-weight:800; }}
+.panel-stage-sub {{ color:var(--muted); font-size:13px; }}
+.panel-stage-body {{ min-height:68vh; padding:14px; }}
+.panel-frame {{ width:100%; min-height:66vh; border:0; border-radius:16px; background:#0b1020; }}
+.panel-frame-wrap {{ border:1px solid var(--border); border-radius:16px; overflow:hidden; background:#0b1020; min-height:68vh; }}
+.messenger-frame-wrap {{ border:1px solid var(--border); border-radius:16px; overflow:hidden; background:#0b1020; height:72vh; }}
+.messenger-frame {{ width:100%; height:calc(100% + 68px); margin-top:-68px; border:0; display:block; background:#0b1020; }}
+.helper-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }}
+.helper-card {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; }}
+.helper-card h3 {{ margin:0 0 10px 0; }}
+.center-inline-search {{ display:flex; gap:8px; width:min(520px,100%); }}
+.panel-switch {{ text-align:left; width:100%; }}
+.panel-switch strong {{ pointer-events:none; }}
+.panel-view {{ display:none; }}
+.panel-view.is-active {{ display:block; }}
+.admin-messenger {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; }}
+.admin-messenger-sidebar, .admin-messenger-main {{ border:1px solid var(--border); border-radius:16px; background:#0b1020; }}
+.admin-messenger-sidebar {{ padding:12px; display:flex; flex-direction:column; gap:10px; min-width:0; }}
+.admin-chat-list {{ display:flex; flex-direction:column; gap:8px; max-height:68vh; overflow:auto; }}
+.center-chat-item {{ width:100%; text-align:left; background:#11182d; border:1px solid var(--border); border-radius:14px; padding:12px; }}
+.center-chat-item.is-active {{ background:#1b2850; border-color:#4d67b1; }}
+.center-chat-title {{ font-weight:700; margin-bottom:4px; word-break:break-word; }}
+.center-chat-meta {{ color:var(--muted); font-size:12px; }}
+.admin-messenger-main {{ min-width:0; overflow:hidden; }}
+.admin-chat-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap; }}
+.admin-chat-feed {{ padding:14px; max-height:68vh; overflow:auto; }}
+.ai-form {{ display:flex; flex-direction:column; gap:14px; }}
+.ai-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }}
+.ai-grid label, .ai-form label {{ display:flex; flex-direction:column; gap:7px; color:#dbe6ff; font-weight:700; }}
+.ai-check {{ flex-direction:row !important; align-items:center; gap:8px !important; border:1px solid var(--border); border-radius:14px; background:#11182d; padding:12px; }}
+.ai-form input[type=text], .ai-form input[type=number], .ai-form select, .ai-form textarea {{ width:100%; max-width:none; }}
+.utc-note {{ margin-left:auto; color:var(--muted); font-size:12px; }}
+
+.admin-users-shell {{ display:flex; flex-direction:column; gap:10px; }}
+.admin-users-titlebar {{ display:flex; align-items:center; justify-content:space-between; min-height:34px; }}
+.admin-users-titlebar strong {{ font-size:18px; letter-spacing:-0.02em; }}
+.admin-users-grid {{ display:grid; grid-template-columns:330px minmax(0,1fr); gap:12px; min-height:58vh; }}
+.admin-users-list, .admin-users-detail {{ border:1px solid var(--border); border-radius:18px; background:#0b1020; min-width:0; }}
+.admin-users-list {{ padding:12px; display:flex; flex-direction:column; gap:10px; }}
+.admin-user-tabs {{ display:flex; gap:8px; flex-wrap:wrap; }}
+.admin-user-tabs a {{ color:#dbe6ff; text-decoration:none; border:1px solid var(--border); background:#121933; border-radius:999px; padding:7px 10px; font-size:12px; font-weight:800; }}
+.admin-user-tabs a.active {{ background:#1b2850; border-color:#4d67b1; }}
+.admin-user-search {{ display:flex; gap:8px; width:100%; }}
+.admin-user-search input[type=text] {{ max-width:none; flex:1 1 auto; }}
+.admin-user-search button {{ flex:0 0 auto; }}
+.admin-user-list-scroll {{ display:flex; flex-direction:column; gap:8px; overflow:auto; max-height:62vh; padding-right:3px; }}
+.admin-user-row {{ display:flex; align-items:center; gap:10px; border:1px solid var(--border); border-radius:16px; background:#11182d; padding:10px; color:var(--text); text-decoration:none; min-width:0; }}
+.admin-user-row:hover {{ background:#15203a; border-color:#36508d; }}
+.admin-user-row.active {{ background:#172241; border-color:#4d67b1; box-shadow:inset 0 0 0 1px rgba(255,255,255,.04); }}
+.admin-user-row-avatar, .admin-user-avatar {{ width:38px; height:38px; border-radius:50%; flex:0 0 auto; overflow:hidden; display:flex; align-items:center; justify-content:center; border:1px solid #314068; background:radial-gradient(circle at 30% 30%, #314a88, #11182d 70%); color:#fff; font-weight:900; }}
+.admin-user-row-avatar-img, .admin-user-avatar-img {{ width:100%; height:100%; object-fit:cover; display:block; }}
+.admin-user-row-main {{ min-width:0; flex:1; }}
+.admin-user-row-name {{ font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.admin-user-row-meta {{ color:var(--muted); font-size:12px; margin-top:2px; }}
+.admin-user-pill {{ display:inline-flex; align-items:center; justify-content:center; border-radius:999px; border:1px solid var(--border); padding:5px 9px; font-size:12px; font-weight:800; white-space:nowrap; }}
+.admin-user-pill.online {{ background:#10261b; color:#98e2b8; border-color:#28533a; }}
+.admin-user-pill.offline {{ background:#151b2f; color:#b8c3e4; border-color:#2e3a63; }}
+.admin-user-pill.banned {{ background:#251316; color:#ffb4bf; border-color:#5a2730; }}
+.admin-user-pill.clear {{ background:#141e37; color:#aecdff; border-color:#314a84; }}
+.admin-users-detail {{ padding:14px; }}
+.admin-user-card {{ display:flex; flex-direction:column; gap:12px; }}
+.admin-user-card-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
+.admin-user-card-ident {{ display:flex; align-items:center; gap:12px; min-width:0; }}
+.admin-user-avatar {{ width:56px; height:56px; font-size:22px; cursor:pointer; padding:0; }}
+.admin-user-card-title {{ min-width:0; }}
+.admin-user-name {{ font-size:28px; font-weight:900; letter-spacing:-0.03em; line-height:1; word-break:break-word; }}
+.admin-user-sub {{ color:var(--muted); margin-top:6px; word-break:break-word; }}
+.admin-user-pills {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }}
+.admin-user-gear {{ width:38px; height:38px; padding:0; border-radius:12px; }}
+.admin-user-info-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+.admin-user-info-grid.compact {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+.admin-user-info {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:12px; min-width:0; }}
+.admin-user-info span {{ display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin-bottom:7px; }}
+.admin-user-info strong {{ display:block; word-break:break-word; }}
+.admin-user-section {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:12px; }}
+.admin-user-section-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:10px; }}
+.admin-user-section-head span {{ color:var(--muted); font-size:12px; }}
+.admin-report-list {{ display:flex; flex-direction:column; gap:8px; }}
+.admin-report-row {{ border:1px solid #2f3d68; border-radius:14px; background:#0d1324; padding:10px; }}
+.admin-report-top {{ display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:7px; }}
+.admin-report-reason {{ color:#ffb4bf; font-weight:900; font-size:12px; }}
+.admin-report-status {{ border:1px solid var(--border); border-radius:999px; padding:4px 8px; font-size:11px; font-weight:800; }}
+.admin-report-status.open {{ background:#2a1d10; color:#ffc98f; border-color:#6f4b24; }}
+.admin-report-status.done {{ background:#10261b; color:#98e2b8; border-color:#28533a; }}
+.admin-report-text {{ line-height:1.45; }}
+.admin-report-meta {{ color:var(--muted); font-size:12px; margin-top:6px; }}
+.admin-report-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }}
+.admin-report-actions form {{ margin:0; }}
+.admin-report-actions button {{ padding:7px 10px; font-size:12px; }}
+.admin-user-actions {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
+.admin-user-actions form {{ margin:0; }}
+.admin-ban-reason-input {{ width:100%; max-width:none; margin-bottom:8px; padding:9px 10px; border-radius:12px; border:1px solid var(--border); background:#090d18; color:var(--text); }}
+.admin-user-actions button {{ width:100%; }}
+.btn-ok {{ background:#122b1c; border-color:#28533a; color:#baf0cf; }}
+.btn-ok:hover {{ background:#173625; }}
+.admin-user-emptyline, .admin-user-empty-detail {{ border:1px dashed var(--border); border-radius:14px; background:#0f1527; color:var(--muted); padding:18px; text-align:center; }}
+.admin-user-empty-detail {{ min-height:360px; display:flex; align-items:center; justify-content:center; }}
+.admin-modal-backdrop {{ position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,.58); display:flex; align-items:center; justify-content:center; padding:20px; }}
+.admin-modal-window {{ width:min(760px,100%); max-height:90vh; overflow:auto; border:1px solid var(--border); border-radius:22px; background:#0b1020; box-shadow:0 24px 80px rgba(0,0,0,.45); }}
+.admin-modal-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; border-bottom:1px solid var(--border); padding:16px; }}
+.admin-modal-title {{ font-size:24px; font-weight:900; letter-spacing:-.02em; }}
+.admin-modal-sub {{ color:var(--muted); margin-top:4px; }}
+.admin-modal-close {{ width:36px; height:36px; padding:0; }}
+.admin-modal-body {{ padding:16px; display:flex; flex-direction:column; gap:14px; }}
+.admin-modal-avatar {{ border:1px solid var(--border); border-radius:18px; background:#11182d; min-height:260px; display:flex; align-items:center; justify-content:center; overflow:hidden; }}
+.admin-modal-avatar-img {{ max-width:100%; max-height:420px; object-fit:contain; display:block; }}
+.admin-modal-avatar-empty {{ width:120px; height:120px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:42px; font-weight:900; background:#172241; border:1px solid #314068; }}
+.admin-modal-actions {{ display:flex; gap:10px; flex-wrap:wrap; }}
+.admin-modal-actions a {{ text-decoration:none; border:1px solid var(--border); background:#121933; color:#eef2ff; border-radius:14px; padding:10px 12px; font-weight:800; }}
+.admin-user-toast {{ position:fixed; right:18px; bottom:18px; z-index:1200; max-width:min(420px,calc(100vw - 36px)); padding:12px 14px; border-radius:14px; border:1px solid #5a2730; background:#2d1420; color:#ffd7df; box-shadow:0 18px 50px rgba(0,0,0,.38); font-weight:800; }}
+.admin-user-toast[data-kind='ok'] {{ border-color:#28533a; background:#10261b; color:#baf0cf; }}
+.admin-user-toast[hidden] {{ display:none; }}
+@media (max-width: 980px) {{ .user-card, .server-row-card, .center-shell, .center-workspace, .panel-shell, .helper-grid, .user-fields, .admin-messenger, .admin-users-grid, .admin-user-info-grid, .admin-user-actions {{ grid-template-columns:1fr; }} .user-actions, .server-actions {{ justify-content:flex-start; }} .admin-user-list-scroll {{ max-height:none; }} }}
+@media (max-width: 640px) {{ main {{ padding:12px; }} header {{ padding:12px; }} .brand {{ font-size:22px; }} .search-row form {{ flex-direction:column; }} .search-row input[type=text], .search-row button {{ width:100%; }} .panel-stage-body {{ padding:10px; }} .messenger-frame {{ margin-top:-62px; height:calc(100% + 62px); }} }}
 </style>
 </head>
 <body>
 <header>
-  <div style="font-weight:700;">LaBerry Admin</div>
-  <a href="/admin/users">Users</a>
-  <a href="/admin/servers">Servers</a>
-  <a href="/admin/test-users">Test users</a>
-  <a href="/admin/db">DB</a>
-  <form method="post" action="/admin/logout" style="margin-left:auto;">
-    <button type="submit">Logout</button>
+  <div class='brand'>Админ-панель</div>
+  <nav class='nav'>{nav}</nav>
+  <div class='utc-note'>Время везде: UTC</div>
+  <form method='post' action='/admin/logout'>
+    <button type='submit'>Выйти</button>
   </form>
 </header>
 <main>
 {msg_html}
 {body}
 </main>
-</body>
+{center_script}{users_script}</body>
 </html>"#,
         title = escape_html(title),
+        nav = nav,
         msg_html = msg_html,
-        body = body
+        body = body,
+        center_script = center_script,
+        users_script = users_script
     );
 
     Html(html)
+}
+
+fn embedded_page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
+    let mut html = page(title, body, msg).0;
+    html = html.replacen("<header>", "<header style='display:none'>", 1);
+    html = html.replacen("<main>", "<main style='max-width:none;padding:12px;'>", 1);
+    Html(html)
+}
+
+async fn admin_file_raw(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(file_id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = require_admin_panel_enabled() { return (code, msg).into_response(); }
+    if let Err((code, msg)) = require_allow_ip(&headers) { return (code, msg).into_response(); }
+    if let Err(redir) = require_auth(&st, &headers) { return redir.into_response(); }
+
+    let row = sqlx::query(
+        r#"
+        SELECT original_name, mime_type, storage_path, file_size
+        FROM files
+        WHERE id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(file_id)
+    .fetch_optional(&st.db)
+    .await;
+
+    let row = match row {
+        Ok(Some(v)) => v,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("db_error: {e}")).into_response(),
+    };
+
+    let original_name: String = row.get("original_name");
+    let mime_type: String = row.get("mime_type");
+    let storage_path: String = row.get("storage_path");
+    let file_size: i64 = row.get("file_size");
+
+    let path = PathBuf::from(storage_path);
+    let meta = match fs::metadata(&path).await {
+        Ok(m) if m.is_file() && m.len() > 0 => m,
+        _ => return (StatusCode::NOT_FOUND, "Файл отсутствует на диске").into_response(),
+    };
+
+    let file = match File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("open_failed: {e}")).into_response(),
+    };
+
+    let safe_name = admin_sanitize_filename(&original_name);
+    let ct = HeaderValue::from_str(mime_type.split(';').next().unwrap_or("application/octet-stream").trim())
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    let cd = HeaderValue::from_str(&format!("attachment; filename=\"{}\"", safe_name))
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment"));
+    let len_value = std::cmp::max(file_size, meta.len() as i64).to_string();
+    let len = HeaderValue::from_str(&len_value).unwrap_or_else(|_| HeaderValue::from_static("0"));
+    let body = axum::body::Body::from_stream(ReaderStream::new(file));
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, ct),
+            (header::CONTENT_DISPOSITION, cd),
+            (header::CONTENT_LENGTH, len),
+            (header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff")),
+        ],
+        body,
+    ).into_response()
+}
+
+
+async fn admin_profile_file_raw(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(file_id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = require_admin_panel_enabled() { return (code, msg).into_response(); }
+    if let Err((code, msg)) = require_allow_ip(&headers) { return (code, msg).into_response(); }
+    if let Err(redir) = require_auth(&st, &headers) { return redir.into_response(); }
+
+    let row = sqlx::query(
+        r#"
+        SELECT original_name, mime_type, storage_path, file_size
+        FROM profile_files
+        WHERE id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(file_id)
+    .fetch_optional(&st.db)
+    .await;
+
+    let row = match row {
+        Ok(Some(v)) => v,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("db_error: {e}")).into_response(),
+    };
+
+    let original_name: String = row.get("original_name");
+    let mime_type: String = row.get("mime_type");
+    let storage_path: String = row.get("storage_path");
+    let file_size: i64 = row.get("file_size");
+
+    let path = PathBuf::from(storage_path);
+    let meta = match fs::metadata(&path).await {
+        Ok(m) if m.is_file() && m.len() > 0 => m,
+        _ => return (StatusCode::NOT_FOUND, "Файл отсутствует на диске").into_response(),
+    };
+
+    let file = match File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("open_failed: {e}")).into_response(),
+    };
+
+    let safe_name = admin_sanitize_filename(&original_name);
+    let ct = HeaderValue::from_str(mime_type.split(';').next().unwrap_or("application/octet-stream").trim())
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    let cd = HeaderValue::from_str(&format!("inline; filename=\"{}\"", safe_name))
+        .unwrap_or_else(|_| HeaderValue::from_static("inline"));
+    let len_value = std::cmp::max(file_size, meta.len() as i64).to_string();
+    let len = HeaderValue::from_str(&len_value).unwrap_or_else(|_| HeaderValue::from_static("0"));
+    let body = axum::body::Body::from_stream(ReaderStream::new(file));
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, ct),
+            (header::CONTENT_DISPOSITION, cd),
+            (header::CONTENT_LENGTH, len),
+            (header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff")),
+        ],
+        body,
+    ).into_response()
 }
 
 // =============================
@@ -248,7 +807,7 @@ fn require_admin_panel_enabled() -> Result<(), (StatusCode, String)> {
     if !admin_enabled() {
         return Err((
             StatusCode::NOT_FOUND,
-            "Admin panel is disabled (set LB_ENABLE_ADMIN_PANEL=1 or configure LB_ADMIN_PASSWORD[_HASH])".to_string(),
+            "Админка отключена (включи LB_ENABLE_ADMIN_PANEL=1 или настрой LB_ADMIN_PASSWORD[_HASH])".to_string(),
         ));
     }
     Ok(())
@@ -290,12 +849,12 @@ fn require_allow_ip(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
         .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()));
 
     let Some(remote) = remote else {
-        return Err((StatusCode::FORBIDDEN, "IP allowlist enabled, but no remote IP header".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Включён список разрешённых IP, но заголовок с IP не передан".to_string()));
     };
 
     let ip: IpAddr = remote
         .parse()
-        .map_err(|_| (StatusCode::FORBIDDEN, "Invalid remote IP".to_string()))?;
+        .map_err(|_| (StatusCode::FORBIDDEN, "Некорректный IP клиента".to_string()))?;
 
     for a in allow.split(',') {
         let a = a.trim();
@@ -309,7 +868,7 @@ fn require_allow_ip(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
         }
     }
 
-    Err((StatusCode::FORBIDDEN, "Not allowed from this IP".to_string()))
+    Err((StatusCode::FORBIDDEN, "Доступ с этого IP запрещён".to_string()))
 }
 
 fn new_session(st: &AppState) -> (String, AdminSession) {
@@ -362,12 +921,17 @@ async fn root(State(st): State<AppState>, headers: HeaderMap) -> impl IntoRespon
     if session_get(&st, &headers).is_none() {
         return Redirect::to("/admin/login").into_response();
     }
-    Redirect::to("/admin/users").into_response()
+    Redirect::to("/admin/center").into_response()
 }
 
 #[derive(Deserialize, Default)]
 struct MsgQuery {
     msg: Option<String>,
+    embed: Option<u8>,
+    view: Option<String>,
+    q: Option<String>,
+    mode: Option<String>,
+    user_id: Option<i64>,
 }
 
 async fn login_get(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<MsgQuery>) -> impl IntoResponse {
@@ -378,30 +942,30 @@ async fn login_get(State(st): State<AppState>, headers: HeaderMap, Query(q): Que
         return e.into_response();
     }
     if session_get(&st, &headers).is_some() {
-        return Redirect::to("/admin/users").into_response();
+        return Redirect::to("/admin/center").into_response();
     }
 
     let warn = if !admin_password_configured() {
-        "<div class='warn'>LB_ADMIN_PASSWORD_HASH / LB_ADMIN_PASSWORD is not configured. You will not be able to do destructive ops on non-test users/servers.</div>"
+        "<div class='warn'>LB_ADMIN_PASSWORD_HASH / LB_ADMIN_PASSWORD не настроен. Опасные действия для обычных пользователей и серверов будут заблокированы.</div>"
     } else {
         ""
     };
 
     let body = format!(
         r#"<div class='card'>
-<h2>Login</h2>
+<h2>Вход</h2>
 <form method='post' action='/admin/login'>
-  <div class='small'>Admin password</div>
+  <div class='small'>Пароль администратора</div>
   <input type='password' name='password' autocomplete='current-password' required />
   <div style='height:10px'></div>
-  <button type='submit'>Login</button>
+  <button type='submit'>Войти</button>
 </form>
 {warn}
 </div>"#,
         warn = warn
     );
 
-    page("Admin login", &body, q.msg.as_deref()).into_response()
+    page("Админка • Вход", &body, q.msg.as_deref()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -428,7 +992,7 @@ async fn login_post(
     let (sid, _sess) = new_session(&st);
     let mut h = HeaderMap::new();
     set_cookie(&mut h, cookie_for_session(&sid, admin_cookie_secure(&headers)));
-    (h, Redirect::to("/admin/users")).into_response()
+    (h, Redirect::to("/admin/center")).into_response()
 }
 
 async fn logout_post(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -444,13 +1008,545 @@ async fn logout_post(State(st): State<AppState>, headers: HeaderMap) -> impl Int
 }
 
 // =============================
-// Users list + actions
+// Пользователи list + actions
 // =============================
 
 #[derive(Deserialize, Default)]
 struct ListQuery {
     q: Option<String>,
     msg: Option<String>,
+    embed: Option<u8>,
+    return_to: Option<String>,
+    mode: Option<String>,
+    user_id: Option<i64>,
+}
+
+
+fn safe_admin_return_to(input: &str, fallback: &str) -> String {
+    let s = input.trim();
+    if s.starts_with("/admin/") && !s.contains("\n") && !s.contains("\r") {
+        s.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn normalized_user_mode(input: Option<&str>) -> &'static str {
+    match input.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
+        "active" => "active",
+        "banned" => "banned",
+        _ => "all",
+    }
+}
+
+fn user_mode_matches(user: &UserRow, mode: &str) -> bool {
+    match mode {
+        "active" => !user.is_banned,
+        "banned" => user.is_banned,
+        _ => true,
+    }
+}
+
+fn user_page_url(base_path: &str, embedded: bool, q: &str, mode: &str, user_id: Option<i64>) -> String {
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    if embedded {
+        ser.append_pair("view", "users");
+    }
+    let q = q.trim();
+    if !q.is_empty() {
+        ser.append_pair("q", q);
+    }
+    if mode != "all" {
+        ser.append_pair("mode", mode);
+    }
+    if let Some(user_id) = user_id {
+        ser.append_pair("user_id", &user_id.to_string());
+    }
+    let query = ser.finish();
+    if query.is_empty() { base_path.to_string() } else { format!("{base_path}?{query}") }
+}
+
+fn reason_label(reason: &str) -> &'static str {
+    match reason {
+        "spam" => "Спам",
+        "abuse" => "Оскорбления",
+        "avatar" => "Аватар",
+        "username" => "Ник",
+        "ads" => "Реклама",
+        "scam" => "Скам",
+        _ => "Другое",
+    }
+}
+
+fn report_status_label(status: &str) -> &'static str {
+    match status {
+        "reviewed" => "Просмотрено",
+        "rejected" => "Отклонено",
+        _ => "Новая",
+    }
+}
+
+fn render_user_reports_html(sess: &AdminSession, reports: &[UserReportRow], return_to: &str) -> String {
+    if reports.is_empty() {
+        return "<div class='admin-user-emptyline'>Репортов по этому пользователю нет.</div>".to_string();
+    }
+
+    let mut out = String::new();
+    for r in reports {
+        let message = if r.message.trim().is_empty() {
+            "Без комментария".to_string()
+        } else {
+            escape_html(&r.message)
+        };
+        let msg_id = r.message_id.map(|id| format!(" · сообщение #{id}")).unwrap_or_default();
+        let actions = if r.status == "open" {
+            format!(
+                r#"<div class='admin-report-actions'>
+  <form method='post' action='/admin/reports/{id}/status' data-ajax-report-status>
+    <input type='hidden' name='csrf' value='{csrf}' />
+    <input type='hidden' name='return_to' value='{return_to}' />
+    <input type='hidden' name='status' value='reviewed' />
+    <button type='submit' class='btn-soft'>Просмотрено</button>
+  </form>
+  <form method='post' action='/admin/reports/{id}/status' data-ajax-report-status>
+    <input type='hidden' name='csrf' value='{csrf}' />
+    <input type='hidden' name='return_to' value='{return_to}' />
+    <input type='hidden' name='status' value='rejected' />
+    <button type='submit' class='btn-soft'>Отклонить</button>
+  </form>
+</div>"#,
+                id = r.id,
+                csrf = escape_html(&sess.csrf),
+                return_to = escape_html(return_to),
+            )
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            r#"<div class='admin-report-row'>
+  <div class='admin-report-top'>
+    <span class='admin-report-reason'>{reason}</span>
+    <span class='admin-report-status {status_class}'>{status}</span>
+  </div>
+  <div class='admin-report-text'>{message}</div>
+  <div class='admin-report-meta'>От: #{reporter_id} {reporter_name} · {created_at}{msg_id}</div>
+  {actions}
+</div>"#,
+            reason = reason_label(&r.reason),
+            status = report_status_label(&r.status),
+            status_class = if r.status == "open" { "open" } else { "done" },
+            message = message,
+            reporter_id = r.reporter_id,
+            reporter_name = escape_html(&r.reporter_username),
+            created_at = escape_html(&fmt_admin_dt(&r.created_at)),
+            msg_id = escape_html(&msg_id),
+            actions = actions,
+        ));
+    }
+    out
+}
+
+fn render_user_detail_card(
+    sess: &AdminSession,
+    user: &UserRow,
+    reports: &[UserReportRow],
+    current_return_to: &str,
+) -> String {
+    let email_html = if user.email.trim().is_empty() { "без e-mail".to_string() } else { escape_html(&user.email) };
+    let initial = user.username.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_else(|| "?".to_string());
+    let online_label = if user.is_online { "Онлайн" } else { "Оффлайн" };
+    let online_class = if user.is_online { "online" } else { "offline" };
+    let access_label = if user.is_banned { "Ограничен" } else { "Без ограничений" };
+    let access_class = if user.is_banned { "banned" } else { "clear" };
+    let last_seen = if user.presence_updated_at.trim().is_empty() { "нет данных".to_string() } else { fmt_admin_dt(&user.presence_updated_at) };
+    let avatar_html = if let Some(file_id) = user.avatar_file_id {
+        format!("<img class='admin-user-avatar-img' src='/admin/profile-files/{file_id}/raw' alt='avatar' />")
+    } else {
+        escape_html(&initial)
+    };
+    let ban_reason_html = if user.is_banned && !user.ban_reason.trim().is_empty() {
+        format!(
+            "<div class='admin-user-section compact-ban-reason'><strong>Причина бана</strong><div class='admin-user-section-muted'>{}</div><div class='admin-report-meta'>{}</div></div>",
+            escape_html(&user.ban_reason),
+            if user.ban_at.trim().is_empty() { "".to_string() } else { format!("Выдан: {}", escape_html(&fmt_admin_dt(&user.ban_at))) }
+        )
+    } else {
+        String::new()
+    };
+    let main_action = if user.is_banned {
+        format!(
+            r#"<form method='post' action='/admin/users/{id}/unban' data-ajax-user-action>
+  <input type='hidden' name='csrf' value='{csrf}' />
+  <input type='hidden' name='return_to' value='{return_to}' />
+  <button type='submit' class='btn-ok'>Разбанить</button>
+</form>"#,
+            id = user.id,
+            csrf = escape_html(&sess.csrf),
+            return_to = escape_html(current_return_to),
+        )
+    } else {
+        format!(
+            r#"<form method='post' action='/admin/users/{id}/ban' data-ajax-user-action>
+  <input type='hidden' name='csrf' value='{csrf}' />
+  <input type='hidden' name='return_to' value='{return_to}' />
+  <input type='text' name='reason' class='admin-ban-reason-input' placeholder='Причина бана' maxlength='180' />
+  <button type='submit' class='btn-soft'>Заблокировать</button>
+</form>"#,
+            id = user.id,
+            csrf = escape_html(&sess.csrf),
+            return_to = escape_html(current_return_to),
+        )
+    };
+
+    format!(
+        r#"<div class='admin-user-card' data-admin-user-detail-card data-user-id='{id}' data-user-banned='{banned}' data-user-online='{online_data}'>
+  <div class='admin-user-card-head'>
+    <div class='admin-user-card-ident'>
+      <button type='button' class='admin-user-avatar' data-admin-user-details='{id}' data-details-url='/admin/users/{id}/details'>{avatar_html}</button>
+      <div class='admin-user-card-title'>
+        <div class='admin-user-name'>{username}</div>
+        <div class='admin-user-sub'>ID #{id} · {email_html}</div>
+        <div class='admin-user-pills'>
+          <span class='admin-user-pill {online_class}'>{online_label}</span>
+          <span class='admin-user-pill {access_class}'>{access_label}</span>
+        </div>
+      </div>
+    </div>
+    <button type='button' class='admin-user-gear' data-admin-user-details='{id}' data-details-url='/admin/users/{id}/details' title='Детали и аватар'>⚙</button>
+  </div>
+
+  <div class='admin-user-info-grid compact'>
+    <div class='admin-user-info'><span>Регистрация</span><strong>{created_at}</strong></div>
+    <div class='admin-user-info'><span>Последняя активность</span><strong>{last_seen}</strong></div>
+  </div>
+
+  {ban_reason_html}
+
+  <div class='admin-user-section'>
+    <div class='admin-user-section-head'>
+      <strong>Репорты</strong>
+      <span>{report_count}</span>
+    </div>
+    <div class='admin-report-list'>{reports_html}</div>
+  </div>
+
+  <div class='admin-user-actions'>
+    {main_action}
+    <form method='post' action='/admin/users/{id}/purge' data-ajax-user-action>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='{return_to}' />
+      <button type='submit' class='btn-soft'>Удалить контент</button>
+    </form>
+    <form method='post' action='/admin/users/{id}/ban_forever' data-ajax-user-action data-danger-action='1'>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='{return_to}' />
+      <button type='submit' class='btn-danger'>Удалить аккаунт</button>
+    </form>
+  </div>
+</div>"#,
+        id = user.id,
+        banned = if user.is_banned { "1" } else { "0" },
+        online_data = if user.is_online { "1" } else { "0" },
+        avatar_html = avatar_html,
+        username = escape_html(&user.username),
+        email_html = email_html,
+        online_class = online_class,
+        online_label = online_label,
+        access_class = access_class,
+        access_label = access_label,
+        created_at = escape_html(&fmt_admin_dt(&user.created_at)),
+        last_seen = escape_html(&last_seen),
+        ban_reason_html = ban_reason_html,
+        report_count = reports.len(),
+        reports_html = render_user_reports_html(sess, reports, current_return_to),
+        main_action = main_action,
+        csrf = escape_html(&sess.csrf),
+        return_to = escape_html(current_return_to),
+    )
+}
+
+fn render_user_details_modal(user: &UserRow) -> String {
+    let email_html = if user.email.trim().is_empty() { "без e-mail".to_string() } else { escape_html(&user.email) };
+    let initial = user.username.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_else(|| "?".to_string());
+    let avatar_big = if let Some(file_id) = user.avatar_file_id {
+        format!(r#"<img class='admin-modal-avatar-img' src='/admin/profile-files/{file_id}/raw' alt='avatar' />"#)
+    } else {
+        format!("<div class='admin-modal-avatar-empty'>{}</div>", escape_html(&initial))
+    };
+    let avatar_actions = if let Some(file_id) = user.avatar_file_id {
+        format!(
+            r#"<div class='admin-modal-actions'>
+  <a href='/admin/profile-files/{file_id}/raw' target='_blank' rel='noopener'>Открыть аватар</a>
+  <a href='/admin/profile-files/{file_id}/raw' download>Скачать</a>
+</div>"#,
+        )
+    } else {
+        "<div class='admin-user-emptyline'>Аватар не установлен.</div>".to_string()
+    };
+    format!(
+        r#"<div class='admin-modal-head'>
+  <div>
+    <div class='admin-modal-title'>{username}</div>
+    <div class='admin-modal-sub'>ID #{id} · {email_html}</div>
+  </div>
+  <button type='button' class='admin-modal-close' data-admin-modal-close>✕</button>
+</div>
+<div class='admin-modal-body'>
+  <div class='admin-modal-avatar'>{avatar_big}</div>
+  {avatar_actions}
+  <div class='admin-user-info-grid'>
+    <div class='admin-user-info'><span>Регистрация</span><strong>{created_at}</strong></div>
+    <div class='admin-user-info'><span>Последняя активность</span><strong>{last_seen}</strong></div>
+    <div class='admin-user-info'><span>Статус</span><strong>{status}</strong></div>
+    <div class='admin-user-info'><span>Бан</span><strong>{ban}</strong></div>
+  </div>
+</div>"#,
+        username = escape_html(&user.username),
+        id = user.id,
+        email_html = email_html,
+        avatar_big = avatar_big,
+        avatar_actions = avatar_actions,
+        created_at = escape_html(&fmt_admin_dt(&user.created_at)),
+        last_seen = escape_html(&if user.presence_updated_at.trim().is_empty() { "нет данных".to_string() } else { fmt_admin_dt(&user.presence_updated_at) }),
+        status = if user.is_online { "онлайн" } else { "оффлайн" },
+        ban = if user.is_banned { "ограничен" } else { "нет" },
+    )
+}
+
+fn render_users_panel_body(
+    sess: &AdminSession,
+    users: &[UserRow],
+    query: &str,
+    embedded: bool,
+    mode: &str,
+    requested_user_id: Option<i64>,
+    current_return_to: &str,
+    selected_reports: &[UserReportRow],
+) -> String {
+    let base_path = if embedded { "/admin/center" } else { "/admin/users" };
+    let mode = normalized_user_mode(Some(mode));
+    let filtered: Vec<&UserRow> = users.iter().filter(|u| user_mode_matches(u, mode)).collect();
+    let selected = requested_user_id
+        .and_then(|id| filtered.iter().copied().find(|u| u.id == id))
+        .or_else(|| filtered.first().copied());
+    let selected_id = selected.map(|u| u.id);
+
+    let all_href = user_page_url(base_path, embedded, query, "all", None);
+    let active_href = user_page_url(base_path, embedded, query, "active", None);
+    let banned_href = user_page_url(base_path, embedded, query, "banned", None);
+    let search_html = if embedded {
+        format!(
+            r#"<div class='admin-user-search'>
+  <input type='text' data-persist-key='admin-center-users-search' data-filter-input='users' value='{qval}' placeholder='Поиск: имя / e-mail / id' />
+  <button type='button' class='btn-soft' data-clear-filter='users'>Сбросить</button>
+</div>"#,
+            qval = escape_html(query),
+        )
+    } else {
+        format!(
+            r#"<form method='get' action='{action}' class='admin-user-search'>
+  <input type='hidden' name='mode' value='{mode}' />
+  <input type='text' name='q' value='{qval}' placeholder='Поиск: имя / e-mail / id' />
+  <button type='submit'>Найти</button>
+</form>"#,
+            action = base_path,
+            mode = escape_html(mode),
+            qval = escape_html(query),
+        )
+    };
+
+    let mut rows_html = String::new();
+    if filtered.is_empty() {
+        rows_html.push_str("<div class='admin-user-emptyline'>Пользователи не найдены.</div>");
+    } else {
+        for user in &filtered {
+            let initial = user.username.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_else(|| "?".to_string());
+            let row_href = user_page_url(base_path, embedded, query, mode, Some(user.id));
+            let card_url = format!("/admin/users/{}/card?return_to={}", user.id, url::form_urlencoded::byte_serialize(current_return_to.as_bytes()).collect::<String>());
+            let details_url = format!("/admin/users/{}/details", user.id);
+            let active = if selected_id == Some(user.id) { " active" } else { "" };
+            let pill_class = if user.is_banned { "banned" } else if user.is_online { "online" } else { "offline" };
+            let pill_text = if user.is_banned { "Бан" } else if user.is_online { "Онлайн" } else { "Оффлайн" };
+            let avatar_html = if let Some(file_id) = user.avatar_file_id {
+                format!("<img class='admin-user-row-avatar-img' src='/admin/profile-files/{file_id}/raw' alt='avatar' />")
+            } else {
+                escape_html(&initial)
+            };
+            let filter = format!("#{} {} {}", user.id, user.username.to_lowercase(), user.email.to_lowercase());
+            rows_html.push_str(&format!(
+                r#"<a class='admin-user-row{active}' href='{href}' data-admin-user-row data-user-id='{id}' data-card-url='{card_url}' data-details-url='{details_url}' data-filter-item='users' data-filter='{filter}'>
+  <div class='admin-user-row-avatar'>{avatar_html}</div>
+  <div class='admin-user-row-main'>
+    <div class='admin-user-row-name'>{username}</div>
+    <div class='admin-user-row-meta'>ID #{id}</div>
+  </div>
+  <span class='admin-user-pill {pill_class}'>{pill_text}</span>
+</a>"#,
+                active = active,
+                href = escape_html(&row_href),
+                id = user.id,
+                card_url = escape_html(&card_url),
+                details_url = escape_html(&details_url),
+                filter = escape_html(&filter),
+                avatar_html = avatar_html,
+                username = escape_html(&user.username),
+                pill_class = pill_class,
+                pill_text = pill_text,
+            ));
+        }
+    }
+
+    let detail_html = if let Some(user) = selected {
+        render_user_detail_card(sess, user, selected_reports, current_return_to)
+    } else {
+        "<div class='admin-user-empty-detail'>Выбери пользователя слева.</div>".to_string()
+    };
+
+    format!(
+        r#"<div class='admin-users-shell'>
+  <div class='admin-users-titlebar'>
+    <strong>Пользователи</strong>
+  </div>
+  <div class='admin-users-grid'>
+    <aside class='admin-users-list'>
+      <div class='admin-user-tabs'>
+        <a href='{all_href}' class='{all_cls}'>Все</a>
+        <a href='{active_href}' class='{active_cls}'>Обычные</a>
+        <a href='{banned_href}' class='{banned_cls}'>Забаненные</a>
+      </div>
+      {search_html}
+      <div class='admin-user-list-scroll'>{rows_html}</div>
+    </aside>
+    <section class='admin-users-detail' data-admin-user-detail>{detail_html}</section>
+  </div>
+</div>"#,
+        all_href = escape_html(&all_href),
+        active_href = escape_html(&active_href),
+        banned_href = escape_html(&banned_href),
+        all_cls = if mode == "all" { "active" } else { "" },
+        active_cls = if mode == "active" { "active" } else { "" },
+        banned_cls = if mode == "banned" { "active" } else { "" },
+        search_html = search_html,
+        rows_html = rows_html,
+        detail_html = detail_html,
+    )
+}
+
+fn render_servers_panel_body(query: &str, rows_html: &str, embedded: bool) -> String {
+    if embedded {
+        return format!(
+            r#"<div class='card'>
+  <div class='search-row'>
+    <div class='hstack'>
+      <h2 style='margin:0;'>Серверы</h2>
+      <span class='pill'>UTC</span>
+    </div>
+    <div class='center-inline-search'>
+      <input type='text' data-persist-key='admin-center-servers-search' data-filter-input='servers' value='{qval}' placeholder='Поиск: название сервера / id' />
+      <button type='button' class='btn-soft' data-clear-filter='servers'>Сбросить</button>
+    </div>
+  </div>
+</div>
+<div class='card'>
+  <div class='servers-list' data-filter-list='servers'>{rows}</div>
+</div>"#,
+            qval = escape_html(query),
+            rows = rows_html,
+        );
+    }
+    format!(
+        r#"<div class='card'>
+  <div class='search-row'>
+    <div class='hstack'>
+      <h2 style='margin:0;'>Серверы</h2>
+      <span class='pill'>UTC</span>
+    </div>
+    <form method='get' action='/admin/servers'>
+      <input type='text' name='q' value='{qval}' placeholder='Поиск: название сервера / id (пусто = последние)' />
+      <button type='submit'>Найти</button>
+    </form>
+  </div>
+</div>
+<div class='card'>
+  <div class='servers-list'>{rows}</div>
+</div>"#,
+        qval = escape_html(query),
+        rows = rows_html,
+    )
+}
+
+fn render_db_panel_body(sess: &AdminSession, return_to: &str) -> String {
+    let rt = escape_html(return_to);
+    format!(
+        r#"
+<div class='card'>
+  <div class='hstack'>
+    <h2 style='margin:0;'>База данных</h2>
+    <span class='pill'>Прямое выполнение</span>
+  </div>
+  <div class='small' style='margin-top:10px;'>Операции на этой странице запускаются сразу по нажатию. Интерфейс использует единый UTC-формат времени.</div>
+</div>
+
+<div class='db-list'>
+  <div class='db-card'>
+    <h3>Очистить сообщения и вложения</h3>
+    <div class='small'>Удаляет сообщения, реакции, закрепы, chat_reads, записи files и сами файлы. Пользователи, серверы и каналы остаются.</div>
+    <div style='height:12px'></div>
+    <form method='post' action='/admin/db/wipe_messages'>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='{rt}' />
+      <button type='submit' class='btn-soft'>Очистить сообщения</button>
+    </form>
+  </div>
+
+  <div class='db-card'>
+    <h3>Очистить серверы и каналы</h3>
+    <div class='small danger-note'>Удаляет все серверы, каналы, сообщения и файлы внутри них. Личные сообщения не трогаются.</div>
+    <div style='height:12px'></div>
+    <form method='post' action='/admin/db/wipe_servers'>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='{rt}' />
+      <button type='submit' class='btn-danger'>Очистить серверы</button>
+    </form>
+  </div>
+
+  <div class='db-card'>
+    <h3>Сбросить всё, кроме пользователей</h3>
+    <div class='small danger-note'>Профили, настройки, сессии, друзья, серверы, ЛС, сообщения и файлы будут удалены. Глобальный сервер создастся заново автоматически.</div>
+    <div style='height:12px'></div>
+    <form method='post' action='/admin/db/reset_keep_users'>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='{rt}' />
+      <button type='submit' class='btn-danger'>Сбросить, оставить пользователей</button>
+    </form>
+  </div>
+
+  <div class='db-card'>
+    <h3>Очистить просроченные файлы</h3>
+    <div class='small'>Удаляет истёкшие временные вложения и мусорные файлы/thumbs без записей в БД.</div>
+    <div style='height:12px'></div>
+    <form method='post' action='/admin/db/cleanup_expired_files'>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='{rt}' />
+      <button type='submit' class='btn-soft'>Очистить файлы</button>
+    </form>
+  </div>
+
+  <div class='db-card'>
+    <h3>Выполнить VACUUM</h3>
+    <div class='small'>Пересобирает файл базы данных. Во время работы может потребоваться до ~2× свободного места на диске.</div>
+    <div style='height:12px'></div>
+    <form method='post' action='/admin/db/vacuum'>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='{rt}' />
+      <button type='submit' class='btn-soft'>Запустить VACUUM</button>
+    </form>
+  </div>
+</div>
+"#,
+        csrf = escape_html(&sess.csrf),
+        rt = rt,
+    )
 }
 
 async fn users_list(
@@ -470,98 +1566,147 @@ async fn users_list(
     };
 
     let query = q.q.clone().unwrap_or_default().trim().to_string();
-    let users = fetch_users(&st.db, &query, 200).await;
+    let mode = normalized_user_mode(q.mode.as_deref());
+    let embed = q.embed == Some(1);
+    let base_path = if embed { "/admin/center" } else { "/admin/users" };
 
-    let mut rows_html = String::new();
-    match users {
+    let body = match fetch_users(&st.db, &query, 200).await {
         Ok(list) => {
-            for u in list {
-                let id = u.id;
-                let phrase_ban = format!("BAN USER {}", id);
-                let phrase_del = format!("DELETE USER {}", id);
-                let phrase_purge = format!("PURGE USER CONTENT {}", id);
+            let selected_id = q.user_id.or_else(|| list.iter().find(|u| user_mode_matches(u, mode)).map(|u| u.id));
+            let fallback_return_to = user_page_url(base_path, embed, &query, mode, selected_id);
+            let current_return_to = safe_admin_return_to(q.return_to.as_deref().unwrap_or(""), &fallback_return_to);
+            let reports = match selected_id {
+                Some(id) => fetch_user_reports(&st.db, id, 8).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            render_users_panel_body(
+                &sess,
+                &list,
+                &query,
+                embed,
+                mode,
+                selected_id,
+                &current_return_to,
+                &reports,
+            )
+        }
+        Err(err) => format!(
+            "<div class='card'><div class='empty-state'>Ошибка БД: {}</div></div>",
+            escape_html(&format!("{}", err))
+        ),
+    };
 
-                rows_html.push_str(&format!(
-                    r#"<tr>
-<td>#{id}</td>
-<td>{username}<div class='small'>{email}</div></td>
-<td>{banned}</td>
-<td class='small'>{created_at}</td>
-<td class='row-actions'>
-  <form method='post' action='/admin/users/{id}/ban'>
-    <input type='hidden' name='csrf' value='{csrf}' />
-    <input type='hidden' name='phrase' value='{phrase_ban}' />
-    <input type='text' name='confirm' placeholder='Type: {phrase_ban}' required />
-    <input type='password' name='admin_password' placeholder='Admin password (only for non-test)' />
-    <button type='submit'>Ban</button>
-  </form>
-  <form method='post' action='/admin/users/{id}/purge'>
-    <input type='hidden' name='csrf' value='{csrf}' />
-    <input type='hidden' name='phrase' value='{phrase_purge}' />
-    <input type='text' name='confirm' placeholder='Type: {phrase_purge}' required />
-    <input type='password' name='admin_password' placeholder='Admin password (only for non-test)' />
-    <button type='submit'>Purge content</button>
-  </form>
-  <form method='post' action='/admin/users/{id}/ban_forever'>
-    <input type='hidden' name='csrf' value='{csrf}' />
-    <input type='hidden' name='phrase' value='{phrase_del}' />
-    <input type='text' name='confirm' placeholder='Type: {phrase_del}' required />
-    <input type='password' name='admin_password' placeholder='Admin password (only for non-test)' />
-    <button type='submit'>Ban forever (delete)</button>
-  </form>
-</td>
-</tr>"#,
-                    id = id,
-                    username = escape_html(&u.username),
-                    email = escape_html(&u.email),
-                    banned = if u.is_banned { "banned" } else { "" },
-                    created_at = escape_html(&u.created_at),
-                    csrf = escape_html(&sess.csrf),
-                    phrase_ban = escape_html(&phrase_ban),
-                    phrase_del = escape_html(&phrase_del),
-                    phrase_purge = escape_html(&phrase_purge),
-                ));
-            }
-        }
-        Err(err) => {
-            rows_html.push_str(&format!(
-                "<tr><td colspan='5'>DB error: {}</td></tr>",
-                escape_html(&format!("{}", err))
-            ));
-        }
+    if embed {
+        embedded_page("Админка • Пользователи", &body, q.msg.as_deref()).into_response()
+    } else {
+        page("Админка • Пользователи", &body, q.msg.as_deref()).into_response()
     }
+}
 
-    let body = format!(
-        r#"<div class='card'>
-<h2>Users</h2>
-<form method='get' action='/admin/users'>
-  <input type='text' name='q' value='{qval}' placeholder='Search: username / email / id (empty = latest)' />
-  <button type='submit'>Search</button>
-</form>
-<div class='small'>For non-test users, destructive actions require admin password configured via LB_ADMIN_PASSWORD_HASH or LB_ADMIN_PASSWORD.</div>
-</div>
-<div class='card'>
-<table class='table'>
-<thead><tr><th>ID</th><th>User</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
-<tbody>
-{rows}
-</tbody>
-</table>
-</div>"#,
-        qval = escape_html(&query),
-        rows = rows_html
-    );
 
-    page("Admin • Users", &body, q.msg.as_deref()).into_response()
+
+async fn admin_user_card_fragment(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(q): Query<ListQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
+    if let Err(e) = require_allow_ip(&headers) { return e.into_response(); }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let user = match fetch_user_by_id(&st.db, id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Пользователь не найден").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Ошибка БД: {e}")).into_response(),
+    };
+    let reports = fetch_user_reports(&st.db, id, 8).await.unwrap_or_default();
+    let fallback = user_page_url("/admin/users", false, "", "all", Some(id));
+    let return_to = safe_admin_return_to(q.return_to.as_deref().unwrap_or(""), &fallback);
+    Html(render_user_detail_card(&sess, &user, &reports, &return_to)).into_response()
+}
+
+async fn admin_user_details_fragment(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
+    if let Err(e) = require_allow_ip(&headers) { return e.into_response(); }
+    if let Err(r) = require_auth(&st, &headers) { return r.into_response(); }
+
+    match fetch_user_by_id(&st.db, id).await {
+        Ok(Some(user)) => Html(render_user_details_modal(&user)).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "Пользователь не найден").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Ошибка БД: {e}")).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
 struct ActionForm {
     csrf: String,
+    #[serde(default)]
     phrase: String,
-    confirm: String,
     #[serde(default)]
     admin_password: String,
+    #[serde(default)]
+    return_to: String,
+    #[serde(default)]
+    reason: String,
+}
+
+
+#[derive(Deserialize)]
+struct ReportStatusForm {
+    csrf: String,
+    status: String,
+    #[serde(default)]
+    return_to: String,
+}
+
+async fn admin_report_status(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(f): Form<ReportStatusForm>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
+    if let Err(e) = require_allow_ip(&headers) { return e.into_response(); }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let return_to = safe_admin_return_to(&f.return_to, "/admin/users");
+    if f.csrf != sess.csrf {
+        return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
+    }
+    let status = match f.status.trim() {
+        "open" => "open",
+        "reviewed" => "reviewed",
+        "rejected" => "rejected",
+        _ => "reviewed",
+    };
+    let now = auth::now_iso();
+    let res = if status == "open" {
+        sqlx::query("UPDATE user_reports SET status = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&st.db)
+            .await
+    } else {
+        sqlx::query("UPDATE user_reports SET status = ?, resolved_at = ?, resolved_by = NULL WHERE id = ?")
+            .bind(status)
+            .bind(&now)
+            .bind(id)
+            .execute(&st.db)
+            .await
+    };
+    match res {
+        Ok(_) => admin_redirect_with_msg(&return_to, "Готово").into_response(),
+        Err(e) => admin_redirect_with_msg(&return_to, &format!("Ошибка: {e}")).into_response(),
+    }
 }
 
 async fn user_ban(
@@ -570,7 +1715,7 @@ async fn user_ban(
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    action_user_common(st, headers, id, f, UserAction::Ban).await
+    action_user_common(st, headers, id, f, UserAction::Заблокировать).await
 }
 
 async fn user_purge_content(
@@ -582,19 +1727,29 @@ async fn user_purge_content(
     action_user_common(st, headers, id, f, UserAction::PurgeContent).await
 }
 
+async fn user_unban(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(f): Form<ActionForm>,
+) -> impl IntoResponse {
+    action_user_common(st, headers, id, f, UserAction::Unban).await
+}
+
 async fn user_ban_forever(
     State(st): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    action_user_common(st, headers, id, f, UserAction::BanForever).await
+    action_user_common(st, headers, id, f, UserAction::DeleteAccount).await
 }
 
 enum UserAction {
-    Ban,
+    Заблокировать,
+    Unban,
     PurgeContent,
-    BanForever,
+    DeleteAccount,
 }
 
 async fn action_user_common(
@@ -616,11 +1771,7 @@ async fn action_user_common(
     };
 
     if f.csrf != sess.csrf {
-        return admin_redirect_with_msg("/admin/users", "CSRF token mismatch").into_response();
-    }
-
-    if f.confirm.trim() != f.phrase.trim() {
-        return admin_redirect_with_msg("/admin/users", "Confirmation phrase mismatch").into_response();
+        return admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/users"), "CSRF-токен не совпадает").into_response();
     }
 
     let user_row = sqlx::query("SELECT username, COALESCE(email,'') AS email FROM users WHERE id = ?")
@@ -629,40 +1780,29 @@ async fn action_user_common(
         .await;
 
     let Ok(Some(r)) = user_row else {
-        return admin_redirect_with_msg("/admin/users", "User not found").into_response();
+        return admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/users"), "Пользователь не найден").into_response();
     };
     let username: String = r.get("username");
     let email: String = r.get("email");
 
-    let re = test_user_re();
-    let is_test = is_test_user(&re, &username, &email);
-
-    if !is_test {
-        if !admin_password_configured() {
-            return admin_redirect_with_msg("/admin/users", "Admin password not configured; refusing non-test operation").into_response();
-        }
-        if f.admin_password.trim().is_empty() {
-            return admin_redirect_with_msg("/admin/users", "Admin password required for non-test operation").into_response();
-        }
-        if let Err(e) = verify_admin_password(f.admin_password.trim()) {
-            return admin_redirect_with_msg("/admin/users", &format!("{}", e)).into_response();
-        }
-    }
+    let _re = test_user_re();
+    let _is_test = is_test_user(&_re, &username, &email);
 
     let res = match act {
-        UserAction::Ban => ban_user_exec(&st.db, user_id).await,
+        UserAction::Заблокировать => ban_user_exec(&st.db, user_id, &f.reason).await,
+        UserAction::Unban => unban_user_exec(&st.db, user_id).await,
         UserAction::PurgeContent => purge_user_content_exec(&st.db, user_id).await,
-        UserAction::BanForever => purge_user_exec(&st.db, user_id).await,
+        UserAction::DeleteAccount => purge_user_exec(&st.db, user_id).await,
     };
 
     match res {
-        Ok(_) => admin_redirect_with_msg("/admin/users", "OK").into_response(),
-        Err(e) => admin_redirect_with_msg("/admin/users", &format!("Error: {}", e)).into_response(),
+        Ok(_) => admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/users"), "Готово").into_response(),
+        Err(e) => admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/users"), &format!("Ошибка: {}", e)).into_response(),
     }
 }
 
 // =============================
-// Test users page
+// Тестовые пользователи page
 // =============================
 
 #[derive(Deserialize, Default)]
@@ -704,26 +1844,25 @@ async fn test_users_page(
                     id = u.id,
                     username = escape_html(&u.username),
                     email = escape_html(&u.email),
-                    banned = if u.is_banned { "banned" } else { "" },
-                    created_at = escape_html(&u.created_at),
+                    banned = if u.is_banned { "заблокирован" } else { "" },
+                    created_at = escape_html(&fmt_admin_dt(&u.created_at)),
                 ));
             }
 
             let body = format!(
                 r#"<div class='card'>
-<h2>Test users</h2>
-<div class='small'>Regex: <code>{re}</code> (set LB_TEST_USER_REGEX to change)</div>
+<h2>Тестовые пользователи</h2>
+<div class='small'>Шаблон: <code>{re}</code> (измени LB_TEST_USER_REGEX, если нужно)</div>
 <form method='post' action='/admin/test-users'>
   <input type='hidden' name='csrf' value='{csrf}' />
   <table class='table'>
-  <thead><tr><th></th><th>ID</th><th>User</th><th>Status</th><th>Created</th></tr></thead>
+  <thead><tr><th></th><th>ID</th><th>Пользователь</th><th>Статус</th><th>Создан</th></tr></thead>
   <tbody>
   {rows}
   </tbody>
   </table>
   <div style='height:10px'></div>
-  <input type='text' name='confirm' placeholder='Type: DELETE N TEST USERS' required />
-  <button type='submit'>Delete selected</button>
+  <button type='submit' class='btn-danger'>Удалить выбранных</button>
 </form>
 </div>"#,
                 re = escape_html(re.as_str()),
@@ -731,14 +1870,14 @@ async fn test_users_page(
                 rows = rows
             );
 
-            return page("Admin • Test users", &body, q.msg.as_deref()).into_response();
+            return page("Админка • Тестовые пользователи", &body, q.msg.as_deref()).into_response();
         }
         Err(e) => {
             let body = format!(
-                "<div class='card'>DB error: {}</div>",
+                "<div class='card'>Ошибка БД: {}</div>",
                 escape_html(&format!("{}", e))
             );
-            return page("Admin • Test users", &body, q.msg.as_deref()).into_response();
+            return page("Админка • Тестовые пользователи", &body, q.msg.as_deref()).into_response();
         }
     }
 }
@@ -748,7 +1887,6 @@ struct DeleteTestUsersForm {
     csrf: String,
     #[serde(default)]
     user_ids: Vec<i64>,
-    confirm: String,
 }
 
 async fn test_users_delete(
@@ -768,16 +1906,11 @@ async fn test_users_delete(
     };
 
     if f.csrf != sess.csrf {
-        return admin_redirect_with_msg("/admin/test-users", "CSRF token mismatch").into_response();
+        return admin_redirect_with_msg("/admin/test-users", "CSRF-токен не совпадает").into_response();
     }
 
     if f.user_ids.is_empty() {
-        return admin_redirect_with_msg("/admin/test-users", "Nothing selected").into_response();
-    }
-
-    let phrase = format!("DELETE {} TEST USERS", f.user_ids.len());
-    if f.confirm.trim() != phrase {
-        return admin_redirect_with_msg("/admin/test-users", &format!("Type exactly: {}", phrase)).into_response();
+        return admin_redirect_with_msg("/admin/test-users", "Ничего не выбрано").into_response();
     }
 
     // Safety: verify they are actually test users
@@ -788,26 +1921,26 @@ async fn test_users_delete(
             .fetch_optional(&st.db)
             .await;
         let Ok(Some(r)) = row else {
-            return admin_redirect_with_msg("/admin/test-users", "User not found").into_response();
+            return admin_redirect_with_msg("/admin/test-users", "Пользователь не найден").into_response();
         };
         let username: String = r.get("username");
         let email: String = r.get("email");
         if !is_test_user(&re, &username, &email) {
-            return admin_redirect_with_msg("/admin/test-users", "Refusing: selection contains non-test user").into_response();
+            return admin_redirect_with_msg("/admin/test-users", "Операция отклонена: в списке есть обычный пользователь").into_response();
         }
     }
 
     for id in &f.user_ids {
         if let Err(e) = purge_user_exec(&st.db, *id).await {
-            return admin_redirect_with_msg("/admin/test-users", &format!("Error: {}", e)).into_response();
+            return admin_redirect_with_msg("/admin/test-users", &format!("Ошибка: {}", e)).into_response();
         }
     }
 
-    admin_redirect_with_msg("/admin/test-users", "OK").into_response()
+    admin_redirect_with_msg("/admin/test-users", "Готово").into_response()
 }
 
 // =============================
-// Servers list + actions
+// Серверы list + actions
 // =============================
 
 async fn servers_list(
@@ -832,64 +1965,61 @@ async fn servers_list(
     let mut rows_html = String::new();
     match servers {
         Ok(list) => {
-            for s in list {
-                let id = s.id;
-                let phrase = format!("DELETE SERVER {}", id);
-
-                rows_html.push_str(&format!(
-                    r#"<tr>
-<td>#{id}</td>
-<td>{name}<div class='small'>owner: #{owner_id} {owner_name}</div></td>
-<td class='small'>{created_at}</td>
-<td>
-  <form method='post' action='/admin/servers/{id}/delete'>
-    <input type='hidden' name='csrf' value='{csrf}' />
-    <input type='hidden' name='phrase' value='{phrase}' />
-    <input type='text' name='confirm' placeholder='Type: {phrase}' required />
-    <input type='password' name='admin_password' placeholder='Admin password (only for non-test)' />
-    <button type='submit'>Delete server</button>
-  </form>
-</td>
-</tr>"#,
-                    id = id,
-                    name = escape_html(&s.name),
-                    owner_id = s.owner_id,
-                    owner_name = escape_html(&s.owner_username),
-                    created_at = escape_html(&s.created_at),
-                    csrf = escape_html(&sess.csrf),
-                    phrase = escape_html(&phrase),
-                ));
+            if list.is_empty() {
+                rows_html.push_str("<div class='empty-state'>Серверы не найдены.</div>");
+            } else {
+                for s in list {
+                    rows_html.push_str(&format!(
+                        r#"<div class='server-row-card'>
+                        <div class='server-main'>
+                            <div class='server-top'>
+                            <div class='server-title'>
+                                <span class='server-id'>#{id}</span>
+                                <span class='server-name'>{name}</span>
+                            </div>
+                            <div class='user-meta'>Создан: {created_at}</div>
+                            </div>
+                            <div class='server-meta'>Владелец: #{owner_id} {owner_name}</div>
+                        </div>
+                        <div class='server-actions'>
+                            <form method='post' action='/admin/servers/{id}/add_all_users' class='inline-form'>
+                            <input type='hidden' name='csrf' value='{csrf}' />
+                            <input type='hidden' name='return_to' value='{return_to}' />
+                            <button type='submit' class='btn-soft'>Добавить всех пользователей</button>
+                            </form>
+                            <form method='post' action='/admin/servers/{id}/delete' class='inline-form'>
+                            <input type='hidden' name='csrf' value='{csrf}' />
+                            <input type='hidden' name='return_to' value='{return_to}' />
+                            <button type='submit' class='btn-danger'>Удалить сервер</button>
+                            </form>
+                        </div>
+                        </div>"#,
+                        id = s.id,
+                        name = escape_html(&s.name),
+                        owner_id = s.owner_id,
+                        owner_name = escape_html(&s.owner_username),
+                        created_at = escape_html(&fmt_admin_dt(&s.created_at)),
+                        csrf = escape_html(&sess.csrf),
+                        return_to = escape_html(&safe_admin_return_to(q.return_to.as_deref().unwrap_or(""), if q.embed == Some(1) { "/admin/center?view=servers" } else { "/admin/servers" })),
+                    ));
+                }
             }
         }
         Err(err) => {
             rows_html.push_str(&format!(
-                "<tr><td colspan='4'>DB error: {}</td></tr>",
+                "<div class='empty-state'>Ошибка БД: {}</div>",
                 escape_html(&format!("{}", err))
             ));
         }
     }
+    
+    let body = render_servers_panel_body(&query, &rows_html, q.embed == Some(1));
 
-    let body = format!(
-        r#"<div class='card'>
-<h2>Servers</h2>
-<form method='get' action='/admin/servers'>
-  <input type='text' name='q' value='{qval}' placeholder='Search: server name / id (empty = latest)' />
-  <button type='submit'>Search</button>
-</form>
-</div>
-<div class='card'>
-<table class='table'>
-<thead><tr><th>ID</th><th>Server</th><th>Created</th><th>Actions</th></tr></thead>
-<tbody>
-{rows}
-</tbody>
-</table>
-</div>"#,
-        qval = escape_html(&query),
-        rows = rows_html
-    );
-
-    page("Admin • Servers", &body, q.msg.as_deref()).into_response()
+    if q.embed == Some(1) {
+        embedded_page("Админка • Серверы", &body, q.msg.as_deref()).into_response()
+    } else {
+        page("Админка • Серверы", &body, q.msg.as_deref()).into_response()
+    }
 }
 
 async fn server_delete(
@@ -910,11 +2040,7 @@ async fn server_delete(
     };
 
     if f.csrf != sess.csrf {
-        return admin_redirect_with_msg("/admin/servers", "CSRF token mismatch").into_response();
-    }
-
-    if f.confirm.trim() != f.phrase.trim() {
-        return admin_redirect_with_msg("/admin/servers", "Confirmation phrase mismatch").into_response();
+        return admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/servers"), "CSRF-токен не совпадает").into_response();
     }
 
     let row = sqlx::query("SELECT name FROM servers WHERE id = ?")
@@ -923,34 +2049,79 @@ async fn server_delete(
         .await;
 
     let Ok(Some(r)) = row else {
-        return admin_redirect_with_msg("/admin/servers", "Server not found").into_response();
+        return admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/servers"), "Сервер не найден").into_response();
     };
     let name: String = r.get("name");
 
-    let re = test_server_re();
-    let is_test = is_test_server(&re, &name);
-
-    if !is_test {
-        if !admin_password_configured() {
-            return admin_redirect_with_msg("/admin/servers", "Admin password not configured; refusing non-test operation").into_response();
-        }
-        if f.admin_password.trim().is_empty() {
-            return admin_redirect_with_msg("/admin/servers", "Admin password required for non-test operation").into_response();
-        }
-        if let Err(e) = verify_admin_password(f.admin_password.trim()) {
-            return admin_redirect_with_msg("/admin/servers", &format!("{}", e)).into_response();
-        }
-    }
+    let _re = test_server_re();
+    let _is_test = is_test_server(&_re, &name);
 
     match purge_server_exec(&st.db, id).await {
-        Ok(_) => admin_redirect_with_msg("/admin/servers", "OK").into_response(),
-        Err(e) => admin_redirect_with_msg("/admin/servers", &format!("Error: {}", e)).into_response(),
+        Ok(_) => admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/servers"), "Готово").into_response(),
+        Err(e) => admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/servers"), &format!("Ошибка: {}", e)).into_response(),
+    }
+}
+
+
+async fn server_add_all_users(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(f): Form<ActionForm>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let return_to = safe_admin_return_to(&f.return_to, "/admin/servers");
+    if f.csrf != sess.csrf {
+        return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
+    }
+
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM servers WHERE id = ? LIMIT 1")
+        .bind(id)
+        .fetch_optional(&st.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+    if !exists {
+        return admin_redirect_with_msg(&return_to, "Сервер не найден").into_response();
+    }
+
+    let res = sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO server_members(server_id, user_id, role)
+        SELECT ?, id, 'member'
+        FROM users
+        WHERE is_banned = 0
+        "#,
+    )
+    .bind(id)
+    .execute(&st.db)
+    .await;
+
+    match res {
+        Ok(done) => admin_redirect_with_msg(
+            &return_to,
+            &format!("Готово. Добавлено пользователей: {}", done.rows_affected()),
+        )
+        .into_response(),
+        Err(e) => admin_redirect_with_msg(&return_to, &format!("Ошибка: {}", e)).into_response(),
     }
 }
 
 
 // =============================
-// DB tools
+// Инструменты базы данных
 // =============================
 
 async fn db_tools_page(
@@ -969,76 +2140,16 @@ async fn db_tools_page(
         Err(r) => return r.into_response(),
     };
 
-    let phrase_wipe_messages = "WIPE ALL MESSAGES".to_string();
-    let phrase_wipe_servers = "WIPE ALL SERVERS".to_string();
-    let phrase_reset_keep_users = "RESET DB KEEP USERS".to_string();
-    let phrase_vacuum = "VACUUM DB".to_string();
-
-    let body = format!(
-        r#"
-<div class='card'>
-<h2>DB tools</h2>
-<div class='small'>
-These actions are destructive. They require admin password and a confirmation phrase.
-</div>
-</div>
-
-<div class='card'>
-<h3>Wipe: messages + attachments (keep users/servers/channels)</h3>
-<form method='post' action='/admin/db/wipe_messages'>
-  <input type='hidden' name='csrf' value='{csrf}' />
-  <input type='hidden' name='phrase' value='{phrase}' />
-  <input type='text' name='confirm' placeholder='Type: {phrase}' required />
-  <input type='password' name='admin_password' placeholder='Admin password' required />
-  <button type='submit'>Wipe messages</button>
-</form>
-<div class='small'>Deletes: messages, reactions, pins, chat_reads, files table rows + stored files (and thumbnails).</div>
-</div>
-
-<div class='card'>
-<h3>Wipe: servers + channels + everything inside (keep users + DMs)</h3>
-<form method='post' action='/admin/db/wipe_servers'>
-  <input type='hidden' name='csrf' value='{csrf}' />
-  <input type='hidden' name='phrase' value='{phrase2}' />
-  <input type='text' name='confirm' placeholder='Type: {phrase2}' required />
-  <input type='password' name='admin_password' placeholder='Admin password' required />
-  <button type='submit'>Wipe servers</button>
-</form>
-<div class='small'>Deletes all servers and their channels/messages/files. DMs are not touched.</div>
-</div>
-
-<div class='card'>
-<h3>Reset: delete everything except users</h3>
-<form method='post' action='/admin/db/reset_keep_users'>
-  <input type='hidden' name='csrf' value='{csrf}' />
-  <input type='hidden' name='phrase' value='{phrase3}' />
-  <input type='text' name='confirm' placeholder='Type: {phrase3}' required />
-  <input type='password' name='admin_password' placeholder='Admin password' required />
-  <button type='submit'>Reset (keep users)</button>
-</form>
-<div class='small'>Deletes everything except rows in <code>users</code>. Profile/settings/sessions/friends/servers/dms/messages/files are removed. Global server will be recreated automatically.</div>
-</div>
-
-<div class='card'>
-<h3>Maintenance: VACUUM</h3>
-<form method='post' action='/admin/db/vacuum'>
-  <input type='hidden' name='csrf' value='{csrf}' />
-  <input type='hidden' name='phrase' value='{phrase4}' />
-  <input type='text' name='confirm' placeholder='Type: {phrase4}' required />
-  <input type='password' name='admin_password' placeholder='Admin password' required />
-  <button type='submit'>VACUUM</button>
-</form>
-<div class='small'>VACUUM rebuilds the database file and can require up to ~2x free disk space while running.</div>
-</div>
-"#,
-        csrf = escape_html(&sess.csrf),
-        phrase = escape_html(&phrase_wipe_messages),
-        phrase2 = escape_html(&phrase_wipe_servers),
-        phrase3 = escape_html(&phrase_reset_keep_users),
-        phrase4 = escape_html(&phrase_vacuum),
+    let body = render_db_panel_body(
+        &sess,
+        if q.embed == Some(1) { "/admin/center?view=db" } else { "/admin/db" },
     );
 
-    page("Admin • DB tools", &body, q.msg.as_deref()).into_response()
+    if q.embed == Some(1) {
+        embedded_page("Админка • База данных", &body, q.msg.as_deref()).into_response()
+    } else {
+        page("Админка • База данных", &body, q.msg.as_deref()).into_response()
+    }
 }
 
 async fn db_wipe_messages_post(
@@ -1073,6 +2184,32 @@ async fn db_vacuum_post(
     db_action_common(st, headers, f, DbAction::Vacuum).await
 }
 
+async fn db_cleanup_expired_files_post(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ActionForm>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let return_to = safe_admin_return_to(&f.return_to, "/admin/db");
+    if f.csrf != sess.csrf {
+        return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
+    }
+
+    crate::routes::files::cleanup_expired_files(&st).await;
+    admin_redirect_with_msg(&return_to, "Готово. Просроченные файлы и мусорные thumbs очищены.").into_response()
+}
+
+
 enum DbAction {
     WipeMessages,
     WipeServers,
@@ -1098,23 +2235,8 @@ async fn db_action_common(
     };
 
     if f.csrf != sess.csrf {
-        return admin_redirect_with_msg("/admin/db", "CSRF token mismatch").into_response();
+        return admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/db"), "CSRF-токен не совпадает").into_response();
     }
-    if f.confirm.trim() != f.phrase.trim() {
-        return admin_redirect_with_msg("/admin/db", "Confirmation phrase mismatch").into_response();
-    }
-
-    // Global destructive ops always require configured admin password
-    if !admin_password_configured() {
-        return admin_redirect_with_msg("/admin/db", "Admin password is not configured (LB_ADMIN_PASSWORD[_HASH])").into_response();
-    }
-    if f.admin_password.trim().is_empty() {
-        return admin_redirect_with_msg("/admin/db", "Admin password required").into_response();
-    }
-    if let Err(e) = verify_admin_password(f.admin_password.trim()) {
-        return admin_redirect_with_msg("/admin/db", &format!("{}", e)).into_response();
-    }
-
     let res = match act {
         DbAction::WipeMessages => wipe_all_messages_exec(&st.db).await,
         DbAction::WipeServers => wipe_all_servers_exec(&st.db).await,
@@ -1123,9 +2245,675 @@ async fn db_action_common(
     };
 
     match res {
-        Ok(_) => admin_redirect_with_msg("/admin/db", "OK").into_response(),
-        Err(e) => admin_redirect_with_msg("/admin/db", &format!("Error: {}", e)).into_response(),
+        Ok(_) => admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/db"), "Готово").into_response(),
+        Err(e) => admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/db"), &format!("Ошибка: {}", e)).into_response(),
     }
+}
+
+
+
+
+
+#[derive(Deserialize)]
+struct HomieJsonForm {
+    csrf: String,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Serialize)]
+struct HomieJsonResponse {
+    ok: bool,
+    answer: String,
+    error: String,
+}
+
+#[derive(Serialize)]
+struct HomieProxyResponse {
+    ok: bool,
+    error: String,
+    upstream: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct HomieUpstreamRequest {
+    session_id: String,
+    message: String,
+}
+
+fn homie_base_url() -> String {
+    env::var("LB_HOMIE_API_URL")
+        .or_else(|_| env::var("HOMIE_API_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8090".to_string())
+        .trim()
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn homie_http_token() -> Option<String> {
+    env::var("LB_HOMIE_HTTP_TOKEN")
+        .or_else(|_| env::var("HOMIE_HTTP_TOKEN"))
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn homie_attach_auth(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    if let Some(token) = homie_http_token() {
+        req.bearer_auth(token.clone()).header("X-Homie-Token", token)
+    } else {
+        req
+    }
+}
+
+fn homie_session_id(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.trim().chars().take(80) {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.' || ch == ':' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() { "admin-center".to_string() } else { out }
+}
+
+fn homie_looks_like_json_text(s: &str) -> bool {
+    let t = s.trim();
+    (t.len() >= 2)
+        && ((t.starts_with('{') && t.ends_with('}'))
+            || (t.starts_with('[') && t.ends_with(']'))
+            || (t.starts_with('\"') && t.ends_with('\"')))
+}
+
+fn homie_normalize_plain_text(s: &str) -> String {
+    if s.contains('\n') {
+        return s.to_string();
+    }
+
+    if !s.contains("\\n") && !s.contains("\\r\\n") {
+        return s.to_string();
+    }
+
+    s.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "  ")
+}
+
+fn homie_text_from_value(value: &serde_json::Value, depth: usize) -> Option<String> {
+    if depth > 6 {
+        return None;
+    }
+
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            if homie_looks_like_json_text(trimmed) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if let Some(text) = homie_text_from_value(&parsed, depth + 1) {
+                        if !text.trim().is_empty() {
+                            return Some(text);
+                        }
+                    }
+                }
+            }
+
+            Some(homie_normalize_plain_text(s))
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(text) = homie_text_from_value(item, depth + 1) {
+                    if !text.trim().is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+            None
+        }
+        serde_json::Value::Object(map) => {
+            const KEYS: &[&str] = &["answer", "final", "message", "content", "text", "output", "response", "result"];
+
+            for key in KEYS {
+                if let Some(v) = map.get(*key) {
+                    if let Some(text) = homie_text_from_value(v, depth + 1) {
+                        if !text.trim().is_empty() {
+                            return Some(text);
+                        }
+                    }
+                }
+            }
+
+            if let Some(choices) = map.get("choices") {
+                if let Some(text) = homie_text_from_value(choices, depth + 1) {
+                    if !text.trim().is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+
+            None
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(v) => Some(v.to_string()),
+        serde_json::Value::Null => None,
+    }
+}
+
+fn homie_error_from_value(value: &serde_json::Value) -> String {
+    match value.get("error") {
+        Some(v) => homie_text_from_value(v, 0).unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+fn homie_ok_from_value(value: &serde_json::Value, answer: &str) -> bool {
+    value
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || !answer.trim().is_empty()
+}
+
+async fn homie_health_get(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err((_code, msg)) = require_admin_panel_enabled() {
+        return Json(HomieProxyResponse { ok: false, error: msg, upstream: None }).into_response();
+    }
+    if let Err((_code, msg)) = require_allow_ip(&headers) {
+        return Json(HomieProxyResponse { ok: false, error: msg, upstream: None }).into_response();
+    }
+    if require_auth(&st, &headers).is_err() {
+        return Json(HomieProxyResponse { ok: false, error: "Нужна авторизация администратора".to_string(), upstream: None }).into_response();
+    }
+
+    let url = format!("{}/health", homie_base_url());
+    let client = reqwest::Client::new();
+    let res = homie_attach_auth(client.get(url)).send().await;
+
+    match res {
+        Ok(resp) => {
+            let status_ok = resp.status().is_success();
+            match resp.json::<serde_json::Value>().await {
+                Ok(value) => Json(HomieProxyResponse {
+                    ok: status_ok && value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                    error: if status_ok { String::new() } else { "Homie health вернул ошибку".to_string() },
+                    upstream: Some(value),
+                }).into_response(),
+                Err(e) => Json(HomieProxyResponse {
+                    ok: false,
+                    error: format!("Не удалось разобрать ответ Homie health: {e}"),
+                    upstream: None,
+                }).into_response(),
+            }
+        }
+        Err(e) => Json(HomieProxyResponse {
+            ok: false,
+            error: format!("Homie API недоступен: {e}"),
+            upstream: None,
+        }).into_response(),
+    }
+}
+
+async fn homie_tools_get(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err((_code, msg)) = require_admin_panel_enabled() {
+        return Json(HomieProxyResponse { ok: false, error: msg, upstream: None }).into_response();
+    }
+    if let Err((_code, msg)) = require_allow_ip(&headers) {
+        return Json(HomieProxyResponse { ok: false, error: msg, upstream: None }).into_response();
+    }
+    if require_auth(&st, &headers).is_err() {
+        return Json(HomieProxyResponse { ok: false, error: "Нужна авторизация администратора".to_string(), upstream: None }).into_response();
+    }
+
+    let url = format!("{}/tools", homie_base_url());
+    let client = reqwest::Client::new();
+    let res = homie_attach_auth(client.get(url)).send().await;
+
+    match res {
+        Ok(resp) => {
+            let status_ok = resp.status().is_success();
+            match resp.json::<serde_json::Value>().await {
+                Ok(value) => Json(HomieProxyResponse {
+                    ok: status_ok && value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                    error: if status_ok { String::new() } else { "Homie tools вернул ошибку".to_string() },
+                    upstream: Some(value),
+                }).into_response(),
+                Err(e) => Json(HomieProxyResponse {
+                    ok: false,
+                    error: format!("Не удалось разобрать ответ Homie tools: {e}"),
+                    upstream: None,
+                }).into_response(),
+            }
+        }
+        Err(e) => Json(HomieProxyResponse {
+            ok: false,
+            error: format!("Homie API недоступен: {e}"),
+            upstream: None,
+        }).into_response(),
+    }
+}
+
+async fn homie_chat_post(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(f): Json<HomieJsonForm>,
+) -> impl IntoResponse {
+    if let Err((_code, msg)) = require_admin_panel_enabled() {
+        return Json(HomieJsonResponse { ok: false, answer: String::new(), error: msg }).into_response();
+    }
+    if let Err((_code, msg)) = require_allow_ip(&headers) {
+        return Json(HomieJsonResponse { ok: false, answer: String::new(), error: msg }).into_response();
+    }
+
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(_) => {
+            return Json(HomieJsonResponse {
+                ok: false,
+                answer: String::new(),
+                error: "Нужна авторизация администратора".to_string(),
+            }).into_response();
+        }
+    };
+
+    if f.csrf != sess.csrf {
+        return Json(HomieJsonResponse {
+            ok: false,
+            answer: String::new(),
+            error: "CSRF-токен не совпадает".to_string(),
+        }).into_response();
+    }
+
+    let message = f.message.trim().to_string();
+    if message.is_empty() {
+        return Json(HomieJsonResponse {
+            ok: false,
+            answer: String::new(),
+            error: "Пустое сообщение".to_string(),
+        }).into_response();
+    }
+
+    let url = format!("{}/chat", homie_base_url());
+    let req = HomieUpstreamRequest {
+        session_id: homie_session_id(&f.session_id),
+        message,
+    };
+
+    let client = reqwest::Client::new();
+    let res = homie_attach_auth(client.post(url).json(&req)).send().await;
+    let res = match res {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(HomieJsonResponse {
+                ok: false,
+                answer: String::new(),
+                error: format!("Homie API недоступен: {e}"),
+            }).into_response();
+        }
+    };
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        let extra = if body.trim().is_empty() { String::new() } else { format!(": {}", body.chars().take(500).collect::<String>()) };
+        return Json(HomieJsonResponse {
+            ok: false,
+            answer: String::new(),
+            error: format!("Homie API вернул HTTP {status}{extra}"),
+        }).into_response();
+    }
+
+    match res.json::<serde_json::Value>().await {
+        Ok(value) => {
+            let answer = homie_text_from_value(&value, 0).unwrap_or_default();
+            let error = homie_error_from_value(&value);
+
+            Json(HomieJsonResponse {
+                ok: homie_ok_from_value(&value, &answer),
+                answer,
+                error,
+            }).into_response()
+        }
+        Err(e) => Json(HomieJsonResponse {
+            ok: false,
+            answer: String::new(),
+            error: format!("Не удалось разобрать ответ Homie API: {e}"),
+        }).into_response(),
+    }
+}
+
+async fn homie_reset_post(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(f): Json<HomieJsonForm>,
+) -> impl IntoResponse {
+    if let Err((_code, msg)) = require_admin_panel_enabled() {
+        return Json(HomieJsonResponse { ok: false, answer: String::new(), error: msg }).into_response();
+    }
+    if let Err((_code, msg)) = require_allow_ip(&headers) {
+        return Json(HomieJsonResponse { ok: false, answer: String::new(), error: msg }).into_response();
+    }
+
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(_) => {
+            return Json(HomieJsonResponse {
+                ok: false,
+                answer: String::new(),
+                error: "Нужна авторизация администратора".to_string(),
+            }).into_response();
+        }
+    };
+
+    if f.csrf != sess.csrf {
+        return Json(HomieJsonResponse {
+            ok: false,
+            answer: String::new(),
+            error: "CSRF-токен не совпадает".to_string(),
+        }).into_response();
+    }
+
+    let url = format!("{}/reset", homie_base_url());
+    let req = HomieUpstreamRequest {
+        session_id: homie_session_id(&f.session_id),
+        message: String::new(),
+    };
+
+    let client = reqwest::Client::new();
+    match homie_attach_auth(client.post(url).json(&req)).send().await {
+        Ok(res) if res.status().is_success() => Json(HomieJsonResponse {
+            ok: true,
+            answer: "Контекст Homie сброшен".to_string(),
+            error: String::new(),
+        }).into_response(),
+        Ok(res) => Json(HomieJsonResponse {
+            ok: false,
+            answer: String::new(),
+            error: format!("Homie API вернул HTTP {}", res.status()),
+        }).into_response(),
+        Err(e) => Json(HomieJsonResponse {
+            ok: false,
+            answer: String::new(),
+            error: format!("Homie API недоступен: {e}"),
+        }).into_response(),
+    }
+}
+
+fn render_homie_center_panel(sess: &AdminSession) -> String {
+    format!(
+        r#"<div class='card homie-chat-card' id='homie-center-root'>
+  <input type='hidden' id='homie-center-csrf' value='{csrf}' />
+  <input type='hidden' id='homie-center-session' value='admin-center' />
+
+  <div class='homie-chat-topbar'>
+    <div class='homie-chat-titlebox'>
+      <div class='homie-chat-avatar'>H</div>
+      <div class='homie-chat-title-main'>
+        <div class='homie-chat-name'>Homie AI</div>
+        <div class='homie-chat-sub'>Локальный агент админ-панели</div>
+      </div>
+    </div>
+    <div class='homie-chat-actions'>
+      <span class='pill homie-status-pill' id='homie-center-status'>Проверка...</span>
+      <button type='button' class='btn-soft homie-top-btn' id='homie-center-check'>Статус</button>
+      <button type='button' class='btn-soft homie-top-btn' id='homie-center-tools'>Инструменты</button>
+    </div>
+  </div>
+
+  <div id='homie-center-feed' class='homie-chat-feed'></div>
+
+  <div class='homie-composer'>
+    <textarea id='homie-center-input' class='homie-input' rows='1' autocomplete='off' spellcheck='true' placeholder='Напиши задачу для Homie...'></textarea>
+    <div class='homie-composer-row'>
+      <span class='homie-composer-hint'>Enter — отправить · Shift/Ctrl + Enter — новая строка</span>
+      <span class='homie-chat-actions'>
+        <button type='button' class='btn-soft homie-reset-btn' id='homie-center-reset'>Сбросить контекст</button>
+        <button type='button' class='btn-soft homie-send-btn' id='homie-center-send'>Отправить</button>
+      </span>
+    </div>
+  </div>
+</div>
+"#,
+        csrf = escape_html(&sess.csrf),
+    )
+}
+
+async fn center_page(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<MsgQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let users_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(&st.db).await.unwrap_or(0);
+    let servers_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM servers").fetch_one(&st.db).await.unwrap_or(0);
+    let messages_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(&st.db).await.unwrap_or(0);
+    let banned_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetch_one(&st.db).await.unwrap_or(0);
+
+    let users_query = q.q.clone().unwrap_or_default().trim().to_string();
+    let users = fetch_users(&st.db, &users_query, 200).await.unwrap_or_default();
+    let users_mode = normalized_user_mode(q.mode.as_deref());
+    let selected_id = q.user_id.or_else(|| users.iter().find(|u| user_mode_matches(u, users_mode)).map(|u| u.id));
+    let users_return_to = user_page_url("/admin/center", true, &users_query, users_mode, selected_id);
+    let user_reports = match selected_id {
+        Some(id) => fetch_user_reports(&st.db, id, 8).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let users_panel = render_users_panel_body(
+        &sess,
+        &users,
+        &users_query,
+        true,
+        users_mode,
+        selected_id,
+        &users_return_to,
+        &user_reports,
+    );
+
+    let servers = fetch_servers(&st.db, "", 200).await.unwrap_or_default();
+    let mut server_cards = String::new();
+    for s in servers.iter() {
+        let filter = format!("#{} {} {}", s.id, s.name.to_lowercase(), s.owner_username.to_lowercase());
+        server_cards.push_str(&format!(
+            r#"<div class='server-row-card' data-filter-item='servers' data-filter='{filter}'>
+  <div class='server-main'>
+    <div class='server-top'>
+      <div class='server-title'>
+        <span class='server-id'>#{id}</span>
+        <span class='server-name'>{name}</span>
+      </div>
+      <div class='user-meta'>Создан: {created_at}</div>
+    </div>
+    <div class='server-meta'>Владелец: #{owner_id} {owner_name}</div>
+  </div>
+  <div class='server-actions'>
+    <form method='post' action='/admin/servers/{id}/add_all_users' class='inline-form'>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='/admin/center?view=servers' />
+      <button type='submit' class='btn-soft'>Добавить всех пользователей</button>
+    </form>
+    <form method='post' action='/admin/servers/{id}/delete' class='inline-form'>
+      <input type='hidden' name='csrf' value='{csrf}' />
+      <input type='hidden' name='return_to' value='/admin/center' />
+      <button type='submit' class='btn-danger'>Удалить сервер</button>
+    </form>
+  </div>
+</div>"#,
+            id=s.id, name=escape_html(&s.name), created_at=escape_html(&fmt_admin_dt(&s.created_at)),
+            owner_id=s.owner_id, owner_name=escape_html(&s.owner_username), csrf=escape_html(&sess.csrf), filter=escape_html(&filter),
+        ));
+    }
+    if server_cards.is_empty() { server_cards.push_str("<div class='empty-state'>Серверы не найдены.</div>"); }
+    let servers_panel = render_servers_panel_body("", &server_cards, true);
+    let db_panel = render_db_panel_body(&sess, "/admin/center");
+
+    let msg_rows = sqlx::query(
+        r#"SELECT m.id, COALESCE(m.content,'') AS content, m.timestamp AS created_at, COALESCE(u.username,'Системный') AS username,
+                  COALESCE(c.name,'ЛС/скрытый чат') AS chat_name, c.id AS chat_id, c.server_id
+           FROM messages m
+           LEFT JOIN users u ON u.id = m.sender_id
+           LEFT JOIN chats c ON c.id = m.chat_id
+           ORDER BY m.id DESC
+           LIMIT 120"#,
+    ).fetch_all(&st.db).await.unwrap_or_default();
+    let mut chat_items = String::new();
+    let mut feed_items = String::new();
+    use std::collections::BTreeMap;
+    let mut chat_names: BTreeMap<i64, (String, i64)> = BTreeMap::new();
+    for r in msg_rows {
+        let chat_id: i64 = r.get("chat_id");
+        let chat_name: String = r.get("chat_name");
+        let username: String = r.get("username");
+        let content: String = r.get("content");
+        let created_at: String = r.get("created_at");
+        let server_id: Option<i64> = r.get("server_id");
+        let text = if content.trim().is_empty() { "[вложение или пустое сообщение]".to_string() } else { content.clone() };
+        let preview = if text.chars().count() > 48 { format!("{}…", text.chars().take(48).collect::<String>()) } else { text.clone() };
+        let location = match server_id { Some(sid) => format!("Сервер #{sid}"), None => "Личные сообщения".to_string() };
+        chat_names.entry(chat_id).or_insert((chat_name.clone(), 0)).1 += 1;
+        feed_items.push_str(&format!(
+            r#"<div class='center-feed-item' data-chat-feed='{chat_id}'>
+  <div class='center-feed-head'>
+    <div>
+      <div class='center-feed-author'>{author}</div>
+      <div class='center-feed-loc'>{location} · {chat_name}</div>
+    </div>
+    <div class='center-feed-time'>{time}</div>
+  </div>
+  <div class='center-feed-text'>{text}</div>
+</div>"#,
+            chat_id=chat_id, author=escape_html(&username), location=escape_html(&location), chat_name=escape_html(&chat_name),
+            time=escape_html(&fmt_admin_dt(&created_at)), text=render_admin_message_html(&text),
+        ));
+        let _ = preview;
+    }
+    for (chat_id, (chat_name, count)) in chat_names.iter() {
+        chat_items.push_str(&format!(
+            r#"<button type='button' class='center-chat-item' data-chat-select='{chat_id}'>
+  <div class='center-chat-title'>{chat_name}</div>
+  <div class='center-chat-meta'>{count} сообщений</div>
+</button>"#,
+            chat_id=chat_id, chat_name=escape_html(chat_name), count=count,
+        ));
+    }
+    if chat_items.is_empty() {
+        chat_items.push_str("<div class='empty-state'>Пока нет чатов для просмотра.</div>");
+        feed_items.push_str("<div class='empty-state'>Пока нет сообщений.</div>");
+    }
+    let messenger_panel = format!(
+        r#"<div class='card'>
+  <div class='hstack'>
+    <h2 style='margin:0;'>Мессенджер</h2>
+    <span class='pill'>Read-only</span>
+    <span class='pill'>Без iframe</span>
+  </div>
+  <div class='small' style='margin-top:10px;'>Одна вкладка браузера: слева чаты, справа поток сообщений. Секция запоминает выбранный чат.</div>
+</div>
+<div class='admin-messenger'>
+  <div class='admin-messenger-sidebar'>
+    <div class='center-inline-search'>
+      <input type='text' data-persist-key='admin-center-messenger-search' data-chat-search placeholder='Фильтр по чатам' />
+      <button type='button' class='btn-soft' data-clear-chat-search>Сбросить</button>
+    </div>
+    <div class='admin-chat-list'>{chat_items}</div>
+  </div>
+  <div class='admin-messenger-main'>
+    <div class='admin-chat-header'>
+      <div>
+        <div class='panel-stage-title' style='font-size:18px;'>Поток сообщений</div>
+        <div class='panel-stage-sub'>Последние 120 сообщений. Переключай чаты без потери состояния панели.</div>
+      </div>
+      <span class='pill'>UTC</span>
+    </div>
+    <div class='center-feed-list admin-chat-feed'>{feed_items}</div>
+  </div>
+</div>"#,
+        chat_items=chat_items, feed_items=feed_items,
+    );
+
+    let overview_panel = format!(
+        r#"<div class='center-hero'>
+  <div>
+    <h2 class='center-hero-title'>Центр управления</h2>
+    <div class='center-hero-sub'>Одна страница для админки и мессенджера. Переключение идёт внутри квадрата справа, а поиски и выбранная секция сохраняются.</div>
+  </div>
+  <div class='center-stat-row'>
+    <div class='center-stat'><div class='center-stat-label'>Пользователи</div><div class='center-stat-value'>{users_total}</div></div>
+    <div class='center-stat'><div class='center-stat-label'>Серверы</div><div class='center-stat-value'>{servers_total}</div></div>
+    <div class='center-stat'><div class='center-stat-label'>Сообщения</div><div class='center-stat-value'>{messages_total}</div></div>
+    <div class='center-stat'><div class='center-stat-label'>Заблокировано</div><div class='center-stat-value'>{banned_total}</div></div>
+  </div>
+</div>
+<div class='helper-grid'>
+  <div class='helper-card'><h3>Как это работает</h3><div class='center-note-list'>
+    <div class='center-note-line'>• слева выбираешь секцию;</div>
+    <div class='center-note-line'>• справа секция открывается без перезагрузки;</div>
+    <div class='center-note-line'>• введённый поиск сохраняется при переходе между панелями;</div>
+    <div class='center-note-line'>• после обновления страницы восстанавливается последняя панель.</div>
+  </div></div>
+  <div class='helper-card'><h3>Что дальше добавить сюда</h3><div class='center-note-list'>
+    <div class='center-note-line'>• репорты и жалобы;</div>
+    <div class='center-note-line'>• feedback / корзину пожеланий;</div>
+    <div class='center-note-line'>• сигналы антиспама и карантин;</div>
+    <div class='center-note-line'>• действия модерации прямо из потока сообщений.</div>
+  </div></div>
+</div>"#,
+        users_total=users_total, servers_total=servers_total, messages_total=messages_total, banned_total=banned_total,
+    );
+
+    let homie_panel = render_homie_center_panel(&sess);
+
+    let body = format!(
+        r#"<div class='panel-shell'>
+  <aside class='panel-sidebar'>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='overview'><strong>Центр</strong><span class='small'>Общий вид и точка входа в остальные панели.</span></button>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='users'><strong>Пользователи</strong><span class='small'>Почта, ник и действия по аккаунтам без прыжков по страницам.</span></button>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='servers'><strong>Серверы</strong><span class='small'>Проверка владельцев и удаление прямо внутри рабочей области.</span></button>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='db'><strong>База данных</strong><span class='small'>Сервисные действия и обслуживание без отдельной вкладки.</span></button>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='messenger'><strong>Мессенджер</strong><span class='small'>Read-only поток и переключение чатов в той же странице.</span></button>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='homie'><strong>Homie AI</strong><span class='small'>Личный агент только для админки.</span></button>
+  </aside>
+  <section class='panel-stage'>
+    <div class='panel-stage-header'>
+      <div>
+        <div class='panel-stage-title' data-center-stage-title>Центр управления</div>
+        <div class='panel-stage-sub' data-center-stage-sub>Одна рабочая страница для админки и внутреннего мониторинга мессенджера.</div>
+      </div>
+    </div>
+    <div class='panel-stage-body'>
+      <div class='panel-view' data-panel-view='overview' data-stage-title='Центр управления' data-stage-sub='Одна рабочая страница для админки и внутреннего мониторинга мессенджера.'>{overview_panel}</div>
+      <div class='panel-view' data-panel-view='users' data-stage-title='Пользователи' data-stage-sub=''>{users_panel}</div>
+      <div class='panel-view' data-panel-view='servers' data-stage-title='Панель серверов' data-stage-sub='Проверка серверов и действия с ними живут в одном квадрате справа.'>{servers_panel}</div>
+      <div class='panel-view' data-panel-view='db' data-stage-title='Панель базы данных' data-stage-sub='Сервисные инструменты открываются здесь же, без переходов по страницам.'>{db_panel}</div>
+      <div class='panel-view' data-panel-view='messenger' data-stage-title='Мессенджер внутри админки' data-stage-sub='Read-only поток сообщений и переключение чатов без второй вкладки браузера.'>{messenger_panel}</div>
+      <div class='panel-view' data-panel-view='homie' data-stage-title='Homie AI' data-stage-sub='Локальный агент админ-панели.'>{homie_panel}</div>
+    </div>
+  </section>
+</div>"#,
+        overview_panel=overview_panel, users_panel=users_panel, servers_panel=servers_panel, db_panel=db_panel, messenger_panel=messenger_panel, homie_panel=homie_panel,
+    );
+
+    page("Админка • Центр", &body, q.msg.as_deref()).into_response()
 }
 
 
@@ -1140,75 +2928,143 @@ struct UserRow {
     email: String,
     is_banned: bool,
     created_at: String,
+    is_online: bool,
+    presence_status: String,
+    presence_updated_at: String,
+    avatar_file_id: Option<i64>,
+    ban_reason: String,
+    ban_at: String,
+}
+
+#[derive(Clone)]
+struct UserReportRow {
+    id: i64,
+    reporter_id: i64,
+    reporter_username: String,
+    target_user_id: i64,
+    message_id: Option<i64>,
+    reason: String,
+    message: String,
+    status: String,
+    created_at: String,
+}
+
+fn map_user_row(r: sqlx::sqlite::SqliteRow) -> UserRow {
+    UserRow {
+        id: r.get("id"),
+        username: r.get("username"),
+        email: r.get("email"),
+        is_banned: r.get::<i64, _>("is_banned") != 0,
+        created_at: r.get("created_at"),
+        is_online: r.get::<i64, _>("is_online") != 0,
+        presence_status: r.get("presence_status"),
+        presence_updated_at: r.get("presence_updated_at"),
+        avatar_file_id: r.get("avatar_file_id"),
+        ban_reason: r.get("ban_reason"),
+        ban_at: r.get("ban_at"),
+    }
 }
 
 async fn fetch_users(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<Vec<UserRow>> {
-    if q.is_empty() {
-        let rows = sqlx::query(
-            r#"SELECT id, username, COALESCE(email,'') AS email, is_banned, created_at
-               FROM users
-               ORDER BY id DESC
-               LIMIT ?"#,
-        )
-        .bind(limit)
-        .fetch_all(db)
-        .await?;
-        return Ok(rows
-            .into_iter()
-            .map(|r| UserRow {
-                id: r.get("id"),
-                username: r.get("username"),
-                email: r.get("email"),
-                is_banned: r.get::<i64, _>("is_banned") != 0,
-                created_at: r.get("created_at"),
-            })
-            .collect());
-    }
+    let select = r#"
+        SELECT u.id,
+               u.username,
+               COALESCE(u.email,'') AS email,
+               u.is_banned,
+               u.created_at,
+               COALESCE(p.is_online, 0) AS is_online,
+               COALESCE(p.status, 'offline') AS presence_status,
+               COALESCE(p.updated_at, '') AS presence_updated_at,
+               up.avatar_file_id AS avatar_file_id,
+               COALESCE((SELECT me.reason FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_reason,
+               COALESCE((SELECT me.created_at FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_at
+        FROM users u
+        LEFT JOIN user_presence p ON p.user_id = u.id
+        LEFT JOIN user_profile up ON up.user_id = u.id
+    "#;
 
-    if let Ok(id) = q.parse::<i64>() {
-        let rows = sqlx::query(
-            r#"SELECT id, username, COALESCE(email,'') AS email, is_banned, created_at
-               FROM users
-               WHERE id = ?
-               LIMIT ?"#,
-        )
-        .bind(id)
-        .bind(limit)
-        .fetch_all(db)
-        .await?;
-        return Ok(rows
-            .into_iter()
-            .map(|r| UserRow {
-                id: r.get("id"),
-                username: r.get("username"),
-                email: r.get("email"),
-                is_banned: r.get::<i64, _>("is_banned") != 0,
-                created_at: r.get("created_at"),
-            })
-            .collect());
-    }
+    let rows = if q.is_empty() {
+        sqlx::query(&format!("{select} ORDER BY u.id DESC LIMIT ?"))
+            .bind(limit)
+            .fetch_all(db)
+            .await?
+    } else if let Ok(id) = q.parse::<i64>() {
+        sqlx::query(&format!("{select} WHERE u.id = ? ORDER BY u.id DESC LIMIT ?"))
+            .bind(id)
+            .bind(limit)
+            .fetch_all(db)
+            .await?
+    } else {
+        let like = format!("%{}%", q);
+        sqlx::query(&format!("{select} WHERE u.username LIKE ? OR u.email LIKE ? ORDER BY u.id DESC LIMIT ?"))
+            .bind(&like)
+            .bind(&like)
+            .bind(limit)
+            .fetch_all(db)
+            .await?
+    };
 
-    let like = format!("%{}%", q);
+    Ok(rows.into_iter().map(map_user_row).collect())
+}
+
+async fn fetch_user_by_id(db: &SqlitePool, id: i64) -> anyhow::Result<Option<UserRow>> {
+    let select = r#"
+        SELECT u.id,
+               u.username,
+               COALESCE(u.email,'') AS email,
+               u.is_banned,
+               u.created_at,
+               COALESCE(p.is_online, 0) AS is_online,
+               COALESCE(p.status, 'offline') AS presence_status,
+               COALESCE(p.updated_at, '') AS presence_updated_at,
+               up.avatar_file_id AS avatar_file_id,
+               COALESCE((SELECT me.reason FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_reason,
+               COALESCE((SELECT me.created_at FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_at
+        FROM users u
+        LEFT JOIN user_presence p ON p.user_id = u.id
+        LEFT JOIN user_profile up ON up.user_id = u.id
+        WHERE u.id = ?
+        LIMIT 1
+    "#;
+    let row = sqlx::query(select).bind(id).fetch_optional(db).await?;
+    Ok(row.map(map_user_row))
+}
+
+async fn fetch_user_reports(db: &SqlitePool, user_id: i64, limit: i64) -> anyhow::Result<Vec<UserReportRow>> {
     let rows = sqlx::query(
-        r#"SELECT id, username, COALESCE(email,'') AS email, is_banned, created_at
-           FROM users
-           WHERE username LIKE ? OR email LIKE ?
-           ORDER BY id DESC
-           LIMIT ?"#,
+        r#"
+        SELECT r.id,
+               r.reporter_id,
+               COALESCE(u.username, 'deleted') AS reporter_username,
+               r.target_user_id,
+               r.message_id,
+               r.reason,
+               COALESCE(r.message, '') AS message,
+               r.status,
+               r.created_at
+        FROM user_reports r
+        LEFT JOIN users u ON u.id = r.reporter_id
+        WHERE r.target_user_id = ?
+        ORDER BY CASE r.status WHEN 'open' THEN 0 ELSE 1 END, r.id DESC
+        LIMIT ?
+        "#,
     )
-    .bind(&like)
-    .bind(&like)
+    .bind(user_id)
     .bind(limit)
     .fetch_all(db)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|r| UserRow {
+        .map(|r| UserReportRow {
             id: r.get("id"),
-            username: r.get("username"),
-            email: r.get("email"),
-            is_banned: r.get::<i64, _>("is_banned") != 0,
+            reporter_id: r.get("reporter_id"),
+            reporter_username: r.get("reporter_username"),
+            target_user_id: r.get("target_user_id"),
+            message_id: r.get("message_id"),
+            reason: r.get("reason"),
+            message: r.get("message"),
+            status: r.get("status"),
             created_at: r.get("created_at"),
         })
         .collect())
@@ -1236,6 +3092,12 @@ async fn fetch_test_users(db: &SqlitePool, re: &Regex, limit: i64) -> anyhow::Re
                 email,
                 is_banned: r.get::<i64, _>("is_banned") != 0,
                 created_at: r.get("created_at"),
+                is_online: false,
+                presence_status: "offline".to_string(),
+                presence_updated_at: String::new(),
+                avatar_file_id: None,
+                ban_reason: String::new(),
+                ban_at: String::new(),
             });
         }
     }
@@ -1331,15 +3193,122 @@ async fn fetch_servers(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<V
 // Destructive ops (copied from CLI)
 // =============================
 
-async fn ban_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
+fn admin_thumb_path_for(stored_filename: &str) -> std::path::PathBuf {
+    let stem = std::path::Path::new(stored_filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(stored_filename);
+    std::path::PathBuf::from("storage/files/thumbs").join(format!("{}.png", stem))
+}
+
+async fn cleanup_file_storage_orphans_db(db: &SqlitePool) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT filename, storage_path
+        FROM files
+        WHERE deleted_at IS NULL
+          AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let mut active_paths: HashSet<String> = HashSet::new();
+    let mut active_thumbs: HashSet<String> = HashSet::new();
+
+    for r in rows {
+        let storage_path: String = r.get("storage_path");
+        let filename: String = r.get("filename");
+        active_paths.insert(PathBuf::from(storage_path).to_string_lossy().to_string());
+        active_thumbs.insert(admin_thumb_path_for(&filename).to_string_lossy().to_string());
+    }
+
+    let storage_dir = PathBuf::from("storage/files");
+    if let Ok(entries) = std::fs::read_dir(&storage_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) == Some("uploading") {
+                continue;
+            }
+            let key = path.to_string_lossy().to_string();
+            if !active_paths.contains(&key) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    let thumbs_dir = PathBuf::from("storage/files/thumbs");
+    if let Ok(entries) = std::fs::read_dir(&thumbs_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+            let key = path.to_string_lossy().to_string();
+            if !active_thumbs.contains(&key) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn clean_admin_reason(raw: &str) -> String {
+    let mut out = raw.trim().chars().take(180).collect::<String>();
+    if out.is_empty() {
+        out = "Без указанной причины".to_string();
+    }
+    out
+}
+
+async fn insert_moderation_event(db: &SqlitePool, user_id: i64, kind: &str, reason: &str, details: &str) -> anyhow::Result<()> {
+    let now = auth::now_iso();
+    sqlx::query(
+        r#"INSERT INTO moderation_events(user_id, admin_id, kind, reason, details, created_at)
+           VALUES(?, NULL, ?, ?, ?, ?)"#,
+    )
+    .bind(user_id)
+    .bind(kind)
+    .bind(reason)
+    .bind(details)
+    .bind(now)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+async fn ban_user_exec(db: &SqlitePool, user_id: i64, reason: &str) -> anyhow::Result<()> {
+    let clean_reason = clean_admin_reason(reason);
     let affected = sqlx::query("UPDATE users SET is_banned = 1, token_version = token_version + 1 WHERE id = ?")
         .bind(user_id)
         .execute(db)
         .await?
         .rows_affected();
     if affected == 0 {
-        anyhow::bail!("User not found")
+        anyhow::bail!("Пользователь не найден")
     }
+    insert_moderation_event(db, user_id, "ban", &clean_reason, "admin_panel").await?;
+    Ok(())
+}
+
+async fn unban_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
+    let affected = sqlx::query("UPDATE users SET is_banned = 0, token_version = token_version + 1 WHERE id = ?")
+        .bind(user_id)
+        .execute(db)
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        anyhow::bail!("Пользователь не найден")
+    }
+    insert_moderation_event(db, user_id, "unban", "Разбан через админ-панель", "admin_panel").await?;
     Ok(())
 }
 
@@ -1398,6 +3367,15 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
         .execute(&mut *tx)
         .await?;
 
+    let _ = sqlx::query(
+        r#"UPDATE user_reports
+           SET message_id = NULL
+           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = ?)"#,
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
     let _ = sqlx::query("DELETE FROM messages WHERE sender_id = ?")
         .bind(user_id)
         .execute(&mut *tx)
@@ -1410,12 +3388,8 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
 
     tx.commit().await?;
 
-    for (main, thumb) in file_paths {
-        let _ = std::fs::remove_file(&main);
-        if let Some(t) = thumb {
-            let _ = std::fs::remove_file(&t);
-        }
-    }
+    let _ = file_paths;
+    let _ = cleanup_file_storage_orphans_db(db).await;
     for p in profile_paths {
         let _ = std::fs::remove_file(&p);
     }
@@ -1510,17 +3484,13 @@ async fn purge_server_exec(db: &SqlitePool, server_id: i64) -> anyhow::Result<()
         .rows_affected();
 
     if affected == 0 {
-        anyhow::bail!("Server not found")
+        anyhow::bail!("Сервер не найден")
     }
 
     tx.commit().await?;
 
-    for (main, thumb) in file_paths {
-        let _ = std::fs::remove_file(&main);
-        if let Some(t) = thumb {
-            let _ = std::fs::remove_file(&t);
-        }
-    }
+    let _ = file_paths;
+    let _ = cleanup_file_storage_orphans_db(db).await;
 
     Ok(())
 }
@@ -1662,6 +3632,12 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
 
+    let _ = sqlx::query("DELETE FROM user_reports WHERE reporter_id = ? OR target_user_id = ?")
+        .bind(user_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
     let _ = sqlx::query("DELETE FROM user_blocks WHERE blocker_id = ? OR blocked_id = ?")
         .bind(user_id)
         .bind(user_id)
@@ -1707,6 +3683,15 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
+
+    let _ = sqlx::query(
+        r#"UPDATE user_reports
+           SET message_id = NULL
+           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = ?)"#,
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
 
     let _ = sqlx::query("DELETE FROM messages WHERE sender_id = ?")
         .bind(user_id)
@@ -1764,17 +3749,13 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         .rows_affected();
 
     if affected == 0 {
-        anyhow::bail!("User not found")
+        anyhow::bail!("Пользователь не найден")
     }
 
     tx.commit().await?;
 
-    for (main, thumb) in file_paths {
-        let _ = std::fs::remove_file(&main);
-        if let Some(t) = thumb {
-            let _ = std::fs::remove_file(&t);
-        }
-    }
+    let _ = file_paths;
+    let _ = cleanup_file_storage_orphans_db(db).await;
     for p in profile_paths {
         let _ = std::fs::remove_file(&p);
     }
@@ -1814,6 +3795,9 @@ async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
     }
 
     // Delete in FK-safe order
+    sqlx::query("DELETE FROM user_reports")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM message_reactions")
         .execute(&mut *tx)
         .await?;
@@ -1827,6 +3811,9 @@ async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM files")
         .execute(&mut *tx)
         .await?;
+    sqlx::query("UPDATE user_reports SET message_id = NULL")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM messages")
         .execute(&mut *tx)
         .await?;
@@ -1834,12 +3821,8 @@ async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
     tx.commit().await?;
 
     // Best-effort filesystem cleanup
-    for (main, thumb) in file_paths {
-        let _ = std::fs::remove_file(&main);
-        if let Some(t) = thumb {
-            let _ = std::fs::remove_file(&t);
-        }
-    }
+    let _ = file_paths;
+    let _ = cleanup_file_storage_orphans_db(db).await;
 
     Ok(())
 }
@@ -1900,6 +3883,9 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
     }
 
     // Delete in FK-safe order
+    sqlx::query("DELETE FROM user_reports")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM message_reactions")
         .execute(&mut *tx)
         .await?;
@@ -1915,6 +3901,9 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
         .await?;
 
     sqlx::query("DELETE FROM files")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE user_reports SET message_id = NULL")
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM messages")
@@ -1974,12 +3963,8 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
     tx.commit().await?;
 
     // Best-effort filesystem cleanup
-    for (main, thumb) in file_paths {
-        let _ = std::fs::remove_file(&main);
-        if let Some(t) = thumb {
-            let _ = std::fs::remove_file(&t);
-        }
-    }
+    let _ = file_paths;
+    let _ = cleanup_file_storage_orphans_db(db).await;
     for p in profile_paths {
         let _ = std::fs::remove_file(&p);
     }

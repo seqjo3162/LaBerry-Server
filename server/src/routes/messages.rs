@@ -16,6 +16,8 @@ use crate::middleware::auth_guard::AuthUser;
 use crate::server::AppState;
 use crate::ws::RoomId;
 
+const MAX_MESSAGE_CHARS: usize = 4000;
+
 #[derive(Serialize)]
 pub struct MessageRow {
     pub id: i64,
@@ -172,10 +174,10 @@ async fn can_access_message(
 
     let chat_id: i64 = r.get("chat_id");
     let server_id: Option<i64> = r.try_get("server_id").ok();
-    let is_private: i64 = r.get("is_private");
+    let _is_private: i64 = r.get("is_private");
     let kind: String = r.get("kind");
 
-    let allowed = if let Some(sid) = server_id {
+    let allowed = if let Some(sid) = server_id.filter(|sid| *sid > 0) {
         sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
         )
@@ -232,10 +234,10 @@ async fn delete_message(
     let db = &st.db;
 
     let Ok(access) = can_access_message(&st, me.id, message_id).await else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"detail":"access_check_failed"}))).into_response();
     };
     let Some((chat_id, kind)) = access else {
-        return StatusCode::FORBIDDEN.into_response();
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"detail":"message_not_available"}))).into_response();
     };
 
     let owner = sqlx::query(
@@ -251,23 +253,27 @@ async fn delete_message(
     .await;
 
     let Some(owner_row) = owner.ok().flatten() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"detail":"message_not_found"}))).into_response();
     };
 
     let sender_id: i64 = owner_row.get("sender_id");
     if sender_id != me.id {
-        return StatusCode::FORBIDDEN.into_response();
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"detail":"only_sender_can_delete_message"}))).into_response();
     }
 
-    let file_rows = sqlx::query("SELECT storage_path FROM files WHERE message_id = ?")
+    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE message_id = ?")
         .bind(message_id)
         .fetch_all(db)
         .await
         .unwrap_or_default();
 
-    let storage_paths = file_rows
+    let file_refs = file_rows
         .into_iter()
-        .filter_map(|r| r.try_get::<String, _>("storage_path").ok())
+        .filter_map(|r| {
+            let storage_path = r.try_get::<String, _>("storage_path").ok()?;
+            let filename = r.try_get::<String, _>("filename").ok()?;
+            Some((storage_path, filename))
+        })
         .collect::<Vec<_>>();
 
     let mut tx = match db.begin().await {
@@ -326,11 +332,8 @@ async fn delete_message(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    for path in storage_paths {
-        if path.trim().is_empty() {
-            continue;
-        }
-        let _ = tokio::fs::remove_file(&path).await;
+    for (storage_path, filename) in file_refs {
+        crate::routes::files::cleanup_file_artifacts_if_unreferenced(&st, &storage_path, &filename).await;
     }
 
     let out = serde_json::json!({
@@ -346,7 +349,17 @@ async fn delete_message(
     };
     st.hub.broadcast_room(&room, &out);
 
-    StatusCode::NO_CONTENT.into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "type": "message_deleted",
+            "id": message_id,
+            "message_id": message_id,
+            "room_id": chat_id
+        })),
+    )
+        .into_response()
 }
 
 async fn get_reactions(
@@ -775,6 +788,16 @@ pub async fn send(
     if content_trimmed.is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    if content_trimmed.chars().count() > MAX_MESSAGE_CHARS {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "detail": "message_too_long",
+                "max_chars": 4000
+            })),
+        )
+            .into_response();
+    }
     let content = content_trimmed.to_string();
 
     // проверка: пользователь состоит в сервере
@@ -819,6 +842,27 @@ pub async fn send(
         }
     }
 
+    if let Some(reply_to_id) = body.reply_to_id {
+        let reply_ok = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM messages WHERE id = ? AND chat_id = ? LIMIT 1",
+        )
+        .bind(reply_to_id)
+        .bind(chat_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+        if !reply_ok {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"detail":"reply_to_message_not_in_chat"})),
+            )
+                .into_response();
+        }
+    }
+
     let timestamp = auth::now_iso();
 
     let res = sqlx::query(
@@ -842,7 +886,7 @@ pub async fn send(
     let message_id = r.last_insert_rowid();
 
     // привязка загруженных файлов к этому сообщению (если есть маркеры)
-    if let Ok(re) = Regex::new(r"\[\[file:(\d+)\|") {
+    if let Ok(re) = Regex::new(r"\[\[file[:=](\d+)\|") {
         let mut file_ids: Vec<i64> = re
             .captures_iter(&content)
             .filter_map(|c| c.get(1).and_then(|m| m.as_str().parse::<i64>().ok()))
@@ -854,7 +898,9 @@ pub async fn send(
             let _ = sqlx::query(
                 r#"
                 UPDATE files
-                SET message_id = ?
+                SET message_id = ?,
+                    storage_kind = 'message',
+                    expires_at = NULL
                 WHERE id = ?
                   AND chat_id = ?
                   AND uploaded_by = ?
@@ -930,6 +976,10 @@ pub async fn send(
 
     let room = if kind == "voice" { RoomId::Voice(chat_id) } else { RoomId::Channel(chat_id) };
     st.hub.broadcast_room(&room, &out);
+
+    if kind == "text" {
+        crate::ai_client::spawn_channel_reply(st.clone(), chat_id, me.id, message_id);
+    }
 
     (
         StatusCode::OK,

@@ -100,6 +100,10 @@ export function showUserMenu(opts) {
   }
 
   items.push({ key: "profile", label: "👤 Профиль" });
+  const myId = Number(localStorage.getItem("user_id") || localStorage.getItem("me_id"));
+  if (!Number.isFinite(myId) || myId !== userId) {
+    items.push({ key: "report", label: "🚩 Пожаловаться", danger: true });
+  }
 
   items.push({ key: "sep" });
   items.push({ key: "copy", label: "📋 Копировать ID" });
@@ -171,6 +175,27 @@ export function showUserMenu(opts) {
 
         if (act === "profile") {
           window.dispatchEvent(new CustomEvent("laberry:profile-open", { detail: { userId, username } }));
+          hideUserMenu();
+          return;
+        }
+
+        if (act === "report") {
+          const reasonRaw = (window.prompt(
+            "Причина жалобы: spam / abuse / avatar / username / ads / scam / other",
+            "spam"
+          ) || "").trim().toLowerCase();
+          if (!reasonRaw) {
+            hideUserMenu();
+            return;
+          }
+          const allowed = new Set(["spam", "abuse", "avatar", "username", "ads", "scam", "other"]);
+          const reason = allowed.has(reasonRaw) ? reasonRaw : "other";
+          const message = (window.prompt("Комментарий к жалобе", "") || "").trim();
+          await api(`/api/users/${userId}/report`, {
+            method: "POST",
+            body: JSON.stringify({ reason, message }),
+          });
+          toast("Жалоба отправлена");
           hideUserMenu();
           return;
         }

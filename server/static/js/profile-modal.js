@@ -12,13 +12,40 @@ export function initProfileModal({ api, getMe } = {}) {
   }
 
   function avatarInnerHtml(fileId, usernameFallback) {
+    const letter = String(usernameFallback || '?').trim().charAt(0).toUpperCase() || '?';
     const url = avatarRawUrl(fileId);
     if (url) {
       const alt = escapeAttr(usernameFallback || '');
-      return `<img class="profile-avatar-img" style="width:100%;height:100%;object-fit:cover;display:block;" src="${url}" alt="${alt}">`;
+      return `<span class="profile-avatar-fallback" style="display:none">${escapeHtml(letter)}</span><img class="profile-avatar-img" style="width:100%;height:100%;object-fit:cover;display:block;" src="${url}" alt="${alt}">`;
     }
-    const letter = String(usernameFallback || '?').trim().charAt(0).toUpperCase() || '?';
     return escapeHtml(letter);
+  }
+
+  function wireProfileAvatarFallback(root) {
+    try {
+      const scope = root && root.querySelectorAll ? root : document;
+      scope.querySelectorAll('img.profile-avatar-img:not([data-avatar-wired])').forEach((img) => {
+        img.dataset.avatarWired = '1';
+        const fallback = img.previousElementSibling?.classList?.contains('profile-avatar-fallback') ? img.previousElementSibling : null;
+
+        const showFallback = () => {
+          img.style.display = 'none';
+          if (fallback) fallback.style.display = '';
+        };
+
+        const showImage = () => {
+          img.style.display = 'block';
+          if (fallback) fallback.style.display = 'none';
+        };
+
+        img.addEventListener('load', showImage);
+        img.addEventListener('error', showFallback);
+        if (img.complete) {
+          if (img.naturalWidth > 0) showImage();
+          else showFallback();
+        }
+      });
+    } catch (_) {}
   }
 
   function isAnimatedGifFile(file) {
@@ -149,9 +176,39 @@ export function initProfileModal({ api, getMe } = {}) {
               <div class="muted" id="profileSaveHint" style="display:none;">Сохранено</div>
               <button type="button" class="btn btn-primary" id="profileSaveBtn">Сохранить</button>
             </div>
-          ` : ''}
+          ` : `
+            <div class="profile-actions">
+              <button type="button" class="btn" id="profileReportBtn">Пожаловаться</button>
+            </div>
+          `}
         </div>
       `;
+
+      wireProfileAvatarFallback(bodyEl);
+
+      if (!isMe) {
+        const reportBtn = bodyEl.querySelector('#profileReportBtn');
+        if (reportBtn) {
+          reportBtn.addEventListener('click', async () => {
+            const reasonRaw = (window.prompt('Причина: spam / abuse / avatar / username / ads / scam / other', 'spam') || '').trim().toLowerCase();
+            if (!reasonRaw) return;
+            const allowed = new Set(['spam', 'abuse', 'avatar', 'username', 'ads', 'scam', 'other']);
+            const reason = allowed.has(reasonRaw) ? reasonRaw : 'other';
+            const message = (window.prompt('Комментарий к жалобе', '') || '').trim();
+            try {
+              await apiFn(`/api/users/${uid}/report`, {
+                method: 'POST',
+                body: JSON.stringify({ reason, message }),
+              });
+              reportBtn.textContent = 'Жалоба отправлена';
+              reportBtn.disabled = true;
+            } catch (e) {
+              reportBtn.textContent = 'Ошибка';
+              setTimeout(() => { reportBtn.textContent = 'Пожаловаться'; reportBtn.disabled = false; }, 1200);
+            }
+          });
+        }
+      }
 
       if (isMe) {
         const avatarFile = bodyEl.querySelector('#profileAvatarFile');
@@ -181,6 +238,7 @@ export function initProfileModal({ api, getMe } = {}) {
             avatarBox.innerHTML = avatarInnerHtml(newId, display);
             const img = avatarBox.querySelector('img');
             if (img) img.src = avatarRawUrl(newId) + `?t=${Date.now()}`;
+            wireProfileAvatarFallback(avatarBox);
           }
 
           try {

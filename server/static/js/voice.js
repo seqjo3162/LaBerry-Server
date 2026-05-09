@@ -51,6 +51,9 @@ export function initVoice({ wsManager, api, getMe }) {
   const vcDeafenBtn = document.getElementById('vcDeafenBtn');
   const vcShareBtn = document.getElementById('vcShareBtn');
   const vcLeaveBtn = document.getElementById('vcLeaveBtn');
+  const vcToggleBtn = document.getElementById('vcToggleBtn');
+  const voiceControls = document.getElementById('voiceControls');
+  const voiceControlsShow = document.getElementById('voiceControlsShow');
   const voicePipBtn = document.getElementById('voicePipBtn');
   const voiceFullscreenBtn = document.getElementById('voiceFullscreenBtn');
 
@@ -122,6 +125,7 @@ function ensureVoiceMembersSection() {
 
   let muted = false;
   let deafened = false;
+  let controlsHidden = false;
 
   let joining = false;
 
@@ -597,8 +601,20 @@ function renderVoiceMembersTiles(ids) {
     watchingUserId = uid;
     focusedUserId = uid;
 
+    try { await ensurePeerConnection(uid); } catch (_) {}
+
     // request stream from the sharer
     ssSend('voice_ss_watch', uid);
+
+    // If the first signaling packet is lost/stale, retry once while the stage
+    // is still waiting. This keeps the UI from hanging at "Подключение...".
+    setTimeout(() => {
+      try {
+        if (watchingUserId === uid && !remoteVideoStreams.has(uid)) {
+          ssSend('voice_ss_watch', uid);
+        }
+      } catch (_) {}
+    }, 2500);
 
     // UI update
     try { renderVoiceMembersTiles(currentVoiceMemberIds()); } catch (_) {}
@@ -875,6 +891,17 @@ function applyVoiceFocusToStage() {
 
   function setSharingUi(v) {
     document.body.classList.toggle('voice-sharing', !!v && !!inChannelId);
+    
+    // Update share button icon
+    if (vcShareBtn) {
+      vcShareBtn.textContent = v ? '✕' : '🖥️';
+      vcShareBtn.title = v ? 'Остановить демонстрацию' : 'Демонстрация экрана';
+      vcShareBtn.classList.toggle('active', v);
+    }
+    if (btnShare) {
+      btnShare.textContent = v ? '✕' : '🖥️';
+      btnShare.title = v ? 'Остановить демонстрацию' : 'Демонстрация экрана';
+    }
   }
   function showRemoteViewerPanel() {
     if (!ssPanel || !ssRemoteVideo) return;
@@ -1070,20 +1097,24 @@ async function ssApplyBitrateToAllPeers() {
     if (!Number.isFinite(pid) || pid <= 0) return;
     if (!inChannelId) return;
 
-    if (shouldInitiate(pid)) {
-      // we are initiator -> create offer immediately
-      setTimeout(() => { sendOffer(pid).catch((e) => console.warn('[SS] sendOffer failed', e)); }, 20);
-      return;
-    }
+    // Screen-share sender is the side that changes tracks.
+    // It must be able to renegotiate directly; relying only on deterministic
+    // rtc_negotiate can leave viewers stuck at "Подключение..." if that
+    // signaling message is not forwarded or the viewer is not the initiator.
+    setTimeout(() => {
+      sendOffer(pid).catch((e) => console.warn('[SS] direct sendOffer failed', e));
+    }, 20);
 
-    // ask initiator peer to create an offer
-    wsManager.send({
-      type: 'rtc_negotiate',
-      data: {
-        channel_id: inChannelId,
-        to_user_id: pid,
-      }
-    });
+    // Compatibility fallback for older peers/server builds.
+    try {
+      wsManager.send({
+        type: 'rtc_negotiate',
+        data: {
+          channel_id: inChannelId,
+          to_user_id: pid,
+        }
+      });
+    } catch (_) {}
   }
 
   async function ssAttachToPeer(peerId) {
@@ -1306,6 +1337,17 @@ async function ssApplyBitrateToAllPeers() {
     }
 
     document.body.classList.toggle('voice-deafened', deafened && !!inChannelId);
+    
+    // Update button state and icon
+    if (vcDeafenBtn) {
+      vcDeafenBtn.classList.toggle('active', deafened);
+      vcDeafenBtn.textContent = deafened ? '🔊' : '🔇';
+      vcDeafenBtn.title = deafened ? 'Звук включен' : 'Отключить звук';
+    }
+    if (btnDeafen) {
+      btnDeafen.classList.toggle('active', deafened);
+      btnDeafen.textContent = deafened ? '🔊' : '🔇';
+    }
   }
 
   function setMuted(v) {
@@ -1314,6 +1356,14 @@ async function ssApplyBitrateToAllPeers() {
       localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
     }
     document.body.classList.toggle('voice-muted', muted && !!inChannelId);
+    
+    // Update button state
+    if (vcMuteBtn) {
+      vcMuteBtn.classList.toggle('active', muted);
+    }
+    if (btnMute) {
+      btnMute.classList.toggle('active', muted);
+    }
   }
 
   function shouldInitiate(peerId) {
@@ -1370,7 +1420,7 @@ async function ssApplyBitrateToAllPeers() {
           };
         } catch (_) {}
 
-        if (watchingUserId === id) {
+        if (watchingUserId === id || focusedUserId === id) {
           showRemoteScreenShare(id, stream);
         }
         return;
@@ -1446,11 +1496,16 @@ async function ssApplyBitrateToAllPeers() {
     const pc = await ensurePeerConnection(fromUserId);
     if (!pc) return;
 
-    // if we are not stable, rollback is needed for perfect negotiation.
-    // keep it simple: accept the remote offer only if stable; otherwise ignore (rare with deterministic initiator).
+    // Accept renegotiation offers even if both peers tried to negotiate at
+    // nearly the same time. Without rollback the screen-share stage can stay
+    // forever at "Подключение...".
     if (pc.signalingState !== 'stable') {
-      console.warn('[VOICE] glare detected, ignoring offer', { fromUserId, state: pc.signalingState });
-      return;
+      try {
+        await pc.setLocalDescription({ type: 'rollback' });
+      } catch (e) {
+        console.warn('[VOICE] glare rollback failed', { fromUserId, state: pc.signalingState, e });
+        return;
+      }
     }
 
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
@@ -1996,6 +2051,34 @@ async function join(channelId, channelName) {
       e.preventDefault();
       e.stopPropagation();
       leave().catch(() => {});
+    });
+  }
+
+  // Toggle controls visibility
+  function toggleControlsVisibility() {
+    if (!voiceControls || !voiceControlsShow) return;
+    controlsHidden = !controlsHidden;
+    voiceControls.classList.toggle('hidden', controlsHidden);
+    voiceControlsShow.classList.toggle('hidden', !controlsHidden);
+    if (vcToggleBtn) {
+      vcToggleBtn.textContent = controlsHidden ? '▲' : '▼';
+      vcToggleBtn.title = controlsHidden ? 'Показать панель' : 'Скрыть панель';
+    }
+  }
+
+  if (vcToggleBtn) {
+    vcToggleBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleControlsVisibility();
+    });
+  }
+
+  if (voiceControlsShow) {
+    voiceControlsShow.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleControlsVisibility();
     });
   }
 

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>LaBerry — стартовая страница</title>
+  <link rel="stylesheet" href="/static/css/start.css?v=3" />
+</head>
+<body>
+  <div class="page-shell">
+    <main class="hero-page" id="top">
+      <section class="hero section-grid">
+        <div class="hero-copy" data-reveal>
+          <p class="eyebrow">Веб-мессенджер LaBerry</p>
+          <h1>Чаты, серверы и звонки — в одном месте.</h1>
+          <p class="lead">
+            Открываешь браузер, входишь в аккаунт и общаешься на своём сервере. Сейчас LaBerry работает как веб-версия. Отдельное приложение будет позже.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="/">Открыть LaBerry</a>
+          </div>
+
+          <div class="hero-pills" aria-label="Особенности">
+            <span>Работает в браузере</span>
+            <span>Свои серверы</span>
+            <span>Личные сообщения</span>
+          </div>
+        </div>
+
+        <div class="hero-stage" data-reveal>
+          <article class="app-preview" aria-label="Превью интерфейса LaBerry">
+            <aside class="preview-sidebar" aria-label="Серверы">
+              <div class="server-dot active">L</div>
+              <div class="server-dot">R</div>
+              <div class="server-dot add">+</div>
+            </aside>
+
+            <div class="preview-panel">
+              <div class="preview-header">
+                <div>
+                  <strong>LaBerry</strong>
+                  <span># общий</span>
+                </div>
+                <span class="status-dot">4 онлайн</span>
+              </div>
+
+              <div class="preview-chat">
+                <div class="message">
+                  <span class="avatar berry">И</span>
+                  <div>
+                    <b>Илья</b>
+                    <p>Я закинул файл в общий чат. Посмотрите, всё ли открывается.</p>
+                  </div>
+                </div>
+                <div class="message own">
+                  <span class="avatar dark">М</span>
+                  <div>
+                    <b>Мира</b>
+                    <p>Да, всё нормально. Чуть позже напишу правки сюда же.</p>
+                  </div>
+                </div>
+                <div class="message small">
+                  <span class="avatar soft">А</span>
+                  <div>
+                    <b>Артём</b>
+                    <p>Я буду в голосовой через десять минут, если нужно — подключайтесь.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="preview-input">
+                <span>Сообщение в #общий</span>
+                <button type="button" aria-label="Отправить">↵</button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/js/start.js?v=3"></script>
+</body>
+</html>

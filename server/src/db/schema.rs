@@ -28,6 +28,40 @@ async fn try_add_column(
         .execute(db)
         .await;
 
+
+    // default AI user from env, if enabled
+    let ai_enabled_env = std::env::var("LB_AI_ENABLED")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+    if ai_enabled_env {
+        let ai_name = std::env::var("LB_AI_USER_NAME")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "Gemka III".to_string());
+        let ai_label = "Тестовая функция".to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO users(username, email, password_hash, is_banned, created_at, token_version, is_ai, ai_label)
+            VALUES(?, NULL, 'AI_LOGIN_DISABLED', 0, ?, 1, 1, ?)
+            "#,
+        )
+        .bind(&ai_name)
+        .bind(&now)
+        .bind(&ai_label)
+        .execute(db)
+        .await;
+        let _ = sqlx::query("UPDATE users SET is_ai = 1, ai_label = ?, is_banned = 0 WHERE username = ?")
+            .bind(&ai_label)
+            .bind(&ai_name)
+            .execute(db)
+            .await;
+    }
+
     Ok(())
 }
 
@@ -65,6 +99,10 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     try_add_column(db, "users", "email_pending TEXT", "email_pending").await?;
 
+    // AI marker columns
+    try_add_column(db, "users", "is_ai INTEGER NOT NULL DEFAULT 0", "is_ai").await?;
+    try_add_column(db, "users", "ai_label TEXT", "ai_label").await?;
+
     // servers
     sqlx::query(
         r#"
@@ -73,6 +111,7 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
             name TEXT NOT NULL,
             owner_id INTEGER NOT NULL,
             created_at TEXT NOT NULL,
+            is_public INTEGER NOT NULL DEFAULT 1,
             FOREIGN KEY(owner_id) REFERENCES users(id)
         );
         "#,
@@ -81,6 +120,9 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     .await?;
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_server_owner_id ON servers(owner_id);"#)
         .execute(db)
+        .await?;
+
+    try_add_column(db, "servers", "is_public INTEGER NOT NULL DEFAULT 1", "is_public")
         .await?;
 
     // server_members
@@ -99,6 +141,36 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     .execute(db)
     .await?;
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_server_members_user_id ON server_members(user_id);"#)
+        .execute(db)
+        .await?;
+
+
+    // server_join_requests
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS server_join_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER NOT NULL,
+            requester_id INTEGER NOT NULL,
+            from_server_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            decided_at TEXT,
+            decided_by INTEGER,
+            FOREIGN KEY(server_id) REFERENCES servers(id),
+            FOREIGN KEY(requester_id) REFERENCES users(id),
+            FOREIGN KEY(from_server_id) REFERENCES servers(id),
+            FOREIGN KEY(decided_by) REFERENCES users(id),
+            UNIQUE(server_id, requester_id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_server_join_requests_server_status ON server_join_requests(server_id, status);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_server_join_requests_requester ON server_join_requests(requester_id);"#)
         .execute(db)
         .await?;
 
@@ -178,6 +250,12 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
             chat_id INTEGER NOT NULL,
             message_id INTEGER,
             created_at TEXT NOT NULL,
+            content_hash TEXT,
+            normalized_hash TEXT,
+            content_hash_algo TEXT,
+            storage_kind TEXT NOT NULL DEFAULT 'temporary',
+            expires_at TEXT,
+            deleted_at TEXT,
             FOREIGN KEY(uploaded_by) REFERENCES users(id),
             FOREIGN KEY(chat_id) REFERENCES chats(id),
             FOREIGN KEY(message_id) REFERENCES messages(id)
@@ -187,6 +265,29 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     .execute(db)
     .await?;
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_files_chat_id ON files(chat_id);"#)
+        .execute(db)
+        .await?;
+
+    try_add_column(db, "files", "content_hash TEXT", "content_hash").await?;
+    try_add_column(db, "files", "normalized_hash TEXT", "normalized_hash").await?;
+    try_add_column(db, "files", "content_hash_algo TEXT", "content_hash_algo").await?;
+    try_add_column(db, "files", "storage_kind TEXT NOT NULL DEFAULT 'temporary'", "storage_kind").await?;
+    try_add_column(db, "files", "expires_at TEXT", "expires_at").await?;
+    try_add_column(db, "files", "deleted_at TEXT", "deleted_at").await?;
+
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_files_content_hash ON files(content_hash);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_files_normalized_hash ON files(normalized_hash);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_files_expires_at ON files(expires_at);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_files_storage_path ON files(storage_path);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_files_deleted_at ON files(deleted_at);"#)
         .execute(db)
         .await?;
 
@@ -333,6 +434,141 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_blocks_blocker ON user_blocks(blocker_id);"#)
         .execute(db)
         .await?;
+
+
+
+    // user_reports: жалобы пользователей на аккаунты / аватары / ник / поведение
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reporter_id INTEGER NOT NULL,
+            target_user_id INTEGER NOT NULL,
+            message_id INTEGER,
+            reason TEXT NOT NULL,
+            message TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            resolved_by INTEGER,
+            FOREIGN KEY(reporter_id) REFERENCES users(id),
+            FOREIGN KEY(target_user_id) REFERENCES users(id),
+            FOREIGN KEY(message_id) REFERENCES messages(id),
+            FOREIGN KEY(resolved_by) REFERENCES users(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_reports_target_status ON user_reports(target_user_id, status);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_reports_reporter ON user_reports(reporter_id);"#)
+        .execute(db)
+        .await?;
+
+    // moderation_events: история действий модерации по пользователю
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS moderation_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            admin_id INTEGER,
+            kind TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            details TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(admin_id) REFERENCES users(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_moderation_events_user_kind ON moderation_events(user_id, kind, id);"#)
+        .execute(db)
+        .await?;
+
+
+    // ai_settings: настройки Gemka III / LM Studio
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ai_settings (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0,
+            base_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:1234/v1',
+            model TEXT NOT NULL DEFAULT 'qwen_qwen3-4b-instruct-2507',
+            user_name TEXT NOT NULL DEFAULT 'Gemka III',
+            label TEXT NOT NULL DEFAULT 'Тестовая функция',
+            mode TEXT NOT NULL DEFAULT 'moderate',
+            dm_enabled INTEGER NOT NULL DEFAULT 1,
+            channel_enabled INTEGER NOT NULL DEFAULT 0,
+            accept_friend_requests INTEGER NOT NULL DEFAULT 1,
+            accept_server_join_requests INTEGER NOT NULL DEFAULT 0,
+            start_dm_enabled INTEGER NOT NULL DEFAULT 0,
+            dm_cooldown_seconds INTEGER NOT NULL DEFAULT 20,
+            channel_cooldown_seconds INTEGER NOT NULL DEFAULT 90,
+            context_messages INTEGER NOT NULL DEFAULT 40,
+            max_tokens INTEGER NOT NULL DEFAULT 180,
+            temperature REAL NOT NULL DEFAULT 0.35,
+            top_p REAL NOT NULL DEFAULT 0.75,
+            system_prompt TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    try_add_column(
+        db,
+        "ai_settings",
+        "accept_server_join_requests INTEGER NOT NULL DEFAULT 0",
+        "accept_server_join_requests",
+    )
+    .await?;
+    try_add_column(
+        db,
+        "ai_settings",
+        "kindness_score INTEGER NOT NULL DEFAULT 100",
+        "kindness_score",
+    )
+    .await?;
+    try_add_column(
+        db,
+        "ai_settings",
+        "no_reply_count INTEGER NOT NULL DEFAULT 0",
+        "no_reply_count",
+    )
+    .await?;
+    try_add_column(
+        db,
+        "ai_settings",
+        "violation_count INTEGER NOT NULL DEFAULT 0",
+        "violation_count",
+    )
+    .await?;
+    try_add_column(
+        db,
+        "ai_settings",
+        "last_event_at TEXT",
+        "last_event_at",
+    )
+    .await?;
+
+    // ai_chat_state: антиспам/cooldown по чатам
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ai_chat_state (
+            chat_id INTEGER PRIMARY KEY,
+            last_reply_at TEXT,
+            last_seen_message_id INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(chat_id) REFERENCES chats(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
 
     // message_reactions
     sqlx::query(
@@ -517,6 +753,40 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
     let _ = sqlx::query("ALTER TABLE chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
         .execute(db)
         .await;
+
+
+    // default AI user from env, if enabled
+    let ai_enabled_env = std::env::var("LB_AI_ENABLED")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+    if ai_enabled_env {
+        let ai_name = std::env::var("LB_AI_USER_NAME")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "Gemka III".to_string());
+        let ai_label = "Тестовая функция".to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO users(username, email, password_hash, is_banned, created_at, token_version, is_ai, ai_label)
+            VALUES(?, NULL, 'AI_LOGIN_DISABLED', 0, ?, 1, 1, ?)
+            "#,
+        )
+        .bind(&ai_name)
+        .bind(&now)
+        .bind(&ai_label)
+        .execute(db)
+        .await;
+        let _ = sqlx::query("UPDATE users SET is_ai = 1, ai_label = ?, is_banned = 0 WHERE username = ?")
+            .bind(&ai_label)
+            .bind(&ai_name)
+            .execute(db)
+            .await;
+    }
 
     Ok(())
 }

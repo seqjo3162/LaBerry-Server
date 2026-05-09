@@ -11,6 +11,7 @@ pub mod server;
 pub mod routes;
 pub mod middleware;
 pub mod api_error;
+pub mod ai_client;
 #[cfg(target_os = "android")]
 mod jni_bridge;
 

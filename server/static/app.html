@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LaBerry</title>
-  <link rel="stylesheet" href="/static/css/main.css?v=21">
+  <link rel="stylesheet" href="/static/css/main.css?v=48">
 </head>
 <body>
   <div id="appRoot" class="app-root">
@@ -13,10 +13,9 @@
   <header class="topbar">
     <div class="topbar-left">
       <button class="icon-btn mobile-only" type="button" id="mobileServersBtn" title="Серверы">☰</button>
-      <button class="icon-btn mobile-only" type="button" id="mobileChannelsBtn" title="Каналы">#</button>
-    </div>
+          </div>
 
-    <div class="brand">LaBerry</div>
+    <div class="brand brand-start-trigger" data-start-page-trigger>LaBerry</div>
 
     <div class="topbar-right">
       <button class="icon-btn mobile-only" type="button" id="mobileMembersBtn" title="Участники">👥</button>
@@ -41,6 +40,7 @@
         <h3>Серверы</h3>
         <button class="btn btn-ghost" type="button" id="addServerBtn">＋</button>
       </div>
+
 
       <div class="list" id="servers-list"></div>
 
@@ -85,7 +85,7 @@
     <aside class="panel channels" id="channelsPanel">
       <div class="panelHeader">
         <h3>Каналы</h3>
-        <button class="btn btn-ghost" type="button" id="addChannelBtn" style="display: none;">＋</button>
+        <button class="btn btn-ghost channel-server-menu-btn" type="button" id="addChannelBtn" style="display: none;" title="Меню сервера">⚙</button>
       </div>
 
       <!-- DM LIST -->
@@ -126,9 +126,11 @@
 
         <form class="composer" id="composer">
           <div class="composer-row">
-            <label class="icon-btn attach-btn" id="attachBtn" for="fileInput" title="Прикрепить файл">📎</label>
+            <button class="icon-btn attach-btn" id="attachBtn" type="button" title="Прикрепить файл">📎</button>
+            <button class="icon-btn md-attach-btn" id="mdAttachBtn" type="button" title="Markdown-файл">MD</button>
             <input type="file" id="fileInput" class="file-input" multiple />
-            <input class="inp" id="message" placeholder="Напишите сообщение..." autocomplete="off" />
+            <input type="file" id="mdFileInput" class="file-input" accept=".md,.markdown,text/markdown,text/plain" />
+            <textarea class="inp message-textarea" id="message" placeholder="Напишите сообщение..." autocomplete="off" rows="1"></textarea>
             <button class="btn btn-primary" type="submit" id="sendBtn">Отправить</button>
           </div>
           <div class="attachments" id="attachments" hidden></div>
@@ -213,11 +215,18 @@
         </div>
 
         <div class="voice-controls" id="voiceControls">
-          <button class="vc-btn" type="button" id="vcMuteBtn" title="Микрофон">🎙</button>
-          <button class="vc-btn" type="button" id="vcDeafenBtn" title="Отключить звук">🔇</button>
-          <button class="vc-btn" type="button" id="vcShareBtn" title="Демонстрация экрана">🖥️</button>
-          <button class="vc-btn danger" type="button" id="vcLeaveBtn" title="Отключиться">⏏</button>
+          <div class="voice-controls-group">
+            <button class="vc-btn" type="button" id="vcMuteBtn" title="Микрофон">🎙</button>
+            <button class="vc-btn" type="button" id="vcDeafenBtn" title="Отключить звук">🔇</button>
+            <button class="vc-btn" type="button" id="vcShareBtn" title="Демонстрация экрана">🖥️</button>
+          </div>
+          <div class="voice-controls-divider"></div>
+          <div class="voice-controls-group">
+            <button class="vc-btn vc-btn-control" type="button" id="vcToggleBtn" title="Скрыть панель">▼</button>
+            <button class="vc-btn danger" type="button" id="vcLeaveBtn" title="Отключиться">⏏</button>
+          </div>
         </div>
+        <button class="voice-controls-show hidden" id="voiceControlsShow" title="Показать панель управления">▲</button>
       </div>
       
       <!-- FRIENDS VIEW (нужно добавить стили в main.css) -->
@@ -279,14 +288,17 @@
   <!-- ===== DM CALL OVERLAY ===== -->
   <div id="dmCallOverlay" class="dm-call-overlay hidden" aria-hidden="true" data-mode="incoming">
     <div class="dm-call-card" role="dialog" aria-modal="true">
-      <div class="dm-call-orb" aria-hidden="true"></div>
-      <div class="dm-call-avatar" id="dmCallAvatar">U</div>
+      <div class="dm-call-glow" aria-hidden="true"></div>
+      <div class="dm-call-state" id="dmCallState">Входящий</div>
+      <div class="dm-call-avatar-wrap">
+        <div class="dm-call-avatar" id="dmCallAvatar">U</div>
+      </div>
       <div class="dm-call-name" id="dmCallName">Пользователь</div>
-      <div class="dm-call-title" id="dmCallTitle">Звонок</div>
-      <div class="dm-call-sub" id="dmCallSub">Входящий вызов</div>
+      <div class="dm-call-title" id="dmCallTitle">Входящий звонок</div>
+      <div class="dm-call-sub" id="dmCallSub">Ответьте, чтобы сразу перейти в голосовой диалог.</div>
       <div class="dm-call-actions">
-        <button class="btn btn-ghost" type="button" id="dmCallDeclineBtn">Отклонить</button>
-        <button class="btn btn-primary" type="button" id="dmCallAcceptBtn">Принять</button>
+        <button class="dm-call-btn decline" type="button" id="dmCallDeclineBtn">Отклонить</button>
+        <button class="dm-call-btn accept" type="button" id="dmCallAcceptBtn">Принять</button>
       </div>
     </div>
   </div>
@@ -360,6 +372,7 @@
 
   </div>
 
-  <script type="module" src="/static/js/app.js?v=22"></script>
+  <script src="/static/js/start-page-link.js?v=1"></script>
+  <script type="module" src="/static/js/app.js?v=44"></script>
 </body>
 </html>

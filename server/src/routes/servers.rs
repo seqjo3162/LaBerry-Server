@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post, delete},
@@ -14,6 +14,7 @@ use crate::middleware::auth_guard::AuthUser;
 #[derive(Deserialize)]
 pub struct CreateServerBody {
     pub name: String,
+    pub is_public: Option<bool>,
 }
 
 
@@ -29,6 +30,8 @@ pub struct ServerRow {
     pub name: String,
     pub owner_id: i64,
     pub created_at: String,
+    pub is_public: bool,
+    pub my_role: String,
 }
 
 #[derive(Serialize)]
@@ -47,6 +50,47 @@ pub struct ChatRow {
     pub last_message_preview: Option<String>,
 }
 
+
+#[derive(Deserialize)]
+pub struct DiscoverQuery {
+    pub q: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct DiscoverServerRow {
+    pub id: i64,
+    pub name: String,
+    pub owner_id: i64,
+    pub created_at: String,
+    pub is_public: bool,
+    pub members_count: i64,
+}
+
+#[derive(Deserialize)]
+pub struct InviteBody {
+    pub username: String,
+}
+
+#[derive(Deserialize)]
+pub struct JoinRequestBody {
+    pub from_server_id: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct JoinRequestView {
+    pub id: i64,
+    pub server_id: i64,
+    pub server_name: String,
+    pub server_is_public: bool,
+    pub requester_id: i64,
+    pub requester_username: String,
+    pub requester_avatar_file_id: Option<i64>,
+    pub from_server_id: Option<i64>,
+    pub from_server_name: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
 
 async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
     // Cleanup duplicate channels (same name + kind) safely.
@@ -477,7 +521,14 @@ async fn delete_chat(
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create).get(list))
+        .route("/discover", get(discover))
+        .route("/join-requests/incoming", get(list_incoming_join_requests))
+        .route("/join-requests/outgoing", get(list_outgoing_join_requests))
+        .route("/join-requests/:request_id/accept", post(accept_join_request))
+        .route("/join-requests/:request_id/reject", post(reject_join_request))
         .route("/:server_id/join", post(join))
+        .route("/:server_id/join-request", post(create_join_request))
+        .route("/:server_id/invite", post(invite_member))
         .route("/:server_id", delete(delete_server))
         .route("/:server_id/chats", get(list_chats).post(create_chat))
         .route("/:server_id/chats/:chat_id", delete(delete_chat))
@@ -504,12 +555,15 @@ async fn create(
     let db = &st.db;
     let created_at = auth::now_iso();
 
+    let is_public = body.is_public.unwrap_or(true);
+
     let res = sqlx::query(
-        "INSERT INTO servers(name, owner_id, created_at) VALUES(?, ?, ?)",
+        "INSERT INTO servers(name, owner_id, created_at, is_public) VALUES(?, ?, ?, ?)",
     )
     .bind(&body.name)
     .bind(me.id)
     .bind(&created_at)
+    .bind(if is_public { 1 } else { 0 })
     .execute(db)
     .await;
 
@@ -540,18 +594,25 @@ async fn join(
 ) -> impl IntoResponse {
     let db = &st.db;
 
-    let exists = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM servers WHERE id = ? LIMIT 1",
+    let is_public = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(is_public, 1) FROM servers WHERE id = ? LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
     .await
     .ok()
-    .flatten()
-    .is_some();
+    .flatten();
 
-    if !exists {
+    let Some(is_public) = is_public else {
         return StatusCode::NOT_FOUND.into_response();
+    };
+
+    if is_public == 0 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"detail":"private_server"})),
+        )
+            .into_response();
     }
 
     if sqlx::query(
@@ -577,7 +638,9 @@ async fn list(
 
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT s.id, s.name, s.owner_id, s.created_at
+        SELECT DISTINCT s.id, s.name, s.owner_id, s.created_at,
+               COALESCE(s.is_public, 1) AS is_public,
+               COALESCE(m.role, 'member') AS my_role
         FROM servers s
         JOIN server_members m ON m.server_id = s.id
         WHERE m.user_id = ?
@@ -596,10 +659,434 @@ async fn list(
             name: r.get("name"),
             owner_id: r.get("owner_id"),
             created_at: r.get("created_at"),
+            is_public: r.get::<i64, _>("is_public") != 0,
+            my_role: r.get::<String, _>("my_role"),
         })
         .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(servers)).into_response()
+}
+
+
+async fn discover(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Query(q): Query<DiscoverQuery>,
+) -> impl IntoResponse {
+    let db = &st.db;
+    let query = q.q.unwrap_or_default().trim().to_string();
+    let like = format!("%{}%", query);
+    let limit = q.limit.unwrap_or(20).clamp(1, 50);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            s.id,
+            s.name,
+            s.owner_id,
+            s.created_at,
+            COALESCE(s.is_public, 1) AS is_public,
+            (SELECT COUNT(1) FROM server_members sm WHERE sm.server_id = s.id) AS members_count
+        FROM servers s
+        WHERE (? = '' OR s.name LIKE ?)
+          AND NOT EXISTS (
+                SELECT 1 FROM server_members m
+                WHERE m.server_id = s.id AND m.user_id = ?
+          )
+        ORDER BY members_count DESC, s.id DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(&query)
+    .bind(&like)
+    .bind(me.id)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let out = rows.into_iter().map(|r| DiscoverServerRow {
+        id: r.get("id"),
+        name: r.get("name"),
+        owner_id: r.get("owner_id"),
+        created_at: r.get("created_at"),
+        is_public: r.get::<i64, _>("is_public") != 0,
+        members_count: r.get::<i64, _>("members_count"),
+    }).collect::<Vec<_>>();
+
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+
+async fn create_join_request(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(server_id): Path<i64>,
+    Json(body): Json<JoinRequestBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let row = sqlx::query(
+        "SELECT id, COALESCE(is_public, 1) AS is_public FROM servers WHERE id = ? LIMIT 1",
+    )
+    .bind(server_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(r) = row else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let is_public = r.get::<i64, _>("is_public") != 0;
+
+    let already_member = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+    )
+    .bind(server_id)
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    if already_member {
+        return (StatusCode::OK, Json(serde_json::json!({"status":"already_member"}))).into_response();
+    }
+
+    if is_public {
+        if sqlx::query(
+            "INSERT OR IGNORE INTO server_members(server_id, user_id) VALUES(?, ?)",
+        )
+        .bind(server_id)
+        .bind(me.id)
+        .execute(db)
+        .await
+        .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        return (StatusCode::OK, Json(serde_json::json!({ "status": "joined" }))).into_response();
+    }
+
+    let from_server_id = match body.from_server_id {
+        Some(v) if v > 0 => {
+            let allowed = sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            )
+            .bind(v)
+            .bind(me.id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+            if allowed { Some(v) } else { None }
+        }
+        _ => None,
+    };
+
+    let now = auth::now_iso();
+    let res = sqlx::query(
+        r#"
+        INSERT INTO server_join_requests(server_id, requester_id, from_server_id, status, created_at)
+        VALUES(?, ?, ?, 'pending', ?)
+        ON CONFLICT(server_id, requester_id) DO UPDATE SET
+            from_server_id = excluded.from_server_id,
+            status = 'pending',
+            created_at = excluded.created_at,
+            decided_at = NULL,
+            decided_by = NULL
+        "#,
+    )
+    .bind(server_id)
+    .bind(me.id)
+    .bind(from_server_id)
+    .bind(&now)
+    .execute(db)
+    .await;
+
+    if res.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let request_id = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM server_join_requests WHERE server_id = ? AND requester_id = ? LIMIT 1",
+    )
+    .bind(server_id)
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some(request_id) = request_id {
+        if let Some(status) = crate::ai_client::auto_decide_server_join_request_if_ai(st.clone(), request_id).await {
+            let response_status = if status == "accepted" { "joined".to_string() } else { status.clone() };
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": response_status,
+                    "ai_decided": true,
+                    "ai_request_status": status
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "status": "pending" }))).into_response()
+}
+
+async fn list_incoming_join_requests(
+    State(st): State<AppState>,
+    me: AuthUser,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            r.id,
+            r.server_id,
+            s.name AS server_name,
+            COALESCE(s.is_public, 1) AS server_is_public,
+            r.requester_id,
+            u.username AS requester_username,
+            up.avatar_file_id AS requester_avatar_file_id,
+            r.from_server_id,
+            fs.name AS from_server_name,
+            r.status,
+            r.created_at
+        FROM server_join_requests r
+        JOIN servers s ON s.id = r.server_id
+        JOIN users u ON u.id = r.requester_id
+        LEFT JOIN user_profile up ON up.user_id = u.id
+        LEFT JOIN servers fs ON fs.id = r.from_server_id
+        JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = ?
+        WHERE r.status = 'pending'
+          AND (s.owner_id = ? OR COALESCE(sm.role, 'member') = 'admin')
+        ORDER BY r.id DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(me.id)
+    .bind(me.id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let out = rows.into_iter().map(join_request_from_row).collect::<Vec<_>>();
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+async fn list_outgoing_join_requests(
+    State(st): State<AppState>,
+    me: AuthUser,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            r.id,
+            r.server_id,
+            s.name AS server_name,
+            COALESCE(s.is_public, 1) AS server_is_public,
+            r.requester_id,
+            u.username AS requester_username,
+            up.avatar_file_id AS requester_avatar_file_id,
+            r.from_server_id,
+            fs.name AS from_server_name,
+            r.status,
+            r.created_at
+        FROM server_join_requests r
+        JOIN servers s ON s.id = r.server_id
+        JOIN users u ON u.id = r.requester_id
+        LEFT JOIN user_profile up ON up.user_id = u.id
+        LEFT JOIN servers fs ON fs.id = r.from_server_id
+        WHERE r.requester_id = ?
+        ORDER BY r.id DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(me.id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let out = rows.into_iter().map(join_request_from_row).collect::<Vec<_>>();
+    (StatusCode::OK, Json(out)).into_response()
+}
+
+fn join_request_from_row(r: sqlx::sqlite::SqliteRow) -> JoinRequestView {
+    JoinRequestView {
+        id: r.get("id"),
+        server_id: r.get("server_id"),
+        server_name: r.get("server_name"),
+        server_is_public: r.get::<i64, _>("server_is_public") != 0,
+        requester_id: r.get("requester_id"),
+        requester_username: r.get("requester_username"),
+        requester_avatar_file_id: r.try_get("requester_avatar_file_id").ok(),
+        from_server_id: r.try_get("from_server_id").ok(),
+        from_server_name: r.try_get("from_server_name").ok(),
+        status: r.get("status"),
+        created_at: r.get("created_at"),
+    }
+}
+
+async fn accept_join_request(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(request_id): Path<i64>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let row = sqlx::query(
+        r#"
+        SELECT r.id, r.server_id, r.requester_id
+        FROM server_join_requests r
+        JOIN servers s ON s.id = r.server_id
+        LEFT JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = ?
+        WHERE r.id = ? AND r.status = 'pending'
+          AND (s.owner_id = ? OR COALESCE(sm.role, 'member') = 'admin')
+        LIMIT 1
+        "#,
+    )
+    .bind(me.id)
+    .bind(request_id)
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(r) = row else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let server_id: i64 = r.get("server_id");
+    let requester_id: i64 = r.get("requester_id");
+    let now = auth::now_iso();
+
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO server_members(server_id, user_id) VALUES(?, ?)",
+    )
+    .bind(server_id)
+    .bind(requester_id)
+    .execute(db)
+    .await;
+
+    let _ = sqlx::query(
+        "UPDATE server_join_requests SET status = 'accepted', decided_at = ?, decided_by = ? WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(me.id)
+    .bind(request_id)
+    .execute(db)
+    .await;
+
+    (StatusCode::OK, Json(serde_json::json!({"status":"accepted"}))).into_response()
+}
+
+async fn reject_join_request(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(request_id): Path<i64>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let row = sqlx::query(
+        r#"
+        SELECT r.id
+        FROM server_join_requests r
+        JOIN servers s ON s.id = r.server_id
+        LEFT JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = ?
+        WHERE r.id = ? AND r.status = 'pending'
+          AND (s.owner_id = ? OR COALESCE(sm.role, 'member') = 'admin')
+        LIMIT 1
+        "#,
+    )
+    .bind(me.id)
+    .bind(request_id)
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    if row.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let now = auth::now_iso();
+    let _ = sqlx::query(
+        "UPDATE server_join_requests SET status = 'rejected', decided_at = ?, decided_by = ? WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(me.id)
+    .bind(request_id)
+    .execute(db)
+    .await;
+
+    (StatusCode::OK, Json(serde_json::json!({"status":"rejected"}))).into_response()
+}
+
+async fn invite_member(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(server_id): Path<i64>,
+    Json(body): Json<InviteBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM servers WHERE id = ? LIMIT 1",
+    )
+    .bind(server_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    if !exists {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if !can_manage_channels(db, server_id, me.id).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let username = body.username.trim();
+    if username.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"detail":"bad_username"}))).into_response();
+    }
+
+    let user_id = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM users WHERE username = ? AND is_banned = 0 LIMIT 1",
+    )
+    .bind(username)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(user_id) = user_id else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"detail":"user_not_found"}))).into_response();
+    };
+
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO server_members(server_id, user_id) VALUES(?, ?)",
+    )
+    .bind(server_id)
+    .bind(user_id)
+    .execute(db)
+    .await;
+
+    (StatusCode::OK, Json(serde_json::json!({"status":"ok", "user_id": user_id}))).into_response()
 }
 
 async fn list_chats(
