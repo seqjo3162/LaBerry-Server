@@ -44,7 +44,6 @@ export function initVoice({ wsManager, api, getMe }) {
   const voiceStageName = document.getElementById('voiceStageName');
   const voiceStageEmpty = document.getElementById('voiceStageEmpty');
   const voiceStageWatchBtn = document.getElementById('voiceStageWatchBtn');
-  const voiceStageStrip = document.getElementById('voiceStageStrip');
   const voiceSelfPreview = document.getElementById('voiceSelfPreview');
   const voiceSelfVideo = document.getElementById('voiceSelfVideo');
   const vcMuteBtn = document.getElementById('vcMuteBtn');
@@ -91,6 +90,7 @@ function ensureVoiceMembersSection() {
   const remoteStreams = new Map(); // peerId -> MediaStream
   const audioEls = new Map();     // peerId -> HTMLAudioElement
   const remoteVideoStreams = new Map(); // peerId -> MediaStream
+  const pendingIceCandidates = new Map(); // peerId -> RTCIceCandidateInit[]
   const videoEls = new Map();     // peerId -> HTMLVideoElement (optional sink)
   const nameCache = new Map();    // userId -> username
 
@@ -100,6 +100,7 @@ function ensureVoiceMembersSection() {
   let iceConfig = null;
   let localStream = null;
   let localStreamError = null;
+  let activeInputDeviceId = '';
 
   // screenshare state
   let screenStream = null;
@@ -135,13 +136,20 @@ function ensureVoiceMembersSection() {
   let watchingUserId = null;
   let watchingStream = null;
   let focusedUserId = null; // local UI focus in members tiles
-  let stagePriorityMode = 'stream'; // stream | user
+  let stagePriorityMode = 'grid'; // grid | stream | user
 
   function applyStagePriorityMode(mode) {
-    stagePriorityMode = (mode === 'user') ? 'user' : 'stream';
+    stagePriorityMode = (mode === 'stream' || mode === 'user') ? mode : 'grid';
     if (!voiceStage) return;
-    voiceStage.classList.remove('mode-stream', 'mode-user');
-    voiceStage.classList.add(stagePriorityMode === 'user' ? 'mode-user' : 'mode-stream');
+    voiceStage.classList.remove('mode-grid', 'mode-stream', 'mode-user', 'stage-focused');
+    voiceStage.classList.add(`mode-${stagePriorityMode}`);
+    voiceStage.classList.toggle('stage-focused', stagePriorityMode !== 'grid');
+    voiceStage.dataset.focus = stagePriorityMode;
+  }
+
+  function toggleStagePriorityMode(mode) {
+    const next = (mode === 'stream' || mode === 'user') ? mode : 'grid';
+    applyStagePriorityMode(stagePriorityMode === next ? 'grid' : next);
   }
 
 
@@ -321,6 +329,43 @@ function ensureVoiceMembersSection() {
     return iceConfig;
   }
 
+  function getPreferredAudioDeviceId() {
+    try {
+      const id = (localStorage.getItem('lb_voice_input_device_id') || 'default').trim();
+      return id && id !== 'default' ? id : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function buildAudioConstraints(deviceId = '') {
+    const audio = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    };
+    if (deviceId) {
+      audio.deviceId = { exact: deviceId };
+    }
+    return { audio };
+  }
+
+  function attachLocalAudioAnalyzer(stream) {
+    try {
+      if (audioCtx) audioCtx.close();
+    } catch (_) {}
+    audioCtx = null;
+    analyser = null;
+
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+    } catch (_) {}
+  }
+
   async function getLocalStreamOptional() {
   if (localStream) return localStream;
   if (localStreamError) return null;
@@ -335,24 +380,18 @@ function ensureVoiceMembersSection() {
     return null;
   }
 
-  const constraints = {
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true
-    }
-  };
-
   try {
-    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    const preferredDeviceId = getPreferredAudioDeviceId();
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints(preferredDeviceId));
+      activeInputDeviceId = preferredDeviceId || 'default';
+    } catch (err) {
+      if (!preferredDeviceId) throw err;
+      localStream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints(''));
+      activeInputDeviceId = 'default';
+    }
 
-    // create audio context & analyzer
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const source = audioCtx.createMediaStreamSource(localStream);
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 1024;
-    source.connect(analyser);
-
+    attachLocalAudioAnalyzer(localStream);
     localStreamError = null;
     return localStream;
   } catch (err) {
@@ -378,6 +417,30 @@ function ensureVoiceMembersSection() {
 
     localStream = null;
     localStreamError = null;
+    activeInputDeviceId = '';
+  }
+
+  async function restartLocalAudioForCurrentCall() {
+    if (!inChannelId || !localStream) return;
+    const preferred = getPreferredAudioDeviceId() || 'default';
+    if (preferred === activeInputDeviceId) return;
+
+    stopLocalStream();
+    const nextStream = await getLocalStreamOptional();
+    if (!nextStream) return;
+
+    const nextTrack = nextStream.getAudioTracks()[0] || null;
+    if (!nextTrack) return;
+
+    for (const pc of pcs.values()) {
+      try {
+        const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+        if (sender) await sender.replaceTrack(nextTrack);
+        else pc.addTrack(nextTrack, nextStream);
+      } catch (_) {}
+    }
+
+    setMuted(muted);
   }
 
   function closePeer(peerId) {
@@ -390,6 +453,7 @@ function ensureVoiceMembersSection() {
       try { pc.close(); } catch (_) {}
     }
     pcs.delete(id);
+    pendingIceCandidates.delete(id);
 
     const s = remoteStreams.get(id);
     if (s) {
@@ -500,32 +564,10 @@ function renderVoiceMembersTiles(ids) {
       ${isLive ? '<div class="voice-member-live">LIVE</div>' : ''}
     `;
 
-    // Right click toggles local focus
+    // Right click keeps the participant context menu available.
     tile.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
-
-      if (focusedUserId === id) focusedUserId = null;
-      else focusedUserId = id;
-
-      // Re-render to update highlight
-      renderVoiceMembersTiles(arr);
-
-      // Apply focus to stage if possible
-      applyVoiceFocusToStage();
-    });
-
-    // Left click: if LIVE — toggle watch; else open user menu if available
-    tile.addEventListener('click', (e) => {
-      try {
-        const isLive = (id === meId ? (isSharingScreen && !!screenStream) : liveSharers.has(id));
-        if (isLive && id !== meId) {
-          e.preventDefault();
-          e.stopPropagation();
-          toggleWatchShare(id).catch(() => {});
-          return;
-        }
-      } catch (_) {}
 
       const fn = window.lbShowUserMenu;
       if (typeof fn !== 'function') return;
@@ -541,6 +583,28 @@ function renderVoiceMembersTiles(ids) {
           allowRemoveFriend: false,
         });
       } catch (_) {}
+    });
+
+    // Left click focuses the rectangular participant tile; repeat click clears focus.
+    tile.addEventListener('click', (e) => {
+      try {
+        const isLive = (id === meId ? (isSharingScreen && !!screenStream) : liveSharers.has(id));
+        if (isLive && id !== meId) {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleWatchShare(id).catch(() => {});
+          return;
+        }
+      } catch (_) {}
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (focusedUserId === id) focusedUserId = null;
+      else focusedUserId = id;
+
+      renderVoiceMembersTiles(arr);
+      applyVoiceFocusToStage();
     });
 
     frag.appendChild(tile);
@@ -706,14 +770,6 @@ function applyVoiceFocusToStage() {
       }
     } catch (_) {}
 
-    // Hide stage strip (no users list inside the stage).
-    try {
-      if (voiceStageStrip) {
-        voiceStageStrip.innerHTML = '';
-        voiceStageStrip.style.display = 'none';
-      }
-    } catch (_) {}
-
     if (!inChannelId) {
       focusedUserId = null;
       renderUsersUnderVoiceChannel(null, []);
@@ -762,8 +818,8 @@ function applyVoiceFocusToStage() {
   function stageSetStream(stream, ownerUserId) {
     const hasVideo = !!stream;
 
-    if (hasVideo && stagePriorityMode !== 'user') {
-      applyStagePriorityMode('stream');
+    if (!hasVideo && stagePriorityMode === 'stream') {
+      applyStagePriorityMode('grid');
     }
 
     // Set/clear the stage video
@@ -786,11 +842,14 @@ function applyVoiceFocusToStage() {
     try {
       if (voicePeerTile) {
         const uid = hasVideo ? Number(ownerUserId || 0) : Number(meId || 0);
-        const show = uid > 0;
+        const show = hasVideo ? uid > 0 : true;
         voicePeerTile.hidden = !show;
+        voicePeerTile.dataset.userId = show ? String(uid || '') : '';
         if (show) {
           const cached = nameCache.get(uid);
-          const nm = (uid === meId ? (meName || 'Вы') : (cached || `User#${uid}`)).toString();
+          const nm = hasVideo
+            ? (uid === meId ? (meName || 'Вы') : (cached || `User#${uid}`)).toString()
+            : (meName || inChannelName || 'Voice').toString();
           if (voicePeerNameEl) voicePeerNameEl.textContent = nm;
           const letter = (nm.trim().charAt(0) || 'U').toUpperCase();
           if (voicePeerAva) voicePeerAva.textContent = letter;
@@ -860,29 +919,6 @@ function applyVoiceFocusToStage() {
     // "Watch" button is kept only for backward compatibility; UI uses the stage window.
     if (voiceStageWatchBtn) voiceStageWatchBtn.hidden = true;
     if (btnStreamWatch) btnStreamWatch.hidden = true;
-  }
-
-  function updateVoiceStageStrip(ids) {
-    if (!voiceStageStrip) return;
-    const arr = Array.isArray(ids) ? ids : [];
-    if (!arr.length) {
-      voiceStageStrip.innerHTML = '';
-      return;
-    }
-
-    const frag = document.createDocumentFragment();
-    for (const uid of arr) {
-      const name = (nameCache.get(uid) || (uid === meId ? (meName || 'Вы') : `User#${uid}`)).toString();
-      const letter = (name.charAt(0) || 'U').toUpperCase();
-
-      const it = document.createElement('div');
-      it.className = 'voice-strip-item' + (uid === meId ? ' me' : '');
-      it.innerHTML = `<div class="voice-strip-ava">${escapeHtml(letter)}</div><div class="voice-strip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>`;
-      frag.appendChild(it);
-    }
-
-    voiceStageStrip.innerHTML = '';
-    voiceStageStrip.appendChild(frag);
   }
 
   // ==============================
@@ -1331,6 +1367,10 @@ async function ssApplyBitrateToAllPeers() {
   function setDeafened(v) {
     deafened = !!v;
 
+    if (deafened && !muted) {
+      setMuted(true);
+    }
+
     // mute all remote audios locally
     for (const a of audioEls.values()) {
       try { a.muted = deafened; } catch (_) {}
@@ -1372,6 +1412,33 @@ async function ssApplyBitrateToAllPeers() {
     if (!meId) return false;
     // deterministic: smaller userId initiates
     return meId < p;
+  }
+
+  function queueIceCandidate(peerId, candidate) {
+    const id = Number(peerId);
+    if (!Number.isFinite(id) || id <= 0 || !candidate) return;
+    const list = pendingIceCandidates.get(id) || [];
+    list.push(candidate);
+    pendingIceCandidates.set(id, list);
+  }
+
+  async function flushIceCandidates(peerId) {
+    const id = Number(peerId);
+    if (!Number.isFinite(id) || id <= 0) return;
+    const pc = pcs.get(id);
+    if (!pc || !pc.remoteDescription) return;
+
+    const list = pendingIceCandidates.get(id) || [];
+    if (!list.length) return;
+    pendingIceCandidates.delete(id);
+
+    for (const candidate of list) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) {
+        console.warn('[VOICE] add queued ICE candidate failed', e);
+      }
+    }
   }
 
   async function ensurePeerConnection(peerId) {
@@ -1509,6 +1576,7 @@ async function ssApplyBitrateToAllPeers() {
     }
 
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    await flushIceCandidates(fromUserId);
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -1528,12 +1596,18 @@ async function ssApplyBitrateToAllPeers() {
     const pc = pcs.get(id);
     if (!pc) return;
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    await flushIceCandidates(id);
   }
 
   async function handleCandidate(fromUserId, candidate) {
     const id = Number(fromUserId);
-    const pc = pcs.get(id);
+    const pc = pcs.get(id) || await ensurePeerConnection(id);
     if (!pc) return;
+
+    if (!pc.remoteDescription) {
+      queueIceCandidate(id, candidate);
+      return;
+    }
 
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
@@ -1557,7 +1631,8 @@ async function ssApplyBitrateToAllPeers() {
   }
 
 async function join(channelId, channelName) {
-  if (!channelId) return;
+  channelId = Number(channelId);
+  if (!Number.isFinite(channelId) || channelId <= 0) return;
   if (joining) return;
 
   // already in this channel: do NOT toggle/leave on repeated click
@@ -1792,6 +1867,10 @@ async function join(channelId, channelName) {
 
     if (t === 'voice_left') {
       // we left (or switched)
+      const ch = Number(msg.channel_id);
+      if (inChannelId && Number.isFinite(ch) && ch > 0 && ch !== inChannelId) {
+        return;
+      }
       localLeaveCleanup();
       return;
     }
@@ -1987,22 +2066,23 @@ async function join(channelId, channelName) {
   }
 
   if (voicePeerTile) {
-    voicePeerTile.title = 'Показать участника крупнее';
+    voicePeerTile.title = 'Сфокусировать участника';
     voicePeerTile.addEventListener('click', (e) => {
       if (e.target && e.target.closest && e.target.closest('button, a')) return;
-      applyStagePriorityMode('user');
+      toggleStagePriorityMode('user');
     });
   }
 
   if (voiceStageVideoWrap) {
-    voiceStageVideoWrap.title = 'Показать демонстрацию крупнее';
+    voiceStageVideoWrap.title = 'Сфокусировать демонстрацию';
     voiceStageVideoWrap.addEventListener('click', (e) => {
       if (e.target && e.target.closest && e.target.closest('button, a')) return;
-      applyStagePriorityMode('stream');
+      if (!voiceStageVideo || !voiceStageVideo.srcObject) return;
+      toggleStagePriorityMode('stream');
     });
   }
 
-  applyStagePriorityMode('stream');
+  applyStagePriorityMode('grid');
 
   if (voiceStageWatchBtn) {
     voiceStageWatchBtn.addEventListener('click', (e) => {
@@ -2228,6 +2308,14 @@ async function join(channelId, channelName) {
       } catch (_) {}
     });
   }
+
+  window.addEventListener('laberry:voice-devices-changed', () => {
+    restartLocalAudioForCurrentCall().catch(() => {});
+  });
+
+  window.addEventListener('laberry:settings-changed', () => {
+    restartLocalAudioForCurrentCall().catch(() => {});
+  });
 
   // leave voice on logout/unload
   window.addEventListener('beforeunload', () => {

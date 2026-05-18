@@ -16,6 +16,7 @@ pub struct AuthUser {
     pub id: i64,
     pub username: String,
     pub role: String,
+    pub token_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ impl FromRequestParts<AppState> for AuthUser {
             id: row.get("id"),
             username,
             role: row.get("role"),
+            token_hash: token_hash.clone(),
         };
 
         // sessions (best-effort)

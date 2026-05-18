@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LaBerry</title>
-  <link rel="stylesheet" href="/static/css/main.css?v=48">
+  <link rel="stylesheet" href="/static/css/main.css?v=55">
 </head>
 <body>
   <div id="appRoot" class="app-root">
@@ -111,6 +111,8 @@
           <h3 id="chat-title"># general</h3>
           <div class="chat-header-actions">
             <button class="icon-btn" type="button" id="dmCallBtn" title="Звонок" hidden>📞</button>
+            <button class="icon-btn" type="button" id="dmActiveCallBtn" title="Открыть звонок" hidden>↗</button>
+            <button class="icon-btn" type="button" id="profilePanelToggleBtn" title="Показать профиль" hidden>👤</button>
             <button class="icon-btn" type="button" id="pinsBtn" title="Закрепы">📌</button>
           </div>
         </div>
@@ -155,24 +157,6 @@
         <div class="voice-stage-wrap">
           <div class="voice-stage" id="voiceStage">
             <div class="voice-stage-content" id="voiceStageContent">
-              <div class="voice-focus" id="voiceFocus" hidden>
-                <div class="voice-focus-top">
-                  <div class="voice-focus-title" id="voiceFocusTitle"></div>
-                  <div class="voice-focus-actions">
-                    <button class="icon-btn" type="button" id="voiceFocusEyeBtn" title="Перестать смотреть" hidden>👁</button>
-                    <button class="icon-btn" type="button" id="voiceFocusCloseBtn" title="Снять закреп">✕</button>
-                  </div>
-                </div>
-                <div class="voice-focus-body">
-                  <div class="voice-focus-empty" id="voiceFocusEmpty" hidden>
-                    <div class="t">Нет видео</div>
-                    <div class="s">Выберите плитку, чтобы закрепить.</div>
-                  </div>
-                  <video id="voiceFocusVideo" autoplay playsinline></video>
-                </div>
-              </div>
-
-              <div class="voice-tiles-grid" id="voiceTilesGrid"></div>
               <div class="voice-peer-tile" id="voicePeerTile" hidden>
                 <div class="voice-peer-ava" id="voicePeerAva">U</div>
                 <div class="voice-peer-name" id="voicePeerName"></div>
@@ -266,6 +250,7 @@
       <div id="membersPanelMembers">
         <div class="panelHeader">
           <h3>Участники <span class="count">(1)</span></h3>
+          <button class="icon-btn members-panel-hide" type="button" id="membersPanelHideBtn" title="Скрыть панель" hidden>›</button>
         </div>
         <div class="members-list" id="membersList">
           <div class="member online">
@@ -283,6 +268,21 @@
     </aside>
   </div>
 
+
+  <!-- ===== ACTIVE DM CALL FLOAT ===== -->
+  <div id="dmCallFloat" class="dm-call-float corner-br" hidden>
+    <div class="dm-call-float-grip" id="dmCallFloatGrip" title="Удерживайте и перетащите к углу">
+      <div class="dm-call-float-avatar" id="dmCallFloatAvatar">U</div>
+      <div class="dm-call-float-main">
+        <div class="dm-call-float-name" id="dmCallFloatName">DM</div>
+        <div class="dm-call-float-status" id="dmCallFloatStatus">Голосовой звонок</div>
+      </div>
+    </div>
+    <div class="dm-call-float-actions">
+      <button class="icon-btn" type="button" id="dmCallFloatOpenBtn" title="Перейти в DM">↗</button>
+      <button class="icon-btn danger" type="button" id="dmCallFloatLeaveBtn" title="Завершить">⏏</button>
+    </div>
+  </div>
 
 
   <!-- ===== DM CALL OVERLAY ===== -->
@@ -373,6 +373,6 @@
   </div>
 
   <script src="/static/js/start-page-link.js?v=1"></script>
-  <script type="module" src="/static/js/app.js?v=44"></script>
+  <script type="module" src="/static/js/app.js?v=50"></script>
 </body>
 </html>

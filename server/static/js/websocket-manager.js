@@ -1,4 +1,14 @@
-console.log('[WS] websocket-manager loaded (v2026-02-18)');
+let WS_DEBUG = false;
+try {
+    WS_DEBUG = typeof window !== 'undefined' && (
+        window.DEBUG_WS === true || localStorage.getItem('lb_debug_ws') === '1'
+    );
+} catch (_) {}
+const wsLog = (...args) => {
+    if (WS_DEBUG) console.log(...args);
+};
+
+wsLog('[WS] websocket-manager loaded (v2026-02-18)');
 
 // NOTE: do NOT log full tokens/URLs (tokens in query are sensitive).
 function _lbDecodeJwtPayload(token) {
@@ -62,20 +72,20 @@ class WebSocketManager {
             return;
         }
         
-        console.log(`[WS ${currentConnectionId}] Connect requested`);
+        wsLog(`[WS ${currentConnectionId}] Connect requested`);
         
         // Если страница выгружается - не подключаемся
         if (this.isDisconnecting) {
-            console.log(`[WS ${currentConnectionId}] Page is unloading, skipping connection`);
+            wsLog(`[WS ${currentConnectionId}] Page is unloading, skipping connection`);
             return;
         }
         
         // Если уже подключаемся - ждем
         if (this.isConnecting) {
-            console.log(`[WS ${currentConnectionId}] Already connecting, waiting...`);
+            wsLog(`[WS ${currentConnectionId}] Already connecting, waiting...`);
             await new Promise(resolve => setTimeout(resolve, 100));
             if (currentConnectionId !== this.connectionId) {
-                console.log(`[WS ${currentConnectionId}] Connection obsolete, aborting`);
+                wsLog(`[WS ${currentConnectionId}] Connection obsolete, aborting`);
                 return;
             }
         }
@@ -98,7 +108,7 @@ class WebSocketManager {
     async _connectInternal(token, connectionId) {
         // Закрываем предыдущее соединение
         if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
-            console.log(`[WS ${connectionId}] Closing previous connection`);
+            wsLog(`[WS ${connectionId}] Closing previous connection`);
             this.ws.onclose = null;
             this.ws.close(1000, 'New connection requested');
             this.ws = null;
@@ -109,12 +119,12 @@ class WebSocketManager {
         const host = window.location.host;
         const url = `${protocol}//${host}/ws`;
         const safeUrl = `${protocol}//${host}/ws`;
-        console.log(`[WS ${connectionId}] Connecting to ${safeUrl}`);
+        wsLog(`[WS ${connectionId}] Connecting to ${safeUrl}`);
         
         return new Promise((resolve, reject) => {
             const ws = new WebSocket(url);
             const timeout = setTimeout(() => {
-                console.log(`[WS ${connectionId}] Connection timeout`);
+                wsLog(`[WS ${connectionId}] Connection timeout`);
                 reject(new Error('Connection timeout'));
             }, 5000);
             
@@ -123,13 +133,13 @@ class WebSocketManager {
                 
                 // Проверяем, не устарело ли соединение
                 if (connectionId !== this.connectionId) {
-                    console.log(`[WS ${connectionId}] Stale connection, closing`);
+                    wsLog(`[WS ${connectionId}] Stale connection, closing`);
                     ws.close(1000, 'Stale connection');
                     reject(new Error('Stale connection'));
                     return;
                 }
                 
-                console.log(`[WS ${connectionId}] ✅ Connected`);
+                wsLog(`[WS ${connectionId}] ✅ Connected`);
                 this.ws = ws;
                 this.reconnectAttempts = 0;
                 
@@ -155,7 +165,7 @@ class WebSocketManager {
             
             ws.onclose = (event) => {
                 clearTimeout(timeout);
-                console.log(`[WS ${connectionId}] Connection closed: ${event.code} ${event.reason}`);
+                wsLog(`[WS ${connectionId}] Connection closed: ${event.code} ${event.reason}`);
                 this._handleClose(event, connectionId);
             };
         });
@@ -166,7 +176,7 @@ class WebSocketManager {
         
         this.ws.onmessage = (event) => {
             if (connectionId !== this.connectionId) {
-                console.log(`[WS ${connectionId}] Ignoring message for stale connection`);
+                wsLog(`[WS ${connectionId}] Ignoring message for stale connection`);
                 return;
             }
             
@@ -182,12 +192,12 @@ class WebSocketManager {
     _handleMessage(data) {
         // Обработка welcome-сообщения
         if (data.type === 'connected') {
-            console.log(`[WS] ✅ Connection established, connection_id: ${data.connection_id}, user_id: ${data.user_id}`);
+            wsLog(`[WS] ✅ Connection established, connection_id: ${data.connection_id}, user_id: ${data.user_id}`);
             this.isAuthenticated = true;
             
             // Отправляем все ожидающие сообщения
             if (this.pendingMessages.length > 0) {
-                console.log(`[WS] Sending ${this.pendingMessages.length} pending messages`);
+                wsLog(`[WS] Sending ${this.pendingMessages.length} pending messages`);
                 this.pendingMessages.forEach(msg => {
                     this.send(msg);
                 });
@@ -198,7 +208,7 @@ class WebSocketManager {
         
         // Обработка pong (ответ на наш ping)
         if (data.type === 'pong') {
-            console.log(`[WS] Received pong, latency: ${Date.now() - data.t}ms`);
+            wsLog(`[WS] Received pong, latency: ${Date.now() - data.t}ms`);
             return;
         }
 
@@ -215,14 +225,14 @@ class WebSocketManager {
         
         // Обработка takeover уведомления
         if (data.type === 'connection_taken_over') {
-            console.log(`[WS] Connection taken over by new connection ${data.new_connection_id}`);
+            wsLog(`[WS] Connection taken over by new connection ${data.new_connection_id}`);
             this.disconnect('Connection taken over');
             return;
         }
         
         // Обработка join подтверждения
         if (data.type === 'joined') {
-            console.log(`[WS] Joined room:`, data.room);
+            wsLog(`[WS] Joined room:`, data.room);
             // Здесь нужно вызвать колбэк для UI
             if (window.onChatJoined) {
                 window.onChatJoined(data);
@@ -232,7 +242,7 @@ class WebSocketManager {
         
         // Обработка обычных сообщений + событий чата
         if (data.type === 'message' || data.type === 'chat_message' || data.type === 'reaction' || data.type === 'message_deleted') {
-            console.log(`[WS] Message received:`, data);
+            wsLog(`[WS] Message received:`, data);
             // Здесь нужно вызвать колбэк для UI
             if (window.onChatMessage) {
                 window.onChatMessage(data);
@@ -259,7 +269,7 @@ class WebSocketManager {
         
         // Обработка ping от сервера
         if (data.type === 'ping') {
-            console.log('[WS] Received ping from server');
+            wsLog('[WS] Received ping from server');
             // Отвечаем pong
             this.send({
                 type: 'pong',
@@ -275,7 +285,7 @@ class WebSocketManager {
             } else if (window.onWsMessage) {
                 try { window.onWsMessage(data); } catch (e) { console.error('[WS] onWsMessage error', e); }
             } else {
-                console.log('[WS] DM call event (no handler):', data);
+                wsLog('[WS] DM call event (no handler):', data);
             }
             return;
         }
@@ -285,7 +295,7 @@ class WebSocketManager {
             if (window.onVoiceEvent) {
                 try { window.onVoiceEvent(data); } catch (e) { console.error('[WS] onVoiceEvent error', e); }
             } else {
-                console.log('[WS] Voice event (no handler):', data);
+                wsLog('[WS] Voice event (no handler):', data);
             }
             return;
         }
@@ -296,12 +306,12 @@ class WebSocketManager {
             return;
         }
 
-        console.log('[WS] Unknown message:', data);
+        wsLog('[WS] Unknown message:', data);
     }
     
     _handleClose(event, connectionId) {
         if (connectionId !== this.connectionId) {
-            console.log(`[WS ${connectionId}] Ignoring close for stale connection`);
+            wsLog(`[WS ${connectionId}] Ignoring close for stale connection`);
             return;
         }
         
@@ -330,14 +340,14 @@ class WebSocketManager {
     
     _scheduleReconnect() {
         if (this.reconnectAttempts >= 10) {
-            console.log('[WS] Max reconnect attempts reached');
+            wsLog('[WS] Max reconnect attempts reached');
             return;
         }
         
         this.reconnectAttempts++;
         const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), this.maxReconnectDelay);
         
-        console.log(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+        wsLog(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
         
         this.reconnectTimer = setTimeout(() => {
             const token = localStorage.getItem('auth_token');
@@ -373,7 +383,7 @@ class WebSocketManager {
     send(data) {
         // Если соединение не установлено или не аутентифицировано
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-            console.log('[WS] Cannot send - WebSocket not connected');
+            wsLog('[WS] Cannot send - WebSocket not connected');
             // Сохраняем сообщение в очередь, кроме ping
             if (data.type !== 'ping') {
                 this.pendingMessages.push(data);
@@ -383,7 +393,7 @@ class WebSocketManager {
         
         // Если не аутентифицированы, откладываем сообщения (кроме ping)
         if (!this.isAuthenticated && data.type !== 'ping') {
-            console.log('[WS] Not authenticated yet, queuing message');
+            wsLog('[WS] Not authenticated yet, queuing message');
             this.pendingMessages.push(data);
             return false;
         }
@@ -391,7 +401,7 @@ class WebSocketManager {
         try {
             const message = JSON.stringify(data);
             this.ws.send(message);
-            console.log(`[WS] Sent: ${data.type}`);
+            wsLog(`[WS] Sent: ${data.type}`);
             return true;
         } catch (error) {
             console.error('[WS] Send error:', error);
@@ -419,7 +429,7 @@ class WebSocketManager {
     }
     
     disconnect(reason = 'User disconnect') {
-        console.log('[WS] Disconnecting:', reason);
+        wsLog('[WS] Disconnecting:', reason);
         this.isDisconnecting = true;
         this.isAuthenticated = false;
         

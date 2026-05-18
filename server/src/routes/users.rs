@@ -47,6 +47,10 @@ pub struct UserSettings {
     pub notify_dms: bool,
     pub notify_mentions: bool,
 
+    // voice/video device preferences (browser-origin scoped ids)
+    pub voice_input_device_id: String,
+    pub voice_video_device_id: String,
+
     // misc
     pub developer_mode: bool,
 }
@@ -82,6 +86,8 @@ fn default_settings() -> UserSettings {
         notify_sounds: true,
         notify_dms: true,
         notify_mentions: true,
+        voice_input_device_id: "default".to_string(),
+        voice_video_device_id: "default".to_string(),
         developer_mode: false,
     }
 }
@@ -183,9 +189,21 @@ fn sanitize_connections(list: Vec<UserConnection>) -> Vec<UserConnection> {
     out
 }
 
+fn sanitize_device_id(s: &str) -> String {
+    let mut out = s.trim().to_string();
+    if out.is_empty() || out == "default" {
+        return "default".to_string();
+    }
+    if out.len() > 256 {
+        out.truncate(256);
+    }
+    out
+}
+
 fn sanitize_settings(mut s: UserSettings) -> UserSettings {
     s.theme = sanitize_theme(&s.theme);
     s.locale = sanitize_locale(&s.locale);
+    s.show_header_status = false;
     s.friend_requests = sanitize_friend_requests(&s.friend_requests);
     s.dms = sanitize_dms(&s.dms);
 
@@ -194,6 +212,8 @@ fn sanitize_settings(mut s: UserSettings) -> UserSettings {
     }
 
     s.connections = sanitize_connections(s.connections);
+    s.voice_input_device_id = sanitize_device_id(&s.voice_input_device_id);
+    s.voice_video_device_id = sanitize_device_id(&s.voice_video_device_id);
     s
 }
 
@@ -223,6 +243,24 @@ pub struct UserProfileView {
     pub about: Option<String>,
     pub status_text: Option<String>,
     pub integrations: serde_json::Value,
+    pub updated_at: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PublicProfileView {
+    pub user_id: i64,
+    pub username: String,
+    pub display_name: String,
+    pub created_at: String,
+    pub status: String,
+    pub is_online: bool,
+    pub avatar_file_id: Option<i64>,
+    pub banner_file_id: Option<i64>,
+    pub accent_color: Option<String>,
+    pub about: Option<String>,
+    pub status_text: Option<String>,
+    pub integrations: serde_json::Value,
+    pub connections: Vec<UserConnection>,
     pub updated_at: String,
 }
 
@@ -347,6 +385,7 @@ pub struct RequestEmailCodeResp {
     pub mail_sent: bool,
     /// sent | not_configured | failed
     pub delivery: String,
+    pub delivery_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -414,10 +453,13 @@ fn send_email_code_by_command(email: &str, code: &str, purpose: &str) -> Result<
         .output()
         .map_err(|e| format!("failed_to_run: {}", e))?;
 
-    if output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if output.status.success() && stderr.is_empty() {
         Ok(())
+    } else if output.status.success() {
+        Err(stderr)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
             Err(format!("exit_status: {}", output.status))
         } else {
@@ -426,14 +468,9 @@ fn send_email_code_by_command(email: &str, code: &str, purpose: &str) -> Result<
     }
 }
 
-async fn get_my_settings(
-    State(st): State<AppState>,
-    me: AuthUser,
-) -> impl IntoResponse {
-    let db = &st.db;
-
+async fn load_user_settings(db: &sqlx::SqlitePool, user_id: i64) -> Option<UserSettings> {
     let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = ? LIMIT 1")
-        .bind(me.id)
+        .bind(user_id)
         .fetch_optional(db)
         .await
         .ok()
@@ -442,8 +479,21 @@ async fn get_my_settings(
     if let Some(r) = row {
         let raw: String = r.get("settings_json");
         if let Ok(v) = serde_json::from_str::<UserSettings>(&raw) {
-            return (StatusCode::OK, Json(sanitize_settings(v))).into_response();
+            return Some(sanitize_settings(v));
         }
+    }
+
+    None
+}
+
+async fn get_my_settings(
+    State(st): State<AppState>,
+    me: AuthUser,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    if let Some(s) = load_user_settings(db, me.id).await {
+        return (StatusCode::OK, Json(s)).into_response();
     }
 
     let def = default_settings();
@@ -958,15 +1008,15 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
 
     let debug = env_bool("LB_DEBUG_EMAIL_CODES");
 
-    let (mail_sent, delivery) = match send_email_code_by_command(&email, &code, &purpose) {
-        Ok(()) => (true, "sent".to_string()),
+    let (mail_sent, delivery, delivery_error) = match send_email_code_by_command(&email, &code, &purpose) {
+        Ok(()) => (true, "sent".to_string(), None),
         Err(e) if e == "not_configured" => {
             tracing::warn!("email code delivery is not configured: set LB_EMAIL_SEND_COMMAND");
-            (false, "not_configured".to_string())
+            (false, "not_configured".to_string(), None)
         }
         Err(e) => {
             tracing::warn!("email code delivery failed: {}", e);
-            (false, "failed".to_string())
+            (false, "failed".to_string(), Some(e))
         }
     };
 
@@ -976,6 +1026,7 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
         expires_in_sec: 10 * 60,
         mail_sent,
         delivery,
+        delivery_error,
     };
     (StatusCode::OK, Json(resp)).into_response()
 }
@@ -1291,6 +1342,62 @@ async fn get_or_create_profile(db: &sqlx::SqlitePool, user_id: i64) -> UserProfi
     }
 }
 
+async fn get_public_profile(db: &sqlx::SqlitePool, user_id: i64) -> Option<PublicProfileView> {
+    let user = sqlx::query("SELECT username, is_banned, created_at FROM users WHERE id = ? LIMIT 1")
+        .bind(user_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()?;
+
+    if user.get::<i64, _>("is_banned") != 0 {
+        return None;
+    }
+
+    let username: String = user.get("username");
+    let created_at: String = user.get("created_at");
+    let profile = get_or_create_profile(db, user_id).await;
+    let settings = load_user_settings(db, user_id).await.unwrap_or_else(default_settings);
+
+    let presence = sqlx::query("SELECT status, is_online FROM user_presence WHERE user_id = ? LIMIT 1")
+        .bind(user_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+
+    let mut status = presence
+        .as_ref()
+        .map(|r| r.get::<String, _>("status"))
+        .unwrap_or_else(|| "offline".to_string());
+    let mut is_online = presence
+        .as_ref()
+        .map(|r| r.get::<i64, _>("is_online") != 0)
+        .unwrap_or(false);
+
+    if status == "invisible" || !is_online {
+        status = "offline".to_string();
+        is_online = false;
+    }
+
+    Some(PublicProfileView {
+        user_id,
+        username: username.clone(),
+        display_name: username,
+        created_at,
+        status,
+        is_online,
+        avatar_file_id: profile.avatar_file_id,
+        banner_file_id: profile.banner_file_id,
+        accent_color: profile.accent_color,
+        about: profile.about,
+        status_text: profile.status_text,
+        integrations: profile.integrations,
+        connections: settings.connections,
+        updated_at: profile.updated_at,
+    })
+}
+
 fn sanitize_color(c: Option<String>) -> Option<String> {
     let mut s = c?.trim().to_string();
     if s.is_empty() {
@@ -1423,8 +1530,10 @@ async fn report_user(
 }
 
 async fn get_my_profile(State(st): State<AppState>, me: AuthUser) -> impl IntoResponse {
-    let v = get_or_create_profile(&st.db, me.id).await;
-    (StatusCode::OK, Json(v)).into_response()
+    match get_public_profile(&st.db, me.id).await {
+        Some(v) => (StatusCode::OK, Json(v)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn update_my_profile(
@@ -1510,8 +1619,10 @@ async fn get_profile_by_id(State(st): State<AppState>, _me: AuthUser, Path(id): 
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let v = get_or_create_profile(&st.db, id).await;
-    (StatusCode::OK, Json(v)).into_response()
+    match get_public_profile(&st.db, id).await {
+        Some(v) => (StatusCode::OK, Json(v)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 #[derive(Serialize)]

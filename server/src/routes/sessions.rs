@@ -15,10 +15,11 @@ use crate::server::AppState;
 pub struct SessionView {
     pub id: i64,
     pub user_agent: Option<String>,
-    pub ip: Option<String>,
     pub created_at: String,
     pub last_seen_at: String,
     pub revoked_at: Option<String>,
+    pub is_current: bool,
+    pub is_active: bool,
 }
 
 pub fn router() -> Router<AppState> {
@@ -32,7 +33,7 @@ async fn list_my(State(st): State<AppState>, me: AuthUser) -> impl IntoResponse 
 
     let rows = sqlx::query(
         r#"
-        SELECT id, user_agent, ip, created_at, last_seen_at, revoked_at
+        SELECT id, token_hash, user_agent, created_at, last_seen_at, revoked_at
         FROM user_sessions
         WHERE user_id = ?
         ORDER BY COALESCE(revoked_at, '') ASC, last_seen_at DESC
@@ -46,13 +47,18 @@ async fn list_my(State(st): State<AppState>, me: AuthUser) -> impl IntoResponse 
 
     let out = rows
         .into_iter()
-        .map(|r| SessionView {
-            id: r.get("id"),
-            user_agent: r.try_get("user_agent").ok(),
-            ip: r.try_get("ip").ok(),
-            created_at: r.get("created_at"),
-            last_seen_at: r.get("last_seen_at"),
-            revoked_at: r.try_get("revoked_at").ok(),
+        .map(|r| {
+            let revoked_at: Option<String> = r.try_get("revoked_at").ok();
+            let token_hash: String = r.get("token_hash");
+            SessionView {
+                id: r.get("id"),
+                user_agent: r.try_get("user_agent").ok(),
+                created_at: r.get("created_at"),
+                last_seen_at: r.get("last_seen_at"),
+                is_current: token_hash == me.token_hash,
+                is_active: revoked_at.is_none(),
+                revoked_at,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -66,28 +72,48 @@ async fn revoke(
 ) -> impl IntoResponse {
     let db = &st.db;
 
-    let owned = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM user_sessions WHERE id = ? AND user_id = ? LIMIT 1",
+    let session = sqlx::query(
+        "SELECT user_agent, ip FROM user_sessions WHERE id = ? AND user_id = ? LIMIT 1",
     )
     .bind(session_id)
     .bind(me.id)
     .fetch_optional(db)
     .await
     .ok()
-    .flatten()
-    .is_some();
+    .flatten();
 
-    if !owned {
+    let Some(session) = session else {
         return StatusCode::NOT_FOUND.into_response();
-    }
+    };
 
     let now = crate::auth::now_iso();
+    let user_agent: Option<String> = session.try_get("user_agent").ok();
+    let ip: Option<String> = session.try_get("ip").ok();
 
     let _ = sqlx::query("UPDATE user_sessions SET revoked_at = ? WHERE id = ?")
         .bind(&now)
         .bind(session_id)
         .execute(db)
         .await;
+
+    let _ = sqlx::query(
+        r#"
+        UPDATE refresh_sessions
+        SET revoked_at = ?
+        WHERE user_id = ?
+          AND revoked_at IS NULL
+          AND ((user_agent = ?) OR (user_agent IS NULL AND ? IS NULL))
+          AND ((ip = ?) OR (ip IS NULL AND ? IS NULL))
+        "#,
+    )
+    .bind(&now)
+    .bind(me.id)
+    .bind(user_agent.clone())
+    .bind(user_agent)
+    .bind(ip.clone())
+    .bind(ip)
+    .execute(db)
+    .await;
 
     (StatusCode::OK, Json(serde_json::json!({"status":"ok"}))).into_response()
 }

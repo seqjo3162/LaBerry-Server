@@ -53,6 +53,11 @@ pub struct Verify2FaBody {
     pub code: String,
 }
 
+#[derive(Deserialize)]
+pub struct LogoutBody {
+    pub refresh_token: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct LoginResponse {
     pub access_token: Option<String>,
@@ -71,6 +76,7 @@ pub fn router() -> Router<AppState> {
         .route("/login", post(login))
         .route("/verify-2fa", post(verify_2fa))
         .route("/logout", post(logout))
+        .route("/logout_all", post(logout_all))
         .route("/refresh", post(refresh))
         .route("/me", get(me))
         .route("/verify", get(verify_token)) // ✅ новое
@@ -482,6 +488,7 @@ async fn refresh(
     // mint new pair
     let access = auth::create_access_token(&claims.sub, tv)
         .map_err(|_| ApiError::Internal("Token error"))?;
+    let access_hash = auth::sha256_hex(&access);
 
     let refresh_jti = Uuid::new_v4().to_string();
     let refresh = auth::create_refresh_token(&claims.sub, tv, &refresh_jti)
@@ -494,6 +501,7 @@ async fn refresh(
         .get(axum::http::header::USER_AGENT)
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
+    let ip = rate_limit::extract_ip(&headers);
 
     let expires_at_new = refresh_claims.exp.to_string();
 
@@ -505,11 +513,26 @@ async fn refresh(
     )
     .bind(user_id)
     .bind(&refresh_hash)
-    .bind(ua)
-    .bind(rate_limit::extract_ip(&headers))
+    .bind(ua.clone())
+    .bind(ip.clone())
     .bind(&now)
     .bind(&now)
     .bind(&expires_at_new)
+    .execute(&st.db)
+    .await;
+
+    let _ = sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO user_sessions(user_id, token_hash, user_agent, ip, created_at, last_seen_at, revoked_at)
+        VALUES(?, ?, ?, ?, ?, ?, NULL)
+        "#,
+    )
+    .bind(user_id)
+    .bind(&access_hash)
+    .bind(ua)
+    .bind(ip)
+    .bind(&now)
+    .bind(&now)
     .execute(&st.db)
     .await;
 
@@ -528,6 +551,45 @@ async fn refresh(
 // Logout
 // ===========================
 async fn logout(
+    State(st): State<AppState>,
+    user: AuthUser,
+    body: Option<Json<LogoutBody>>,
+) -> Result<Response, ApiError> {
+    let now = auth::now_iso();
+
+    let _ = sqlx::query(
+        "UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND token_hash = ? AND revoked_at IS NULL",
+    )
+    .bind(&now)
+    .bind(user.id)
+    .bind(&user.token_hash)
+    .execute(&st.db)
+    .await;
+
+    let refresh_token = body.and_then(|Json(body)| body.refresh_token);
+    if let Some(refresh_token) = refresh_token {
+        let refresh_token = refresh_token.trim();
+        if !refresh_token.is_empty() {
+            let refresh_hash = auth::sha256_hex(refresh_token);
+            let _ = sqlx::query(
+                "UPDATE refresh_sessions SET revoked_at = ? WHERE user_id = ? AND refresh_token_hash = ? AND revoked_at IS NULL",
+            )
+            .bind(&now)
+            .bind(user.id)
+            .bind(refresh_hash)
+            .execute(&st.db)
+            .await;
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ok" })),
+    )
+        .into_response())
+}
+
+async fn logout_all(
     State(st): State<AppState>,
     user: AuthUser,
 ) -> Result<Response, ApiError> {

@@ -239,15 +239,27 @@ async fn handle_incoming_message(
                 return;
             };
 
-            hub.send_to_user(peer_id, &json!({
+            let timestamp = chrono::Utc::now().timestamp_millis();
+            let invite = json!({
                 "type": "dm_call_invite",
                 "chat_id": chat_id,
                 "from_user_id": user_id,
                 "from_username": username,
-                "timestamp": chrono::Utc::now().timestamp_millis()
-            }));
+                "timestamp": timestamp
+            });
 
-            let _ = tx.send(json!({"type":"dm_call_invite_sent","chat_id": chat_id}));
+            let delivered = hub.send_to_user(peer_id, &invite);
+            if !delivered {
+                hub.queue_for_user(peer_id, json!({
+                    "type": "dm_call_missed",
+                    "chat_id": chat_id,
+                    "from_user_id": user_id,
+                    "from_username": username,
+                    "timestamp": timestamp
+                }));
+            }
+
+            let _ = tx.send(json!({"type":"dm_call_invite_sent","chat_id": chat_id,"delivered":delivered}));
         }
 
         "dm_call_accept" => {
@@ -383,7 +395,7 @@ async fn handle_incoming_message(
                 return;
             }
 
-            if hub.voice_get_user_channel(user_id) == Some(channel_id) {
+            if hub.voice_get_conn_channel(conn_id) == Some(channel_id) {
                 let peers = voice_peers(hub, channel_id, Some(user_id));
                 let _ = tx.send(json!({
                     "type": "voice_joined",
@@ -395,8 +407,17 @@ async fn handle_incoming_message(
                 return;
             }
 
-            // If user already in some voice channel -> leave it first
-            if let Some(prev) = hub.voice_get_user_channel(user_id) {
+            // A browser tab owns one voice connection. If the same account joins
+            // from another tab, close the older voice session so RTC signaling
+            // does not fan out to multiple PeerConnections with the same user id.
+            for (other_conn_id, prev) in hub.voice_user_conns(user_id) {
+                if other_conn_id != conn_id {
+                    voice_leave_conn_internal(hub, user_id, other_conn_id, None, prev, true);
+                }
+            }
+
+            // If this connection is already in some voice channel -> leave it first.
+            if let Some(prev) = hub.voice_get_conn_channel(conn_id) {
                 if prev != channel_id {
                     voice_leave_internal(hub, user_id, conn_id, tx, prev, true);
                 }
@@ -433,7 +454,7 @@ async fn handle_incoming_message(
                 .and_then(|d| d.get("channel_id"))
                 .and_then(|x| x.as_i64());
 
-            let current = hub.voice_get_user_channel(user_id);
+            let current = hub.voice_get_conn_channel(conn_id);
             let Some(current_ch) = current else {
                 let _ = tx.send(json!({"type":"voice_left","channel_id": channel_id_opt}));
                 return;
@@ -455,7 +476,7 @@ async fn handle_incoming_message(
             let Some(to_user_id) = data.get("to_user_id").and_then(|x| x.as_i64()) else { return; };
 
             // Only allow signaling inside the same voice channel
-            if hub.voice_get_user_channel(user_id) != Some(channel_id) {
+            if hub.voice_get_conn_channel(conn_id) != Some(channel_id) {
                 let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
             }
@@ -495,8 +516,10 @@ async fn handle_incoming_message(
                 _ => {}
             }
 
-            // Send directly to peer
-            hub.send_to_user(to_user_id, &out);
+            // Send only to the peer connection that is actually in this voice room.
+            if !send_to_voice_user(hub, channel_id, to_user_id, &out) {
+                let _ = tx.send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
+            }
         }
 
         // =====================
@@ -508,7 +531,7 @@ async fn handle_incoming_message(
                 return;
             };
 
-            if hub.voice_get_user_channel(user_id) != Some(channel_id) {
+            if hub.voice_get_conn_channel(conn_id) != Some(channel_id) {
                 let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
             }
@@ -540,7 +563,7 @@ async fn handle_incoming_message(
                 return;
             };
 
-            if hub.voice_get_user_channel(user_id) != Some(channel_id) {
+            if hub.voice_get_conn_channel(conn_id) != Some(channel_id) {
                 let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
             }
@@ -572,7 +595,7 @@ async fn handle_incoming_message(
             let Some(to_user_id) = data.get("to_user_id").and_then(|x| x.as_i64()) else { return; };
 
             // Only allow inside same voice channel
-            if hub.voice_get_user_channel(user_id) != Some(channel_id) {
+            if hub.voice_get_conn_channel(conn_id) != Some(channel_id) {
                 let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
             }
@@ -589,7 +612,9 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             });
 
-            hub.send_to_user(to_user_id, &out);
+            if !send_to_voice_user(hub, channel_id, to_user_id, &out) {
+                let _ = tx.send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
+            }
         }
 
         // v2
@@ -756,6 +781,24 @@ fn broadcast_room_excluding_conn(hub: &Hub, room_id: &RoomId, exclude_conn_id: C
     }
 }
 
+fn send_to_voice_user(hub: &Hub, channel_id: i64, user_id: UserId, payload: &Value) -> bool {
+    let room_id = RoomId::Voice(channel_id);
+    let Some(room) = hub.rooms.get(&room_id) else {
+        return false;
+    };
+    let Some(conns) = room.get(&user_id) else {
+        return false;
+    };
+
+    let mut sent = false;
+    for tx in conns.iter() {
+        if tx.value().send(payload.clone()).is_ok() {
+            sent = true;
+        }
+    }
+    sent
+}
+
 fn voice_peers(hub: &Hub, channel_id: i64, exclude_user: Option<i64>) -> Vec<i64> {
     let mut out = Vec::new();
     if let Some(room) = hub.rooms.get(&RoomId::Voice(channel_id)) {
@@ -780,6 +823,17 @@ fn voice_leave_internal(
     channel_id: i64,
     switched: bool,
 ) {
+    voice_leave_conn_internal(hub, user_id, conn_id, Some(tx), channel_id, switched);
+}
+
+fn voice_leave_conn_internal(
+    hub: &Hub,
+    user_id: UserId,
+    conn_id: ConnId,
+    tx: Option<&mpsc::UnboundedSender<Value>>,
+    channel_id: i64,
+    switched: bool,
+) {
     hub.room_leave(&RoomId::Voice(channel_id), user_id, conn_id);
     hub.voice_clear(user_id, conn_id);
 
@@ -795,12 +849,17 @@ fn voice_leave_internal(
         broadcast_room_excluding_conn(hub, &RoomId::Voice(channel_id), conn_id, &payload);
     }
 
-    let _ = tx.send(json!({
+    let left = json!({
         "type": "voice_left",
         "channel_id": channel_id,
         "switched": switched,
         "timestamp": chrono::Utc::now().timestamp_millis()
-    }));
+    });
+    if let Some(tx) = tx {
+        let _ = tx.send(left);
+    } else {
+        let _ = hub.send_to_conn(conn_id, &left);
+    }
 
     let payload = json!({
         "type": "voice_peer_left",

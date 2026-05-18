@@ -1,4 +1,14 @@
-console.log('[APP] Module loading started...');
+let APP_DEBUG = false;
+try {
+    APP_DEBUG = typeof window !== 'undefined' && (
+        window.DEBUG_APP === true || localStorage.getItem('lb_debug_app') === '1'
+    );
+} catch (_) {}
+const appLog = (...args) => {
+    if (APP_DEBUG) console.log(...args);
+};
+
+appLog('[APP] Module loading started...');
 
 if (typeof fetch === 'undefined') {
     console.error('[APP] fetch is not available!');
@@ -6,15 +16,15 @@ if (typeof fetch === 'undefined') {
     throw new Error('fetch not available');
 }
 
-import { api } from "./api.js?v=9";
+import { api } from "./api.js?v=10";
 import { initFriends } from "./friends.js?v=9";
-import { wsManager } from "./websocket-manager.js?v=11";
-import { createSettingsUI } from "./settings.js?v=12";
+import { wsManager } from "./websocket-manager.js?v=12";
+import { createSettingsUI } from "./settings.js?v=15";
 import { showUserMenu } from "./user-menu.js?v=10";
-import { initVoice } from "./voice.js?v=23";
-import { initProfileModal } from "./profile-modal.js?v=11";
+import { initVoice } from "./voice.js?v=26";
+import { initProfileModal } from "./profile-modal.js?v=13";
 
-console.log('[APP] All imports loaded successfully');
+appLog('[APP] All imports loaded successfully');
 
 window.lbShowUserMenu = showUserMenu;
 
@@ -38,7 +48,12 @@ const chatKindById = new Map();
 const serverOwnerById = new Map(); // server_id -> owner_id (for channel management)
 const chatServerById = new Map(); // chat_id -> server_id
 const SERVER_MUTED_KEY = 'lb:muted_servers:v1';
+const DM_PROFILE_PANEL_HIDDEN_KEY = 'lb:dm_profile_panel_hidden:v1';
+const DM_CALL_FLOAT_CORNER_KEY = 'lb:dm_call_float_corner:v1';
 let mutedServerIds = new Set();
+let dmProfilePanelHidden = false;
+let activeDmCall = null;
+let dmCallFloatWired = false;
 let lastVoiceSwitchClick = { id: null, at: 0 };
 let lastServersSnapshot = [];
 let serverSearchQuery = '';
@@ -81,6 +96,11 @@ function updateServerSelection(serverId) {
 }
 
 loadMutedServers();
+try {
+    dmProfilePanelHidden = localStorage.getItem(DM_PROFILE_PANEL_HIDDEN_KEY) === '1';
+} catch (_) {
+    dmProfilePanelHidden = false;
+}
 
 function avatarRawUrl(fileId) {
     const id = Number(fileId);
@@ -259,7 +279,7 @@ let isPageUnloading = false;
 
 window.addEventListener('beforeunload', () => {
     isPageUnloading = true;
-    console.log('[APP] Page unloading, disconnecting WS');
+    appLog('[APP] Page unloading, disconnecting WS');
     if (wsManager.disconnect) wsManager.disconnect('Page unload');
 });
 
@@ -560,6 +580,21 @@ function statusToLabel(status) {
     return 'В сети';
 }
 
+function formatProfileDate(value) {
+    if (!value) return 'Дата регистрации неизвестна';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return 'Дата регистрации неизвестна';
+    try {
+        return new Intl.DateTimeFormat('ru-RU', {
+            day: '2-digit',
+            month: 'long',
+            year: 'numeric',
+        }).format(dt);
+    } catch (_) {
+        return dt.toLocaleDateString();
+    }
+}
+
 function applyMyStatusToUI(status) {
     const cls = statusToClass(status);
     const top = document.getElementById('status');
@@ -683,18 +718,103 @@ function playNotifySound() {
     }
 }
 
-function showDesktopNotification(title, body, tag) {
+let notificationWorkerRegisterPromise = null;
+
+function registerNotificationWorker() {
+    if (!('serviceWorker' in navigator)) return null;
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return null;
+    if (!notificationWorkerRegisterPromise) {
+        notificationWorkerRegisterPromise = navigator.serviceWorker
+            .register('/static/sw.js')
+            .catch((err) => {
+                console.warn('[NOTIFY] service worker registration failed', err);
+                notificationWorkerRegisterPromise = null;
+                return null;
+            });
+    }
+    return notificationWorkerRegisterPromise;
+}
+
+function showInAppNotification({ title, body = '', tag = '', kind = 'message', onClick = null, timeout = 6500 } = {}) {
+    if (!title || !document?.body) return;
+
+    let stack = document.getElementById('lbNotifyStack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'lbNotifyStack';
+        stack.className = 'lb-notify-stack';
+        stack.setAttribute('aria-live', 'polite');
+        document.body.appendChild(stack);
+    }
+
+    if (tag) {
+        stack.querySelectorAll('.lb-notify-card').forEach((item) => {
+            if (item.dataset.notifyTag === String(tag)) item.remove();
+        });
+    }
+
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = `lb-notify-card ${kind ? `is-${kind}` : ''}`;
+    if (tag) card.dataset.notifyTag = String(tag);
+    card.innerHTML = `
+        <span class="lb-notify-accent" aria-hidden="true"></span>
+        <span class="lb-notify-main">
+            <span class="lb-notify-title">${escapeHtml(title)}</span>
+            ${body ? `<span class="lb-notify-body">${escapeHtml(body)}</span>` : ''}
+        </span>
+    `;
+
+    const close = () => {
+        card.classList.add('is-leaving');
+        setTimeout(() => card.remove(), 180);
+    };
+
+    card.addEventListener('click', () => {
+        try { if (typeof onClick === 'function') onClick(); } catch (_) {}
+        close();
+    });
+
+    stack.appendChild(card);
+    const ttl = Number(timeout);
+    if (Number.isFinite(ttl) && ttl > 0) setTimeout(close, ttl);
+}
+
+function showDesktopNotification(title, body, tag, data = {}) {
     const { desktop } = canNotifyNow();
     if (!desktop) return;
 
     const now = Date.now();
     if (now - lastDesktopAt < 700) return;
 
+    const options = {
+        body,
+        tag: tag ? String(tag) : undefined,
+        silent: true, // sound handled separately
+        data: {
+            url: '/app',
+            ...(data || {}),
+        },
+        requireInteraction: !!data?.requireInteraction,
+    };
+
     try {
+        if ('serviceWorker' in navigator) {
+            registerNotificationWorker();
+            navigator.serviceWorker.ready
+                .then((reg) => reg.showNotification(title, options))
+                .catch(() => {
+                    const n = new Notification(title, options);
+                    n.onclick = () => {
+                        try { window.focus(); } catch (_) {}
+                    };
+                });
+            lastDesktopAt = now;
+            return;
+        }
+
         const n = new Notification(title, {
-            body,
-            tag: tag ? String(tag) : undefined,
-            silent: true, // sound handled separately
+            ...options,
         });
 
         n.onclick = () => {
@@ -725,7 +845,17 @@ function notifyForIncomingMessage(roomId, sender, content) {
     }
 
     // desktop notification + sound use same trigger
-    showDesktopNotification(title, body, `chat:${roomId}`);
+    showInAppNotification({
+        title,
+        body,
+        tag: `chat:${roomId}`,
+        kind: 'message',
+        onClick: () => {
+            try { window.focus(); } catch (_) {}
+            try { openChat(roomId, chatNameById.get(roomId) || `Chat #${roomId}`).catch(() => {}); } catch (_) {}
+        },
+    });
+    showDesktopNotification(title, body, `chat:${roomId}`, { chatId: roomId, url: '/app' });
     playNotifySound();
 }
 
@@ -1052,18 +1182,233 @@ function wireDmCallOverlayButtonsOnce() {
     });
 }
 
+function dmCallFloatEls() {
+    return {
+        root: document.getElementById('dmCallFloat'),
+        grip: document.getElementById('dmCallFloatGrip'),
+        avatar: document.getElementById('dmCallFloatAvatar'),
+        name: document.getElementById('dmCallFloatName'),
+        status: document.getElementById('dmCallFloatStatus'),
+        open: document.getElementById('dmCallFloatOpenBtn'),
+        leave: document.getElementById('dmCallFloatLeaveBtn'),
+        headerOpen: document.getElementById('dmActiveCallBtn'),
+    };
+}
+
+function dmCallFloatCorner() {
+    try {
+        const raw = localStorage.getItem(DM_CALL_FLOAT_CORNER_KEY) || 'br';
+        return ['tl', 'tr', 'bl', 'br'].includes(raw) ? raw : 'br';
+    } catch (_) {
+        return 'br';
+    }
+}
+
+function setDmCallFloatCorner(corner) {
+    const { root } = dmCallFloatEls();
+    const safe = ['tl', 'tr', 'bl', 'br'].includes(corner) ? corner : 'br';
+    if (root) {
+        root.classList.remove('corner-tl', 'corner-tr', 'corner-bl', 'corner-br', 'is-dragging');
+        root.classList.add(`corner-${safe}`);
+        root.style.left = '';
+        root.style.top = '';
+        root.style.right = '';
+        root.style.bottom = '';
+    }
+    try { localStorage.setItem(DM_CALL_FLOAT_CORNER_KEY, safe); } catch (_) {}
+}
+
+function dmCallMetaForChat(chatId) {
+    const id = Number(chatId);
+    const meta = dmMetaByChatId.get(id) || hiddenDmMeta.get(id) || {};
+    const otherName = (meta.otherName || chatNameById.get(id) || 'DM').toString();
+    const otherId = Number(meta.otherId || 0);
+    return { chatId: id, otherId, otherName };
+}
+
+function isKnownDmChat(chatId) {
+    const id = Number(chatId);
+    return Number.isFinite(id) && id > 0 && (
+        dmMetaByChatId.has(id)
+        || hiddenDmMeta.has(id)
+        || (!currentServerId && Number(currentChatId || 0) === id)
+    );
+}
+
+function openActiveDmCallChat() {
+    if (!activeDmCall?.chatId) return;
+    openDmChat(activeDmCall.chatId, activeDmCall.otherName || 'DM').catch((e) => console.warn('[DM CALL] open active DM failed', e));
+}
+
+function wireDmCallFloatOnce() {
+    if (dmCallFloatWired) return;
+
+    const { root, grip, open, leave, headerOpen } = dmCallFloatEls();
+    if (!root) return;
+    dmCallFloatWired = true;
+
+    setDmCallFloatCorner(dmCallFloatCorner());
+
+    open?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openActiveDmCallChat();
+    });
+
+    headerOpen?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openActiveDmCallChat();
+    });
+
+    leave?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try { window.lbVoice?.leave?.(); } catch (_) {}
+    });
+
+    let holdTimer = null;
+    let dragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    const stopDrag = (ev) => {
+        if (holdTimer) {
+            clearTimeout(holdTimer);
+            holdTimer = null;
+        }
+        if (!dragging) return;
+        dragging = false;
+        try { grip?.releasePointerCapture?.(ev.pointerId); } catch (_) {}
+        const x = Number(ev.clientX || 0);
+        const y = Number(ev.clientY || 0);
+        const vertical = y < (window.innerHeight / 2) ? 't' : 'b';
+        const horizontal = x < (window.innerWidth / 2) ? 'l' : 'r';
+        setDmCallFloatCorner(`${vertical}${horizontal}`);
+    };
+
+    grip?.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0) return;
+        if (ev.target?.closest?.('button')) return;
+        const rect = root.getBoundingClientRect();
+        offsetX = ev.clientX - rect.left;
+        offsetY = ev.clientY - rect.top;
+        holdTimer = setTimeout(() => {
+            dragging = true;
+            root.classList.add('is-dragging');
+            try { grip.setPointerCapture?.(ev.pointerId); } catch (_) {}
+        }, 170);
+    });
+
+    grip?.addEventListener('pointermove', (ev) => {
+        if (!dragging) return;
+        ev.preventDefault();
+        const maxLeft = Math.max(8, window.innerWidth - root.offsetWidth - 8);
+        const maxTop = Math.max(8, window.innerHeight - root.offsetHeight - 8);
+        const left = Math.max(8, Math.min(maxLeft, ev.clientX - offsetX));
+        const top = Math.max(8, Math.min(maxTop, ev.clientY - offsetY));
+        root.classList.remove('corner-tl', 'corner-tr', 'corner-bl', 'corner-br');
+        root.style.left = `${left}px`;
+        root.style.top = `${top}px`;
+        root.style.right = 'auto';
+        root.style.bottom = 'auto';
+    });
+
+    grip?.addEventListener('pointerup', stopDrag);
+    grip?.addEventListener('pointercancel', stopDrag);
+}
+
+function refreshDmCallFloat() {
+    wireDmCallFloatOnce();
+    const { root, avatar, name, status, headerOpen } = dmCallFloatEls();
+    if (!root) return;
+
+    const st = window.lbVoice?.getState?.();
+    const chatId = Number(st?.channel_id || 0);
+    const hasDmCall = Number.isFinite(chatId) && chatId > 0 && isKnownDmChat(chatId);
+
+    if (!hasDmCall) {
+        activeDmCall = null;
+        root.hidden = true;
+        if (headerOpen) headerOpen.hidden = true;
+        document.body.classList.remove('dm-call-float-visible');
+        return;
+    }
+
+    activeDmCall = dmCallMetaForChat(chatId);
+    const display = activeDmCall.otherName || st?.channel_name || 'DM';
+    const letter = (display.trim().charAt(0) || 'D').toUpperCase();
+    const isCurrent = !currentServerId && Number(currentChatId || 0) === chatId;
+
+    if (avatar) avatar.textContent = letter;
+    if (name) name.textContent = display;
+    if (status) status.textContent = isCurrent ? 'Звонок в этом DM' : 'DM-звонок';
+    root.hidden = false;
+    if (headerOpen) headerOpen.hidden = false;
+    document.body.classList.add('dm-call-float-visible');
+}
+
 function onDmCallEvent(ev) {
     const t = (ev?.type || '').toString();
     if (!t.startsWith('dm_call_')) return;
 
     wireDmCallOverlayButtonsOnce();
 
+    if (t === 'dm_call_missed') {
+        const chatId = Number(ev.chat_id);
+        const fromName = (ev.from_username || chatNameById.get(chatId) || 'DM').toString();
+        const ts = Number(ev.timestamp || 0);
+        const fresh = !Number.isFinite(ts) || ts <= 0 || (Date.now() - ts) < 10 * 60 * 1000;
+        showInAppNotification({
+            title: 'Пропущенный звонок',
+            body: `${fromName} звонил вам`,
+            tag: `dm-call-missed:${chatId}:${ts || ''}`,
+            kind: 'call',
+            timeout: fresh ? 9000 : 5500,
+            onClick: () => {
+                try { window.focus(); } catch (_) {}
+                if (Number.isFinite(chatId) && chatId > 0) {
+                    openDmChat(chatId, fromName).catch(() => {});
+                }
+            },
+        });
+        if (fresh) {
+            showDesktopNotification('Пропущенный звонок', `${fromName} звонил вам`, `dm-call-missed:${chatId}:${ts || ''}`, {
+                url: '/app',
+                chatId,
+            });
+            playNotifySound();
+        }
+        return;
+    }
+
     if (t === 'dm_call_invite') {
+        const chatId = Number(ev.chat_id);
+        const fromName = (ev.from_username || chatNameById.get(chatId) || 'DM').toString();
         showDmCallOverlay({
             chat_id: ev.chat_id,
             from_user_id: ev.from_user_id,
             from_username: ev.from_username
         });
+        showInAppNotification({
+            title: 'Входящий звонок',
+            body: `${fromName} звонит вам`,
+            tag: `dm-call:${chatId}`,
+            kind: 'call',
+            timeout: 12000,
+            onClick: () => {
+                try { window.focus(); } catch (_) {}
+                if (Number.isFinite(chatId) && chatId > 0) {
+                    openDmChat(chatId, fromName).catch(() => {});
+                }
+            },
+        });
+        showDesktopNotification('Входящий звонок', `${fromName} звонит вам`, `dm-call:${chatId}`, {
+            url: '/app',
+            chatId,
+            requireInteraction: true,
+        });
+        playNotifySound();
         return;
     }
 
@@ -1688,7 +2033,7 @@ async function createServerFlow() {
 
 async function loadMe() {
     try {
-        console.log("[UI] Loading current user...");
+        appLog("[UI] Loading current user...");
         const me = await api("/api/users/me");
         if (!me || typeof me !== 'object') {
             throw new Error('Invalid /api/users/me response');
@@ -1704,7 +2049,7 @@ async function loadMe() {
             currentUserProfile = null;
         }
         applyUserbarAvatar();
-        console.log(`[ME] Loaded as ${currentUser.username}`);
+        appLog(`[ME] Loaded as ${currentUser.username}`);
     } catch (e) {
         console.error("[ME] Failed to load current user", e);
         
@@ -1738,7 +2083,7 @@ function showChannelsMenu() {
         document.body.classList.add('channels-open');
         hideServersMenu();
         hideMembersMenu();
-        console.log('[UI] Channels menu shown');
+        appLog('[UI] Channels menu shown');
         syncDrawerOverlayState();
     }
 }
@@ -1748,7 +2093,7 @@ function hideChannelsMenu() {
     if (channelsPanel) {
         channelsPanel.classList.remove('show-channels');
         document.body.classList.remove('channels-open');
-        console.log('[UI] Channels menu hidden');
+        appLog('[UI] Channels menu hidden');
         syncDrawerOverlayState();
     }
 }
@@ -1757,7 +2102,7 @@ function toggleChannelsMenu() {
     const channelsPanel = document.querySelector('.panel.channels');
     if (channelsPanel) {
         const isVisible = channelsPanel.classList.contains('show-channels');
-        console.log('[UI] Toggling channels menu, currently visible:', isVisible);
+        appLog('[UI] Toggling channels menu, currently visible:', isVisible);
         if (isVisible) {
             hideChannelsMenu();
         } else {
@@ -1829,6 +2174,44 @@ function toggleMembersMenu() {
     const isVisible = membersPanel.classList.contains('show-members');
     if (isVisible) hideMembersMenu();
     else showMembersMenu();
+}
+
+function isDmModeActive() {
+    return !currentServerId && Number(currentChatId || 0) > 0;
+}
+
+function applyDmProfilePanelVisibility() {
+    const membersPanel = document.getElementById('membersPanel');
+    if (!membersPanel) return;
+    const isDm = isDmModeActive();
+    const hideOnDesktop = isDm && !isTouchUi() && dmProfilePanelHidden;
+    if (isDm) {
+        membersPanel.hidden = hideOnDesktop;
+    }
+    document.body.classList.toggle('dm-profile-panel-hidden', hideOnDesktop);
+    syncDmProfilePanelButtons();
+}
+
+function setDmProfilePanelHidden(hidden) {
+    dmProfilePanelHidden = !!hidden;
+    try {
+        localStorage.setItem(DM_PROFILE_PANEL_HIDDEN_KEY, dmProfilePanelHidden ? '1' : '0');
+    } catch (_) {}
+    applyDmProfilePanelVisibility();
+}
+
+function syncDmProfilePanelButtons() {
+    const isDm = isDmModeActive();
+    const showDesktopProfileControls = isDm && !isTouchUi();
+    const toggleBtn = document.getElementById('profilePanelToggleBtn');
+    const hideBtn = document.getElementById('membersPanelHideBtn');
+    if (toggleBtn) {
+        toggleBtn.hidden = !showDesktopProfileControls || !dmProfilePanelHidden;
+        toggleBtn.title = dmProfilePanelHidden ? 'Показать профиль' : 'Профиль открыт';
+    }
+    if (hideBtn) {
+        hideBtn.hidden = !showDesktopProfileControls || dmProfilePanelHidden;
+    }
 }
 
 
@@ -2261,7 +2644,7 @@ function renderServers(servers) {
         ? sourceServers.filter((server) => serverMatchesSearch(server, query))
         : sourceServers;
 
-    console.log('[DEBUG] renderServers called', {
+    appLog('[DEBUG] renderServers called', {
         serversCount: sourceServers.length,
         visibleServersCount: visibleServers.length,
         currentServerId,
@@ -2325,7 +2708,7 @@ function renderServers(servers) {
             e.stopPropagation();
             e.preventDefault();
 
-            console.log('[CLICK] Server clicked:', {
+            appLog('[CLICK] Server clicked:', {
                 id: server.id,
                 name: server.name,
                 currentServerId,
@@ -2333,7 +2716,7 @@ function renderServers(servers) {
             });
 
             if (currentServerId === server.id) {
-                console.log(`[UI] Server ${server.id} already active`);
+                appLog(`[UI] Server ${server.id} already active`);
 
                 // if we are in Friends view, close it and ensure server UI is visible
                 if (location.hash === '#/friends' && window.closeFriends) {
@@ -2351,7 +2734,7 @@ function renderServers(servers) {
                 return;
             }
 
-            console.log(`[UI] Opening server ${server.id} (${server.name})`);
+            appLog(`[UI] Opening server ${server.id} (${server.name})`);
             if (isTouchUi()) {
                 showMobileServerChannelsDrawer(server.id, server.name).catch((err) => console.warn('[UI] mobile server open failed', err));
             } else {
@@ -2363,7 +2746,7 @@ function renderServers(servers) {
     });
 
 
-console.log('[DEBUG] Servers rendered:', serversList.children.length);
+appLog('[DEBUG] Servers rendered:', serversList.children.length);
 }
 
 function canManageChannels(serverId) {
@@ -2474,13 +2857,17 @@ function renderMembers(members) {
         if (st === 'invisible') st = 'offline';
         const online = st !== 'offline';
         const badgeHtml = m.role === 'admin' ? '<span class="member-badge">Админ</span>' : '';
+        const statusText = statusToLabel(st);
 
         el.className = `member status-${st} ${online ? 'online' : 'offline'}`;
         el.innerHTML = `
           <div class="avatar small">${avatarInnerHtml(m.avatar_file_id, m.username)}</div>
           <div class="text">
-            <div class="name">${escapeHtml(m.username || 'Unknown')}</div>
-            <div class="role">${badgeHtml}</div>
+            <div class="member-name-row">
+              <div class="name">${escapeHtml(m.username || 'Unknown')}</div>
+              ${badgeHtml}
+            </div>
+            <div class="role">${escapeHtml(statusText)}</div>
           </div>
         `;
 
@@ -2531,14 +2918,14 @@ function renderMembers(members) {
 
 async function openServer(serverId, serverName) {
     if (isOpeningServer) {
-        console.log('[UI] Server opening in progress, skipping');
+        appLog('[UI] Server opening in progress, skipping');
         return;
     }
     
     isOpeningServer = true;
     
     try {
-        console.log(`[UI] Opening server ${serverId} (${serverName})`);
+        appLog(`[UI] Opening server ${serverId} (${serverName})`);
         if ((location.hash === '#/friends' || location.hash === '#friends') && window.closeFriends) {
             window.closeFriends();
             // clear hash so friends doesn't reopen on refresh
@@ -2549,7 +2936,7 @@ async function openServer(serverId, serverName) {
         currentServerId = serverId;
         sessionStorage.setItem("lastServerId", serverId.toString());
         
-        console.log('[DEBUG] State updated:', {
+        appLog('[DEBUG] State updated:', {
             currentServerId,
             sessionStorage: sessionStorage.getItem("lastServerId")
         });
@@ -2557,7 +2944,7 @@ async function openServer(serverId, serverName) {
         updateServerSelection(serverId);
         
         const chats = await api(`/api/servers/${serverId}/chats`);
-        console.log(`[UI] Loaded ${chats.length} chats for server ${serverId}`);
+        appLog(`[UI] Loaded ${chats.length} chats for server ${serverId}`);
         
         renderChannels(chats);
         // update members list
@@ -2933,6 +3320,8 @@ document.addEventListener('lb:voiceLeft', (ev) => {
     }
   } catch (_) {
     try { closeVoiceView(); } catch (_) {}
+  } finally {
+    refreshDmCallFloat();
   }
 });
 
@@ -2948,6 +3337,7 @@ document.addEventListener('lb:voiceJoined', (ev) => {
       hideVoiceTextLocked();
       openChat(ch, name);
     }
+    refreshDmCallFloat();
   } catch (_) {}
 });
 
@@ -2965,6 +3355,8 @@ function setUiModeServer() {
     if (dmList) dmList.hidden = true;
     if (channelsList) channelsList.hidden = false;
     if (membersPanel) membersPanel.hidden = false;
+    document.body.classList.remove('dm-profile-panel-hidden');
+    syncDmProfilePanelButtons();
 
     try { updateChannelAdminUi(); } catch (_) {}
 }
@@ -2981,11 +3373,12 @@ function setUiModeDm() {
 
     if (channelsList) channelsList.hidden = true;
     if (dmList) dmList.hidden = false;
-    // On desktop keep members panel visible and show DM participants there.
+    // On desktop keep the DM profile visible unless the user collapsed it.
     if (membersPanel) membersPanel.hidden = isTouchUi();
     if (currentChatId) {
-        try { renderDmMembers(currentChatId); } catch (_) {}
+        try { renderDmProfile(currentChatId).catch(() => {}); } catch (_) {}
     }
+    applyDmProfilePanelVisibility();
 
     try { updateChannelAdminUi(); } catch (_) {}
 }
@@ -3318,8 +3711,9 @@ async function loadDmList() {
         const dms = await api('/api/dms');
         renderDmList(dms);
         if (!currentServerId && currentChatId) {
-            try { renderDmMembers(currentChatId); } catch (_) {}
+            try { renderDmProfile(currentChatId).catch(() => {}); } catch (_) {}
         }
+        refreshDmCallFloat();
     } catch (e) {
         console.warn('[UI] Failed to load DM list', e);
         dmList.innerHTML = `<div class="muted" style="padding:12px;">Не удалось загрузить чаты</div>`;
@@ -3364,6 +3758,7 @@ function renderDmList(dms) {
 
         if (Number.isFinite(chatId) && chatId > 0) {
             dmMetaByChatId.set(chatId, { otherId, otherName });
+            try { chatKindById.set(chatId, 'dm'); } catch (_) {}
         }
 
         if (hiddenDmChats.has(chatId)) {
@@ -3474,6 +3869,131 @@ function renderDmMembers(chatId) {
     membersList.appendChild(block);
 }
 
+function dmConnectionBadge(kind) {
+    const k = (kind || 'link').toString().toLowerCase();
+    if (k.includes('github')) return 'GH';
+    if (k.includes('youtube')) return 'YT';
+    if (k.includes('telegram')) return 'TG';
+    if (k.includes('discord')) return 'DC';
+    if (k.includes('twitch')) return 'TW';
+    return 'URL';
+}
+
+function dmProfileConnectionsHtml(connections) {
+    const items = Array.isArray(connections) ? connections : [];
+    const html = items
+        .map((item) => {
+            const rawUrl = (item?.url || item?.href || '').toString().trim();
+            let href = '';
+            try {
+                const parsed = new URL(rawUrl);
+                if (parsed.protocol === 'http:' || parsed.protocol === 'https:') href = parsed.href;
+            } catch (_) {}
+            if (!href) return '';
+
+            const kind = (item?.kind || item?.provider || 'link').toString();
+            const label = (item?.label || item?.title || kind || 'Ссылка').toString();
+            const host = (() => {
+                try { return new URL(href).hostname.replace(/^www\./, ''); }
+                catch (_) { return href.replace(/^https?:\/\//i, ''); }
+            })();
+
+            return `
+              <a class="profile-connection dm-profile-connection" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">
+                <span class="profile-connection-kind">${escapeHtml(dmConnectionBadge(kind))}</span>
+                <span class="profile-connection-main">
+                  <span class="profile-connection-label">${escapeHtml(label)}</span>
+                  <span class="profile-connection-url">${escapeHtml(host)}</span>
+                </span>
+              </a>
+            `;
+        })
+        .filter(Boolean);
+
+    return html.length
+        ? `<div class="profile-connections">${html.join('')}</div>`
+        : '<div class="profile-text empty">Интеграции не добавлены</div>';
+}
+
+async function renderDmProfile(chatId) {
+    const membersPanel = document.getElementById('membersPanel');
+    const membersWrap = document.getElementById('membersPanelMembers');
+    const membersList = document.getElementById('membersList');
+    const countEl = membersPanel?.querySelector('.count');
+    const titleEl = membersPanel?.querySelector('.panelHeader h3');
+    if (!membersPanel || !membersList) return;
+
+    const cid = Number(chatId);
+    const meta = dmMetaByChatId.get(cid) || {};
+    const otherName = (meta.otherName || chatNameById.get(cid) || 'Собеседник').toString();
+    const otherId = Number(meta.otherId || 0);
+
+    if (titleEl) titleEl.innerHTML = 'Профиль';
+    if (countEl) countEl.textContent = '';
+    if (membersWrap) membersWrap.hidden = false;
+    membersPanel.hidden = false;
+
+    membersList.innerHTML = '<div class="dm-profile-panel"><div class="muted">Загрузка профиля...</div></div>';
+
+    let profile = null;
+    if (Number.isFinite(otherId) && otherId > 0) {
+        try {
+            profile = await api(`/api/users/${otherId}/profile`);
+        } catch (e) {
+            console.warn('[DM] profile load failed', e);
+        }
+    }
+
+    const display = (profile?.display_name || profile?.username || otherName).toString();
+    const username = (profile?.username || otherName).toString();
+    const statusRaw = profile?.is_online === false ? 'offline' : (profile?.status || 'online');
+    const normalizedStatus = statusToClass(statusRaw);
+    const statusClass = normalizedStatus === 'invisible' ? 'offline' : normalizedStatus;
+    const statusText = (profile?.status_text || '').toString().trim();
+    const about = (profile?.about || '').toString().trim();
+    const joinedAt = formatProfileDate(profile?.created_at);
+
+    membersList.innerHTML = `
+      <div class="dm-profile-panel">
+        <div class="dm-profile-head">
+          <button class="profile-avatar dm-profile-avatar dm-profile-avatar-btn" type="button" title="Открыть профиль">${avatarInnerHtml(profile?.avatar_file_id, display)}</button>
+          <div class="dm-profile-meta">
+            <div class="dm-profile-name">${escapeHtml(display)}</div>
+            <div class="dm-profile-username">@${escapeHtml(username)}</div>
+            <div class="profile-presence status-${escapeHtml(statusClass)}">${escapeHtml(statusToLabel(statusClass))}</div>
+            <div class="profile-joined">С нами с ${escapeHtml(joinedAt)}</div>
+          </div>
+        </div>
+
+        <div class="profile-card">
+          <div class="profile-label">Статус</div>
+          <div class="profile-text${statusText ? '' : ' empty'}">${statusText ? escapeHtml(statusText) : 'Пусто'}</div>
+        </div>
+
+        <div class="profile-card">
+          <div class="profile-label">О себе</div>
+          <div class="profile-text${about ? '' : ' empty'}">${about ? escapeHtml(about) : 'Пользователь ничего не рассказал о себе'}</div>
+        </div>
+
+        <div class="profile-card">
+          <div class="profile-label">Интеграции</div>
+          ${dmProfileConnectionsHtml(profile?.connections)}
+        </div>
+      </div>
+    `;
+
+    wireAvatarFallbacks(membersList);
+    const avatarBtn = membersList.querySelector('.dm-profile-avatar-btn');
+    if (avatarBtn && Number.isFinite(otherId) && otherId > 0) {
+        avatarBtn.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('laberry:profile-open', {
+                detail: { userId: otherId, username },
+            }));
+        });
+    }
+    applyDmProfilePanelVisibility();
+}
+
 async function openDmChat(chatId, otherName) {
     currentServerId = null;
     updateServerSelection(null);
@@ -3487,7 +4007,7 @@ async function openDmChat(chatId, otherName) {
     setUiModeDm();
     await loadDmList(); // refresh active state + order
     await openChat(chatId, otherName);
-    renderDmMembers(chatId);
+    renderDmProfile(chatId).catch((e) => console.warn('[DM] render profile failed', e));
 }
 
 window.lbLoadDmList = loadDmList;
@@ -3515,7 +4035,7 @@ async function openChat(chatId, title) {
         if (chatView) chatView.hidden = false;
         if (friendsView) friendsView.hidden = true;
     } catch (_) {}
-    console.log(`[UI] Opening chat ${chatId} (${title})`);
+    appLog(`[UI] Opening chat ${chatId} (${title})`);
     const seq = ++openChatSeq;
 
     // unlock composer if it was locked by voice
@@ -3550,6 +4070,8 @@ async function openChat(chatId, title) {
         const isDm = !currentServerId;
         dmCallBtn.hidden = !isDm;
     }
+    syncDmProfilePanelButtons();
+    refreshDmCallFloat();
     
     document.querySelectorAll('.item.channel').forEach(item => {
         const itemId = parseInt(item.dataset.channelId);
@@ -3583,7 +4105,7 @@ async function openChat(chatId, title) {
         const msgs = await api(msgsUrl);
 
         if (seq !== openChatSeq) {
-            console.log(`[UI] openChat(${chatId}) stale response ignored (seq=${seq}, current=${openChatSeq})`);
+            appLog(`[UI] openChat(${chatId}) stale response ignored (seq=${seq}, current=${openChatSeq})`);
             return;
         }
         
@@ -3717,7 +4239,7 @@ async function loadOlderMessages() {
 
 function setupWebSocketHandlers() {
     window.onChatMessage = (data) => {
-        console.log('[APP] WebSocket message received:', data);
+        appLog('[APP] WebSocket message received:', data);
         if (!data) return;
 
         // support service events (typing/upload) if server sends them
@@ -3994,9 +4516,9 @@ function initWebSocket() {
     
     setTimeout(() => {
         if (!isPageUnloading && wsManager.connect) {
-            console.log('[APP] Attempting WebSocket connection...');
+            appLog('[APP] Attempting WebSocket connection...');
             wsManager.connect(token).then(() => {
-                console.log('[APP] WebSocket connected successfully');
+                appLog('[APP] WebSocket connected successfully');
 
                 // После WS-коннекта presence в БД обновлён — перезагрузим список участников
                 if (currentServerId) {
@@ -4012,7 +4534,7 @@ function initWebSocket() {
                 }
                 
                 if (currentChatId && wsManager.isConnected && wsManager.joinRoom) {
-                    console.log(`[WS] Rejoining room ${currentChatId} after reconnect`);
+                    appLog(`[WS] Rejoining room ${currentChatId} after reconnect`);
                     wsManager.joinRoom(currentChatId);
                 }
             }).catch(error => {
@@ -4836,7 +5358,7 @@ function setupMessageComposer() {
         }
     });
 
-    console.log('[APP] Message composer setup complete');
+    appLog('[APP] Message composer setup complete');
 }
 
 function normalizeTimestampToMs(ts) {
@@ -6415,6 +6937,21 @@ function googleDriveFileIdFromUrl(u) {
     return null;
 }
 
+function githubInfoFromUrl(u) {
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host !== 'github.com') return null;
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) return null;
+
+    const repo = `${parts[0]}/${parts[1]}`;
+    let detail = 'Репозиторий GitHub';
+    if (parts[2] === 'issues' && parts[3]) detail = `Issue #${parts[3]}`;
+    else if (parts[2] === 'pull' && parts[3]) detail = `Pull request #${parts[3]}`;
+    else if (parts[2]) detail = parts.slice(2).join('/');
+
+    return { repo, detail };
+}
+
 function providerNameForUrl(u) {
     const host = u.hostname.toLowerCase().replace(/^www\./, '');
     if (host.includes('youtube.com') || host === 'youtu.be') return 'YouTube';
@@ -6456,16 +6993,17 @@ function renderExternalWarningCard(u, opts = {}) {
 function renderKnownLinkEmbed(u) {
     const ytId = youtubeVideoIdFromUrl(u);
     if (ytId) {
-        const embed = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(ytId)}`;
+        const thumb = `https://i.ytimg.com/vi/${encodeURIComponent(ytId)}/hqdefault.jpg`;
         return `
-          <div class="link-embed link-video-embed" data-provider="youtube">
+          <div class="link-embed link-video-embed link-video-summary" data-provider="youtube">
             <div class="link-embed-head">
               <span class="link-provider">YouTube</span>
               <a class="link-open-direct" href="${escapeHtml(u.href)}" target="_blank" rel="noopener noreferrer">Открыть</a>
             </div>
-            <div class="link-frame-wrap">
-              <iframe class="link-frame" src="${escapeHtml(embed)}" title="YouTube video" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
-            </div>
+            <a class="link-thumb-wrap" href="${escapeHtml(u.href)}" target="_blank" rel="noopener noreferrer">
+              <img class="link-thumb" src="${escapeHtml(thumb)}" alt="YouTube preview" loading="lazy">
+              <span class="link-play-badge" aria-hidden="true">▶</span>
+            </a>
           </div>
         `;
     }
@@ -6514,6 +7052,23 @@ function renderKnownLinkEmbed(u) {
     }
 
     const host = u.hostname.toLowerCase();
+    const gh = githubInfoFromUrl(u);
+    if (gh) {
+        return `
+          <div class="link-embed link-summary-card" data-provider="github">
+            <div class="link-card-mark">GH</div>
+            <div class="link-card-main">
+              <div class="link-card-provider">github.com</div>
+              <div class="link-card-title">${escapeHtml(gh.repo)}</div>
+              <div class="link-card-url">${escapeHtml(gh.detail)}</div>
+              <div class="link-card-actions">
+                <a class="link-card-open" href="${escapeHtml(u.href)}" target="_blank" rel="noopener noreferrer">Открыть</a>
+              </div>
+            </div>
+          </div>
+        `;
+    }
+
     if (host.includes('disk.yandex.') || host.includes('yadi.sk') || host.includes('yandex.')) {
         return renderExternalWarningCard(u, {
             provider: providerNameForUrl(u),
@@ -7148,7 +7703,7 @@ async function initializeApp() {
         return;
     }
     
-    console.log('[APP] Initializing...');
+    appLog('[APP] Initializing...');
     isInitialized = true;
     
     const overlay = $("loading-overlay");
@@ -7157,6 +7712,7 @@ async function initializeApp() {
     try {
         normalizeHash();
         applyTheme(localStorage.getItem('theme') || 'dark');
+        registerNotificationWorker();
         await loadMe();
         try { window.lbMe = currentUser; } catch (_) {}
         try { initVoice({ wsManager, api, getMe: () => currentUser }); } catch (e) { console.warn('[VOICE] initVoice failed', e); }
@@ -7185,6 +7741,8 @@ async function initializeApp() {
         document.getElementById('pinsBtn')?.addEventListener('click', () => openPinsModal());
         document.getElementById('addChannelBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openCurrentServerMenu(e.currentTarget); });
         document.getElementById('dmCallBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); startDmCall(); });
+        document.getElementById('profilePanelToggleBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setDmProfilePanelHidden(false); });
+        document.getElementById('membersPanelHideBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setDmProfilePanelHidden(true); });
         setupServerSearch();
         document.addEventListener('click', (e) => {
             const t = e.target;
@@ -7242,12 +7800,12 @@ async function initializeApp() {
         setupAttachmentUi();
         // mobile drawers are closed by clicking overlay
 const servers = await api("/api/servers");
-        console.log('[APP] Servers loaded:', servers);
+        appLog('[APP] Servers loaded:', servers);
         
         const lastServerId = Number(sessionStorage.getItem("lastServerId"));
         const lastChatId = Number(sessionStorage.getItem("lastChatId"));
         
-        console.log('[APP] Restoring from sessionStorage:', {
+        appLog('[APP] Restoring from sessionStorage:', {
             lastServerId,
             lastChatId,
             serversCount: servers.length
@@ -7265,7 +7823,7 @@ const servers = await api("/api/servers");
         
         if (serverId) {
             const chats = await api(`/api/servers/${serverId}/chats`);
-            console.log('[APP] Chats loaded:', chats);
+            appLog('[APP] Chats loaded:', chats);
             
             renderChannels(chats);
         // update members list
@@ -7312,16 +7870,16 @@ const servers = await api("/api/servers");
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-    console.log('[APP] DOM loaded, checking auth...');
+    appLog('[APP] DOM loaded, checking auth...');
     
     const token = localStorage.getItem("auth_token");
     if (!token) {
-        console.log('[APP] No auth token, redirecting to login...');
+        appLog('[APP] No auth token, redirecting to login...');
         window.location.href = "/";
         return;
     }
     
-    console.log('[APP] Auth token found, initializing...');
+    appLog('[APP] Auth token found, initializing...');
     initializeApp();
 });
 
@@ -7329,6 +7887,8 @@ window.addEventListener('resize', () => {
     if (window.innerWidth > 900) {
         hideChannelsMenu();
     }
+    applyDmProfilePanelVisibility();
+    refreshDmCallFloat();
 });
 
 window.addEventListener('error', (event) => {
@@ -7363,4 +7923,4 @@ if (window.appInitialized) {
     window.appInitialized = true;
 }
 
-console.log('[APP] Application script loaded successfully');
+appLog('[APP] Application script loaded successfully');

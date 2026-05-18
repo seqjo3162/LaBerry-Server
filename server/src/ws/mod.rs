@@ -82,6 +82,9 @@ pub struct Hub {
     /// voice state: user_id -> voice_channel_id
     pub voice_by_user: Arc<DashMap<UserId, VoiceChannelId>>,
 
+    /// short-lived user events that should be delivered on the next reconnect
+    pub pending_user_events: Arc<DashMap<UserId, Vec<Value>>>,
+
     /// screenshare state: voice_channel_id -> set(user_id)
     pub ss_by_voice: Arc<DashMap<VoiceChannelId, DashMap<UserId, ()>>>,
 }
@@ -105,6 +108,7 @@ impl Hub {
             user_locks: Arc::new(DashMap::new()),
             voice_by_conn: Arc::new(DashMap::new()),
             voice_by_user: Arc::new(DashMap::new()),
+            pending_user_events: Arc::new(DashMap::new()),
             ss_by_voice: Arc::new(DashMap::new()),
         }
     }
@@ -113,11 +117,30 @@ impl Hub {
     // VOICE STATE
     // ===================
     pub fn voice_get_user_channel(&self, user_id: UserId) -> Option<VoiceChannelId> {
-        self.voice_by_user.get(&user_id).map(|v| *v)
+        self.voice_user_conns(user_id)
+            .first()
+            .map(|(_, channel_id)| *channel_id)
     }
 
     pub fn voice_get_conn_channel(&self, conn_id: ConnId) -> Option<VoiceChannelId> {
         self.voice_by_conn.get(&conn_id).map(|v| *v)
+    }
+
+    pub fn voice_user_conns(&self, user_id: UserId) -> Vec<(ConnId, VoiceChannelId)> {
+        let mut out = Vec::new();
+        let Some(conns) = self.presence.get(&user_id) else {
+            return out;
+        };
+
+        for conn in conns.iter() {
+            let conn_id = *conn.key();
+            if let Some(channel_id) = self.voice_by_conn.get(&conn_id) {
+                out.push((conn_id, *channel_id));
+            }
+        }
+
+        out.sort_unstable_by_key(|(conn_id, _)| *conn_id);
+        out
     }
 
     /// Set voice channel for (user, conn). Returns previous voice_channel_id (if any).
@@ -134,9 +157,15 @@ impl Hub {
 
     /// Clear voice channel for (user, conn). Returns cleared voice_channel_id (if any).
     pub fn voice_clear(&self, user_id: UserId, conn_id: ConnId) -> Option<VoiceChannelId> {
-        let prev_user = self.voice_by_user.remove(&user_id).map(|(_, v)| v);
         let prev_conn = self.voice_by_conn.remove(&conn_id).map(|(_, v)| v);
-        prev_user.or(prev_conn)
+
+        if let Some((_, channel_id)) = self.voice_user_conns(user_id).first().copied() {
+            self.voice_by_user.insert(user_id, channel_id);
+        } else {
+            self.voice_by_user.remove(&user_id);
+        }
+
+        prev_conn
     }
 
 
@@ -289,12 +318,34 @@ impl Hub {
     // ===================
     // DIRECT SEND
     // ===================
-    pub fn send_to_user(&self, user_id: UserId, payload: &Value) {
+    pub fn send_to_user(&self, user_id: UserId, payload: &Value) -> bool {
+        let mut sent = false;
         if let Some(conns) = self.presence.get(&user_id) {
             for tx in conns.iter() {
-                let _ = tx.value().send(payload.clone());
+                if tx.value().send(payload.clone()).is_ok() {
+                    sent = true;
+                }
             }
         }
+        sent
+    }
+
+    pub fn queue_for_user(&self, user_id: UserId, payload: Value) {
+        let mut entry = self.pending_user_events.entry(user_id).or_insert_with(Vec::new);
+        entry.push(payload);
+
+        let len = entry.len();
+        if len > 24 {
+            let drop_count = len - 24;
+            entry.drain(0..drop_count);
+        }
+    }
+
+    pub fn drain_pending_for_user(&self, user_id: UserId) -> Vec<Value> {
+        self.pending_user_events
+            .remove(&user_id)
+            .map(|(_, events)| events)
+            .unwrap_or_default()
     }
 
     // 🔥 NEW: Send to specific connection
@@ -425,9 +476,8 @@ impl Hub {
             self.room_leave(&room_id, user_id, conn_id);
         }
 
-        // Clear voice state (best-effort)
-        self.voice_by_conn.remove(&conn_id);
-        self.voice_by_user.remove(&user_id);
+        // Clear voice state for this connection, preserving other live tabs.
+        self.voice_clear(user_id, conn_id);
 
         // Notify voice room that the peer left (disconnect / cleanup)
         if let Some(ch) = voice_channel {
@@ -531,6 +581,9 @@ pub async fn handle(
 
     // регистрируем новый коннект
     hub.presence_join(user_id, conn_id, tx.clone());
+    for payload in hub.drain_pending_for_user(user_id) {
+        let _ = tx.send(payload);
+    }
 
     // ======================
     // MAIN LOOP

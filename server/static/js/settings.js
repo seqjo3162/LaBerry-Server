@@ -1,6 +1,6 @@
 import { api } from "./api.js?v=7";
 import { openAvatarCropper } from "./avatar-cropper.js?v=7";
-import { wsManager } from "./websocket-manager.js?v=11";
+import { wsManager } from "./websocket-manager.js?v=12";
 
 const $ = (id) => document.getElementById(id);
 
@@ -25,6 +25,9 @@ const DEFAULT_SETTINGS = {
     notify_dms: true,
     notify_mentions: true,
 
+    voice_input_device_id: 'default',
+    voice_video_device_id: 'default',
+
     developer_mode: false,
 };
 
@@ -40,7 +43,7 @@ function normalizeSettings(s) {
     const dm = (v.dms || 'friends_and_server').toString().toLowerCase();
     v.dms = ['friends_only', 'friends_and_server', 'everyone'].includes(dm) ? dm : 'friends_and_server';
 
-    v.show_header_status = !!v.show_header_status;
+    v.show_header_status = false;
     v.compact_mode = !!v.compact_mode;
     v.show_timestamps = !!v.show_timestamps;
 
@@ -48,6 +51,9 @@ function normalizeSettings(s) {
     v.notify_sounds = !!v.notify_sounds;
     v.notify_dms = !!v.notify_dms;
     v.notify_mentions = !!v.notify_mentions;
+
+    v.voice_input_device_id = sanitizeDeviceId(v.voice_input_device_id);
+    v.voice_video_device_id = sanitizeDeviceId(v.voice_video_device_id);
 
     v.developer_mode = !!v.developer_mode;
 
@@ -89,6 +95,12 @@ function normalizeSettings(s) {
     return v;
 }
 
+function sanitizeDeviceId(value) {
+    const id = (value ?? 'default').toString().trim();
+    if (!id || id === 'default') return 'default';
+    return id.slice(0, 256);
+}
+
 function applyUiSettings(settings, applyТема) {
     const s = normalizeSettings(settings);
 
@@ -101,7 +113,7 @@ function applyUiSettings(settings, applyТема) {
         localStorage.setItem('theme', s.theme);
     }
 
-    document.body.classList.toggle('hide-header-status', !s.show_header_status);
+    document.body.classList.add('hide-header-status');
     document.body.classList.toggle('compact-mode', !!s.compact_mode);
     document.body.classList.toggle('hide-timestamps', !s.show_timestamps);
 
@@ -116,6 +128,8 @@ function applyUiSettings(settings, applyТема) {
     try { document.getElementById('appRoot')?.classList?.toggle?.('ui-scaled-root', __scaled); } catch (_) {}
     // keep in localStorage for fast first paint
     try { localStorage.setItem('ui_scale', String(s.font_scale || 1)); } catch (_) {}
+    try { localStorage.setItem('lb_voice_input_device_id', s.voice_input_device_id || 'default'); } catch (_) {}
+    try { localStorage.setItem('lb_voice_video_device_id', s.voice_video_device_id || 'default'); } catch (_) {}
 
 }
 
@@ -149,9 +163,11 @@ function mountOverlay() {
           <button class="settings-nav-item active" data-section="account" type="button">Мой аккаунт</button>
           <button class="settings-nav-item" data-section="privacy" type="button">Конфиденциальность</button>
           <button class="settings-nav-item" data-section="notifications" type="button">Уведомления</button>
+          <button class="settings-nav-item" data-section="devices" type="button">Устройства</button>
           <div class="settings-side-sep"></div>
           <div class="settings-side-header">Настройки приложения</div>
           <button class="settings-nav-item" data-section="appearance" type="button">Внешний вид</button>
+          <button class="settings-nav-item" data-section="voice-video" type="button">Голос и видео</button>
           <button class="settings-nav-item" data-section="connections" type="button">Интеграции</button>
           <button class="settings-nav-item" data-section="keybinds" type="button">Клавиши</button>
           <button class="settings-nav-item" data-section="advanced" type="button">Расширенные</button>
@@ -366,8 +382,18 @@ export function createSettingsUI(opts = {}) {
             return;
         }
 
+        if (section === 'devices') {
+            await renderDevices();
+            return;
+        }
+
         if (section === 'appearance') {
             await renderAppearance();
+            return;
+        }
+
+        if (section === 'voice-video') {
+            await renderVoiceVideo();
             return;
         }
 
@@ -390,13 +416,31 @@ export function createSettingsUI(opts = {}) {
     };
 
     const doLogout = async () => {
+        const refreshToken = localStorage.getItem('refresh_token') || '';
         try {
-            await api('/api/auth/logout', { method: 'POST' });
+            await api('/api/auth/logout', {
+                method: 'POST',
+                body: JSON.stringify({ refresh_token: refreshToken }),
+            });
         } catch (_) {}
 
         try { wsManager.disconnect('Logout'); } catch (_) {}
         localStorage.removeItem('auth_token');
         localStorage.removeItem('refresh_token');
+        localStorage.removeItem('user_id');
+        sessionStorage.clear();
+        window.location.href = '/';
+    };
+
+    const doLogoutAll = async () => {
+        try {
+            await api('/api/auth/logout_all', { method: 'POST' });
+        } catch (_) {}
+
+        try { wsManager.disconnect('Logout all'); } catch (_) {}
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('refresh_token');
+        localStorage.removeItem('user_id');
         sessionStorage.clear();
         window.location.href = '/';
     };
@@ -510,17 +554,6 @@ export function createSettingsUI(opts = {}) {
               <div class="email-code-confirm ${pendingEmail ? 'is-visible' : ''}" id="emailConfirmBox">
                 <input class="inp" id="emailCode" inputmode="numeric" maxlength="6" placeholder="6-значный код">
                 <button class="btn" id="confirmEmailCode" type="button">Подтвердить</button>
-              </div>
-            </div>
-
-            <div class="settings-card">
-              <h4>Публичный ключ</h4>
-              <div class="form-row">
-                <label>Публичный ключ</label>
-                <textarea class="inp" id="mePubKey" rows="3" placeholder="публичный ключ (опционально)">${escapeHtml(me?.public_encryption_key || '')}</textarea>
-              </div>
-              <div class="form-actions">
-                <button class="btn btn-secondary" id="saveProfile" type="button">Сохранить ключ</button>
               </div>
             </div>
 
@@ -685,11 +718,12 @@ export function createSettingsUI(opts = {}) {
                 if (res?.debug_code) {
                     setEmailMsg('ok', `Debug-код: ${res.debug_code}`);
                 } else if (res?.mail_sent) {
-                    setEmailMsg('ok', 'Код отправлен. Проверьте почту.');
+                    setEmailMsg('ok', 'Код отправлен. Если письма нет, проверьте Спам и правильность адреса.');
                 } else if (res?.delivery === 'not_configured') {
                     setEmailMsg('err', 'Отправка почты не настроена на сервере.');
                 } else {
-                    setEmailMsg('err', 'Код создан, но письмо не отправлено.');
+                    const err = res?.delivery_error ? `: ${res.delivery_error}` : '.';
+                    setEmailMsg('err', `Код создан, но письмо не отправлено${err}`);
                 }
 
                 showInline(res?.mail_sent || res?.debug_code ? 'ok' : 'err', res?.mail_sent || res?.debug_code ? 'Код отправлен' : 'Почта не настроена');
@@ -734,24 +768,6 @@ export function createSettingsUI(opts = {}) {
             }
         });
 
-        overlay.querySelector('#saveProfile')?.addEventListener('click', async () => {
-            const public_encryption_key = (overlay.querySelector('#mePubKey')?.value || '').trim();
-
-            try {
-                const updated = await api('/api/users/me', {
-                    method: 'PUT',
-                    body: JSON.stringify({
-                        public_encryption_key: public_encryption_key || null,
-                    })
-                });
-                setCurrentUser(updated);
-                showInline('ok', 'Ключ сохранён');
-            } catch (e) {
-                console.warn('[SETTINGS] profile save failed', e);
-                showInline('err', 'Не удалось сохранить ключ');
-            }
-        });
-
         overlay.querySelector('#changePass')?.addEventListener('click', async () => {
             const old_password = overlay.querySelector('#oldPass')?.value || '';
             const new_password = overlay.querySelector('#newPass')?.value || '';
@@ -793,7 +809,8 @@ export function createSettingsUI(opts = {}) {
         });
 
         overlay.querySelector('#logoutAll')?.addEventListener('click', async () => {
-            await doLogout();
+            if (!confirm('Выйти со всех устройств? Все активные сессии будут завершены.')) return;
+            await doLogoutAll();
         });
 
         // DELETE ME (confirm username)
@@ -999,6 +1016,137 @@ export function createSettingsUI(opts = {}) {
         bindToggle('#notifyMentions', 'notify_mentions');
     };
 
+    const formatSessionTime = (value) => {
+        if (!value) return 'Неизвестно';
+        const dt = new Date(value);
+        if (Number.isNaN(dt.getTime())) return String(value);
+        try {
+            return new Intl.DateTimeFormat('ru-RU', {
+                day: '2-digit',
+                month: '2-digit',
+                year: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+            }).format(dt);
+        } catch (_) {
+            return dt.toLocaleString();
+        }
+    };
+
+    const sessionDeviceName = (ua) => {
+        const raw = (ua || '').toString();
+        if (!raw) return 'Неизвестное устройство';
+
+        const browser = /Edg\//.test(raw) ? 'Edge'
+            : /OPR\//.test(raw) ? 'Opera'
+            : /Firefox\//.test(raw) ? 'Firefox'
+            : /Chrome\//.test(raw) ? 'Chrome'
+            : /Safari\//.test(raw) ? 'Safari'
+            : 'Браузер';
+
+        const os = /Windows/i.test(raw) ? 'Windows'
+            : /Android/i.test(raw) ? 'Android'
+            : /iPhone|iPad|iOS/i.test(raw) ? 'iOS'
+            : /Mac OS|Macintosh/i.test(raw) ? 'macOS'
+            : /Linux/i.test(raw) ? 'Linux'
+            : 'Устройство';
+
+        return `${browser} · ${os}`;
+    };
+
+    const renderDevices = async () => {
+        setHeader('Устройства');
+        setBody(`
+          <div class="settings-section">
+            <div class="settings-card">
+              <h4>Активные устройства</h4>
+              <div class="muted">Загрузка...</div>
+            </div>
+          </div>
+        `);
+
+        let sessions = [];
+        try {
+            sessions = await api('/api/sessions/');
+        } catch (e) {
+            console.warn('[SETTINGS] sessions load failed', e);
+            setBody(`
+              <div class="settings-section">
+                <div class="settings-card">
+                  <h4>Активные устройства</h4>
+                  <div class="error">Не удалось загрузить список устройств</div>
+                </div>
+              </div>
+            `);
+            return;
+        }
+
+        const active = (Array.isArray(sessions) ? sessions : []).filter((s) => s?.is_active !== false && !s?.revoked_at);
+        const inactive = (Array.isArray(sessions) ? sessions : []).filter((s) => s?.is_active === false || s?.revoked_at);
+        const renderItem = (s) => {
+            const id = Number(s?.id);
+            const current = !!s?.is_current;
+            const activeState = s?.is_active !== false && !s?.revoked_at;
+            const name = sessionDeviceName(s?.user_agent);
+            const lastSeen = formatSessionTime(s?.last_seen_at);
+            const created = formatSessionTime(s?.created_at);
+
+            return `
+              <div class="session-item ${current ? 'current' : ''} ${activeState ? 'active' : 'revoked'}">
+                <div class="session-icon">${current ? '●' : '○'}</div>
+                <div class="session-main">
+                  <div class="session-title-row">
+                    <div class="session-title">${escapeHtml(name)}</div>
+                    ${current ? '<span class="session-chip">Это устройство</span>' : ''}
+                    ${!activeState ? '<span class="session-chip muted-chip">Завершено</span>' : ''}
+                  </div>
+                  <div class="session-meta">Последняя активность: ${escapeHtml(lastSeen)} · Вход: ${escapeHtml(created)}</div>
+                </div>
+                ${activeState && !current && Number.isFinite(id)
+                    ? `<button class="btn btn-ghost btn-small session-revoke" type="button" data-session-id="${id}">Завершить</button>`
+                    : ''}
+              </div>
+            `;
+        };
+
+        setBody(`
+          <div class="settings-section">
+            <div class="settings-card">
+              <h4>Активные устройства</h4>
+              <div class="muted" style="margin-bottom:10px; font-size:12px;">Обычный выход завершает только это устройство. Здесь можно отключить другие сессии.</div>
+              <div class="session-list">
+                ${active.map(renderItem).join('') || '<div class="muted">Активных устройств не найдено</div>'}
+              </div>
+            </div>
+            ${inactive.length ? `
+              <div class="settings-card">
+                <h4>Завершённые сессии</h4>
+                <div class="session-list">
+                  ${inactive.slice(0, 20).map(renderItem).join('')}
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        `);
+
+        overlay.querySelectorAll('.session-revoke').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const id = Number(btn.getAttribute('data-session-id'));
+                if (!Number.isFinite(id) || id <= 0) return;
+                btn.disabled = true;
+                try {
+                    await api(`/api/sessions/${id}/revoke`, { method: 'POST' });
+                    showInline('ok', 'Сессия завершена');
+                    await renderDevices();
+                } catch (e) {
+                    console.warn('[SETTINGS] session revoke failed', e);
+                    btn.disabled = false;
+                    showInline('err', 'Не удалось завершить сессию');
+                }
+            });
+        });
+    };
+
 
     const settingRow = ({ title, desc = '', help = '' }) => `
       <div class="setting-copy">
@@ -1089,6 +1237,129 @@ export function createSettingsUI(opts = {}) {
         });
     };
 
+    const loadMediaDeviceOptions = async () => {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+            return { audioInputs: [], videoInputs: [], supported: false };
+        }
+
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            return {
+                supported: true,
+                audioInputs: devices.filter((d) => d.kind === 'audioinput'),
+                videoInputs: devices.filter((d) => d.kind === 'videoinput'),
+            };
+        } catch (_) {
+            return { audioInputs: [], videoInputs: [], supported: true };
+        }
+    };
+
+    const deviceOptionsHtml = (items, selected, fallbackLabel) => {
+        const current = sanitizeDeviceId(selected);
+        const options = [`<option value="default">${escapeHtml(fallbackLabel)}</option>`];
+        let hasSelected = current === 'default';
+
+        items.forEach((device, idx) => {
+            const id = sanitizeDeviceId(device.deviceId);
+            if (!id || id === 'default') return;
+            if (id === current) hasSelected = true;
+            const label = (device.label || `Устройство ${idx + 1}`).toString();
+            options.push(`<option value="${escapeHtml(id)}" ${id === current ? 'selected' : ''}>${escapeHtml(label)}</option>`);
+        });
+
+        if (!hasSelected) {
+            options.push(`<option value="${escapeHtml(current)}" selected>Сохранённое устройство недоступно</option>`);
+        }
+
+        return options.join('');
+    };
+
+    const requestMediaAccess = async (constraints) => {
+        if (!navigator.mediaDevices?.getUserMedia) return false;
+        let stream = null;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            return true;
+        } catch (_) {
+            return false;
+        } finally {
+            try { stream?.getTracks?.().forEach((t) => t.stop()); } catch (_) {}
+        }
+    };
+
+    const renderVoiceVideo = async () => {
+        setHeader('Голос и видео');
+
+        const s = normalizeSettings(currentSettings);
+        const { audioInputs, videoInputs, supported } = await loadMediaDeviceOptions();
+        const canAsk = !!navigator.mediaDevices?.getUserMedia;
+        const hasHiddenLabels = [...audioInputs, ...videoInputs].some((d) => !d.label);
+
+        setBody(`
+          <div class="settings-section">
+            <div class="settings-card">
+              <h4>Устройства ввода</h4>
+              <div class="setting-row">
+                ${settingRow({
+                    title: 'Микрофон',
+                    desc: supported ? 'Используется при подключении к голосовым каналам.' : 'Браузер не дал доступ к списку устройств.',
+                    help: 'Выберите микрофон для голосового чата. Если устройство пропало, LaBerry вернётся к системному микрофону.'
+                })}
+                <select class="inp" id="voiceInputDevice" ${supported ? '' : 'disabled'}>
+                  ${deviceOptionsHtml(audioInputs, s.voice_input_device_id, 'Системный микрофон')}
+                </select>
+              </div>
+              <div class="setting-row">
+                ${settingRow({
+                    title: 'Веб-камера',
+                    desc: 'Сохраняется для будущих видео-вызовов и предпросмотра камеры.',
+                    help: 'Выберите камеру, которую приложение должно использовать по умолчанию.'
+                })}
+                <select class="inp" id="voiceVideoDevice" ${supported ? '' : 'disabled'}>
+                  ${deviceOptionsHtml(videoInputs, s.voice_video_device_id, 'Системная камера')}
+                </select>
+              </div>
+              <div class="settings-inline" style="margin-top:10px; gap:8px; flex-wrap:wrap;">
+                <button class="btn btn-secondary" id="refreshMediaDevices" type="button">Обновить список</button>
+                ${canAsk ? '<button class="btn btn-ghost" id="allowMediaDevices" type="button">Разрешить доступ</button>' : ''}
+              </div>
+              <div class="muted" style="margin-top:8px; font-size:12px;">
+                ${hasHiddenLabels ? 'Названия устройств появятся после разрешения доступа к микрофону или камере.' : 'Выбор применяется к следующим подключениям к голосовому каналу.'}
+              </div>
+            </div>
+          </div>
+        `);
+        bindSettingHelps();
+
+        const inputSel = overlay.querySelector('#voiceInputDevice');
+        inputSel?.addEventListener('change', () => {
+            const value = sanitizeDeviceId(inputSel.value);
+            scheduleSave({ voice_input_device_id: value });
+            try { window.dispatchEvent(new CustomEvent('laberry:voice-devices-changed', { detail: { inputDeviceId: value } })); } catch (_) {}
+            showInline('ok', 'Микрофон сохранён');
+        });
+
+        const videoSel = overlay.querySelector('#voiceVideoDevice');
+        videoSel?.addEventListener('change', () => {
+            const value = sanitizeDeviceId(videoSel.value);
+            scheduleSave({ voice_video_device_id: value });
+            try { window.dispatchEvent(new CustomEvent('laberry:voice-devices-changed', { detail: { videoDeviceId: value } })); } catch (_) {}
+            showInline('ok', 'Камера сохранена');
+        });
+
+        overlay.querySelector('#refreshMediaDevices')?.addEventListener('click', () => {
+            renderVoiceVideo().catch(() => {});
+        });
+
+        overlay.querySelector('#allowMediaDevices')?.addEventListener('click', async () => {
+            const ok = await requestMediaAccess({ audio: true, video: true })
+                || await requestMediaAccess({ audio: true })
+                || await requestMediaAccess({ video: true });
+            showInline(ok ? 'ok' : 'err', ok ? 'Доступ получен' : 'Доступ к устройствам не выдан');
+            await renderVoiceVideo();
+        });
+    };
+
     const renderAppearance = async () => {
         setHeader('Внешний вид');
 
@@ -1107,16 +1378,6 @@ export function createSettingsUI(opts = {}) {
                   <option value="dark">Тёмная</option>
                   <option value="light">Светлая</option>
                 </select>
-              </div>
-              <div class="setting-row">
-                ${settingRow({
-                    title: 'Показывать статус в шапке',
-                    help: 'Показывает ваш текущий статус в верхней части интерфейса.'
-                })}
-                <label class="switch">
-                  <input type="checkbox" id="headerStatus" ${s.show_header_status ? 'checked' : ''}>
-                  <span class="slider"></span>
-                </label>
               </div>
             </div>
 
@@ -1180,7 +1441,6 @@ export function createSettingsUI(opts = {}) {
             });
         };
 
-        bindToggle('#headerStatus', 'show_header_status');
         bindToggle('#compactMode', 'compact_mode');
         bindToggle('#showTime', 'show_timestamps');
 
@@ -1361,4 +1621,3 @@ export function createSettingsUI(opts = {}) {
         getSettings: () => ({ ...currentSettings }),
     };
 }
-

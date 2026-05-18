@@ -81,6 +81,36 @@ document.addEventListener("DOMContentLoaded", async () => {
     return m[code] || "Ошибка авторизации";
   }
 
+  function saveSessionAndOpenApp(data) {
+    localStorage.setItem("auth_token", data.access_token);
+    if (data?.refresh_token) {
+      localStorage.setItem("refresh_token", data.refresh_token);
+    } else {
+      localStorage.removeItem("refresh_token");
+    }
+    localStorage.setItem("user_id", data.user_id);
+    window.location.href = "/app";
+  }
+
+  async function loginWithCredentials(username, password) {
+    const body = new URLSearchParams();
+    body.append("username", username);
+    body.append("password", password);
+
+    const loginRes = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+
+    const loginData = await loginRes.json().catch(() => null);
+    if (!loginRes.ok || !loginData?.access_token) {
+      throw new Error(loginData?.error || "auto_login_failed");
+    }
+
+    return loginData;
+  }
+
   // ==============================
   // FORM SUBMIT
   // ==============================
@@ -130,20 +160,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (mode === "register") {
-      showError("✅ Аккаунт создан. Теперь войдите.");
-      setMode("login");
+      try {
+        const loginData = await loginWithCredentials(username, password);
+        saveSessionAndOpenApp(loginData);
+      } catch {
+        showError("Аккаунт создан, но автоматический вход не сработал. Войдите вручную.");
+        setMode("login");
+      }
       return;
     }
 
     // LOGIN SUCCESS
-    localStorage.setItem("auth_token", data.access_token);
-    if (data?.refresh_token) {
-      localStorage.setItem("refresh_token", data.refresh_token);
-    } else {
-      localStorage.removeItem("refresh_token");
-    }
-    localStorage.setItem("user_id", data.user_id);
-    window.location.href = "/app";
+    saveSessionAndOpenApp(data);
   });
 
   // ==============================

@@ -54,6 +54,84 @@ export function initProfileModal({ api, getMe } = {}) {
     return type === 'image/gif' || name.endsWith('.gif');
   }
 
+  function statusToClass(status, isOnline = true) {
+    const raw = (status || '').toString().toLowerCase();
+    if (!isOnline || raw === 'offline' || raw === 'invisible') return 'offline';
+    if (raw === 'idle' || raw === 'dnd') return raw;
+    return 'online';
+  }
+
+  function statusToLabel(status) {
+    const cls = statusToClass(status, status !== 'offline');
+    if (cls === 'idle') return 'Нет на месте';
+    if (cls === 'dnd') return 'Не беспокоить';
+    if (cls === 'offline') return 'Не в сети';
+    return 'В сети';
+  }
+
+  function formatProfileDate(value) {
+    if (!value) return 'Дата регистрации неизвестна';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return 'Дата регистрации неизвестна';
+    try {
+      return new Intl.DateTimeFormat('ru-RU', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+      }).format(dt);
+    } catch (_) {
+      return dt.toLocaleDateString();
+    }
+  }
+
+  function connectionBadge(kind) {
+    const k = (kind || 'other').toString().toLowerCase();
+    if (k === 'github') return 'GH';
+    if (k === 'telegram') return 'TG';
+    if (k === 'youtube') return 'YT';
+    if (k === 'twitch') return 'TW';
+    if (k === 'discord') return 'DC';
+    if (k === 'website') return 'WEB';
+    return 'LINK';
+  }
+
+  function safeHttpUrl(value) {
+    try {
+      const url = new URL((value || '').toString());
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      return url.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function profileConnectionsHtml(connections) {
+    const list = Array.isArray(connections) ? connections : [];
+    const items = list
+      .map((c) => {
+        const href = safeHttpUrl(c?.url);
+        if (!href) return '';
+        const label = (c?.label || c?.url || href).toString();
+        const kind = (c?.kind || 'other').toString();
+        return `
+          <a class="profile-connection" href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">
+            <span class="profile-connection-kind">${escapeHtml(connectionBadge(kind))}</span>
+            <span class="profile-connection-main">
+              <span class="profile-connection-label">${escapeHtml(label)}</span>
+              <span class="profile-connection-url">${escapeHtml(href.replace(/^https?:\/\//i, ''))}</span>
+            </span>
+          </a>
+        `;
+      })
+      .filter(Boolean);
+
+    if (!items.length) {
+      return '<div class="profile-text empty">Интеграции не добавлены</div>';
+    }
+
+    return `<div class="profile-connections">${items.join('')}</div>`;
+  }
+
   let overlay = document.getElementById('profileOverlay');
   if (!overlay) {
     overlay = document.createElement('div');
@@ -112,13 +190,17 @@ export function initProfileModal({ api, getMe } = {}) {
         apiFn(isMe ? `/api/users/me/profile` : `/api/users/${uid}/profile`)
       ]);
 
-      const username = (user?.username || '').toString() || `User#${uid}`;
-      const nickname = (user?.nickname || '').toString().trim();
+      const username = (profile?.username || user?.username || '').toString() || `User#${uid}`;
+      const nickname = (profile?.display_name || user?.nickname || '').toString().trim();
       const display = nickname || username;
 
       const about = (profile?.about || '').toString().trim();
       const statusText = (profile?.status_text || '').toString().trim();
       const avatarFileId = profile?.avatar_file_id;
+      const presenceClass = statusToClass(profile?.status || user?.status, profile?.is_online !== false);
+      const presenceLabel = statusToLabel(presenceClass);
+      const connectionsHtml = profileConnectionsHtml(profile?.connections);
+      const joinedAt = formatProfileDate(profile?.created_at || user?.created_at);
 
       titleEl.textContent = display;
 
@@ -127,7 +209,6 @@ export function initProfileModal({ api, getMe } = {}) {
           <div class="profile-head">
             <div class="profile-avatar-wrap">
               <div class="profile-avatar" id="profileAvatar">${avatarInnerHtml(avatarFileId, display)}</div>
-              <div class="profile-status-pill">${statusText ? escapeHtml(statusText) : 'Без статуса'}</div>
             </div>
             <div class="profile-meta">
               <div class="profile-name-row">
@@ -135,7 +216,8 @@ export function initProfileModal({ api, getMe } = {}) {
                 ${isMe ? '<span class="profile-chip">Это вы</span>' : ''}
               </div>
               <div class="profile-username">@${escapeHtml(username)}</div>
-              <div class="profile-id">ID ${escapeHtml(uid)}</div>
+              <div class="profile-presence status-${escapeAttr(presenceClass)}">${escapeHtml(presenceLabel)}</div>
+              <div class="profile-joined">С нами с ${escapeHtml(joinedAt)}</div>
             </div>
           </div>
 
@@ -168,6 +250,11 @@ export function initProfileModal({ api, getMe } = {}) {
               ` : `
                 <div class="profile-text${about ? '' : ' empty'}">${about ? escapeHtml(about) : 'Пользователь ничего не рассказал о себе'}</div>
               `}
+            </div>
+
+            <div class="profile-card profile-card-wide">
+              <div class="profile-label">Интеграции</div>
+              ${connectionsHtml}
             </div>
           </div>
 

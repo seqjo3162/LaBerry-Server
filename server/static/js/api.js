@@ -1,6 +1,13 @@
-const apiLog = typeof window !== 'undefined' && window._trace ? 
-  (...args) => window._trace.add('API_LOG', args.join(' ')) : 
-  (...args) => console.log(`[API:${new Date().toISOString()}]`, ...args);
+let API_DEBUG = false;
+try {
+  API_DEBUG = typeof window !== 'undefined' && (
+    window.DEBUG_API === true || localStorage.getItem('lb_debug_api') === '1'
+  );
+} catch (_) {}
+
+const apiLog = typeof window !== 'undefined' && window._trace ?
+  (...args) => window._trace.add('API_LOG', args.join(' ')) :
+  (API_DEBUG ? (...args) => console.log(`[API:${new Date().toISOString()}]`, ...args) : () => {});
 
 const apiWarn = typeof window !== 'undefined' && window._trace ? 
   (...args) => window._trace.add('API_WARN', args.join(' ')) : 

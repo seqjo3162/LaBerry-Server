@@ -792,6 +792,7 @@ fn known_type_from_ext(ext: &str) -> Option<UploadType> {
         "zip" => Some(UploadType { mime: "application/zip", ext: "zip" }),
         "rar" => Some(UploadType { mime: "application/vnd.rar", ext: "rar" }),
         "7z" => Some(UploadType { mime: "application/x-7z-compressed", ext: "7z" }),
+        "apk" => Some(UploadType { mime: "application/vnd.android.package-archive", ext: "apk" }),
         "exe" => Some(UploadType { mime: "application/vnd.microsoft.portable-executable", ext: "exe" }),
         "dll" => Some(UploadType { mime: "application/vnd.microsoft.portable-executable", ext: "dll" }),
         "msi" => Some(UploadType { mime: "application/x-msi", ext: "msi" }),
@@ -846,6 +847,20 @@ fn effective_mime_type(stored_mime: &str, original_name: &str, stored_filename: 
         .trim()
         .to_ascii_lowercase();
 
+    // APK and Office-like formats are ZIP containers. Legacy rows may have
+    // been stored as application/zip, so prefer the original extension there.
+    if matches!(clean.as_str(), "application/zip" | "application/x-zip-compressed") {
+        for name in [original_name, stored_filename] {
+            if let Some(ext) = safe_ext_from_name(name) {
+                if is_zip_container_ext(&ext) {
+                    if let Some(t) = known_type_from_ext(&ext) {
+                        return t.mime.to_string();
+                    }
+                }
+            }
+        }
+    }
+
     // Normalize known stored MIME values first.
     if !is_generic_mime(&clean) {
         if let Some(t) = known_type_from_mime(&clean) {
@@ -898,6 +913,7 @@ fn known_type_from_mime(mime: &str) -> Option<UploadType> {
 
         "application/pdf" => Some(UploadType { mime: "application/pdf", ext: "pdf" }),
         "application/zip" | "application/x-zip-compressed" => Some(UploadType { mime: "application/zip", ext: "zip" }),
+        "application/vnd.android.package-archive" => Some(UploadType { mime: "application/vnd.android.package-archive", ext: "apk" }),
         "application/vnd.rar" | "application/x-rar-compressed" => Some(UploadType { mime: "application/vnd.rar", ext: "rar" }),
         "application/x-7z-compressed" => Some(UploadType { mime: "application/x-7z-compressed", ext: "7z" }),
         "application/vnd.microsoft.portable-executable" | "application/x-msdownload" => Some(UploadType { mime: "application/vnd.microsoft.portable-executable", ext: "exe" }),
@@ -1672,12 +1688,13 @@ async fn serve_file_with_range(
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
 
     let safe_name = sanitize_filename(original_name);
+    let encoded_name = percent_encode_query_component(&safe_name);
 
     let inline = inline && inline_safe(mime_type);
     let cd_value = if inline {
-        format!("inline; filename=\"{}\"", safe_name)
+        format!("inline; filename=\"{}\"; filename*=UTF-8''{}", safe_name, encoded_name)
     } else {
-        format!("attachment; filename=\"{}\"", safe_name)
+        format!("attachment; filename=\"{}\"; filename*=UTF-8''{}", safe_name, encoded_name)
     };
     let cd = HeaderValue::from_str(&cd_value).unwrap_or_else(|_| {
         if inline {
