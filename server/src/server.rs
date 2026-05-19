@@ -262,6 +262,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/api/sessions", crate::routes::sessions::router())
         .nest("/api/messages", crate::routes::messages::global_router())
         .nest("/api/files", crate::routes::files::router())
+        .nest("/api/gifs", crate::routes::gifs::router())
         .nest("/api/profile-files", crate::routes::profile_files::router())
         .nest("/api/embeds", crate::routes::embeds::router())
         .nest("/api/rtc", crate::routes::rtc::router())

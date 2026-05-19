@@ -2317,6 +2317,12 @@ function ensureEmojiPicker() {
         const btn = e.target?.closest?.('.emoji-btn');
         if (!btn) return;
         const emoji = btn.getAttribute('data-emoji') || '';
+        const mode = emojiPickerEl.dataset.mode || 'reaction';
+        if (mode === 'composer') {
+            if (emoji) insertTextIntoComposer(emoji);
+            hideEmojiPicker();
+            return;
+        }
         const mid = Number(emojiPickerEl.dataset.forMsgId);
         if (!emoji || !Number.isFinite(mid) || mid <= 0) return;
         try {
@@ -2342,15 +2348,36 @@ function hideEmojiPicker() {
     if (emojiPickerBackdrop) emojiPickerBackdrop.hidden = true;
     if (emojiPickerEl) emojiPickerEl.hidden = true;
     try { emojiPickerEl.dataset.forMsgId = ''; } catch (_) {}
+    try { emojiPickerEl.dataset.mode = ''; } catch (_) {}
 }
 
-function showEmojiPicker({ anchorEl, messageId } = {}) {
+function insertTextIntoComposer(text) {
+    const input = document.getElementById('message');
+    const value = (text || '').toString();
+    if (!input || !value) return;
+
+    const current = input.value || '';
+    const start = Number.isFinite(input.selectionStart) ? input.selectionStart : current.length;
+    const end = Number.isFinite(input.selectionEnd) ? input.selectionEnd : start;
+    input.value = current.slice(0, start) + value + current.slice(end);
+    const next = start + value.length;
+    try {
+        input.selectionStart = next;
+        input.selectionEnd = next;
+    } catch (_) {}
+    input.focus();
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function showEmojiPicker({ anchorEl, messageId, mode = 'reaction' } = {}) {
     ensureEmojiPicker();
     const mid = Number(messageId);
-    if (!Number.isFinite(mid) || mid <= 0) return;
+    const pickerMode = mode === 'composer' ? 'composer' : 'reaction';
+    if (pickerMode !== 'composer' && (!Number.isFinite(mid) || mid <= 0)) return;
     if (!emojiPickerEl || !emojiPickerBackdrop) return;
 
-    emojiPickerEl.dataset.forMsgId = String(mid);
+    emojiPickerEl.dataset.mode = pickerMode;
+    emojiPickerEl.dataset.forMsgId = pickerMode === 'composer' ? '' : String(mid);
 
     // place
     let x = window.innerWidth / 2;
@@ -4559,8 +4586,11 @@ function setupMessageComposer() {
     const input = document.getElementById('message');
     const attachBtn = document.getElementById('attachBtn');
     const mdAttachBtn = document.getElementById('mdAttachBtn');
+    const composerEmojiBtn = document.getElementById('composerEmojiBtn');
+    const gifBtn = document.getElementById('gifBtn');
     const fileInput = document.getElementById('fileInput');
     const mdFileInput = document.getElementById('mdFileInput');
+    const gifFileInput = document.getElementById('gifFileInput');
     const attachmentsEl = document.getElementById('attachments');
     const sendBtn = document.getElementById('sendBtn');
 
@@ -4754,6 +4784,13 @@ function setupMessageComposer() {
         overlay.classList.remove('hidden');
         overlay.querySelector('.md-file-text')?.focus?.();
     });
+
+    if (composerEmojiBtn) {
+        composerEmojiBtn.hidden = isTouchUi();
+        composerEmojiBtn.addEventListener('click', () => {
+            showEmojiPicker({ anchorEl: composerEmojiBtn, mode: 'composer' });
+        });
+    }
 
     fileInput?.addEventListener('change', () => {
         addFiles(fileInput.files);
@@ -5081,6 +5118,248 @@ function setupMessageComposer() {
             xhr.send(fd);
         });
     };
+
+    // ===== GIF library (global + personal favorites) =====
+    let gifPickerEl = null;
+    let gifPickerBackdrop = null;
+    let gifUploadIntent = 'send';
+
+    const buildFileMarker = (fileId, name, mime = 'image/gif', size = 0) => {
+        const cleanMime = String(mime || 'image/gif').toLowerCase().replaceAll('|', '/');
+        const cleanName = (name || `gif_${fileId}.gif`).toString();
+        return `[[file:${fileId}|${encodeURIComponent(cleanName)}|${cleanMime}|${Number(size || 0)}]]`;
+    };
+
+    const ensureGifChat = () => {
+        if (currentChatId) return true;
+        showToast('Сначала выберите чат');
+        return false;
+    };
+
+    const renderGifCards = (items, kind) => {
+        const list = Array.isArray(items) ? items : [];
+        if (!list.length) {
+            return `<div class="gif-empty">${kind === 'favorites' ? 'В избранном пока нет GIF' : 'Глобальные GIF ещё не добавлены'}</div>`;
+        }
+
+        return list.map((item) => {
+            const id = Number(item?.id || 0);
+            const name = (item?.original_name || 'animation.gif').toString();
+            const rawUrl = item?.raw_url || '';
+            const favAction = kind === 'favorites'
+                ? `<button type="button" class="gif-mini-btn danger" data-gif-act="remove-favorite" data-asset-id="${id}" title="Убрать из избранного">★</button>`
+                : (item?.is_favorite
+                    ? `<button type="button" class="gif-mini-btn" disabled title="Уже в избранном">★</button>`
+                    : `<button type="button" class="gif-mini-btn" data-gif-act="favorite-asset" data-asset-id="${id}" title="Добавить в избранное">☆</button>`);
+
+            return `
+              <div class="gif-card" data-asset-id="${id}">
+                <button type="button" class="gif-thumb" data-gif-act="send-asset" data-asset-id="${id}" title="Отправить GIF">
+                  <img src="${escapeHtml(rawUrl)}" alt="${escapeHtml(name)}" loading="lazy">
+                </button>
+                <div class="gif-card-bar">
+                  <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                  ${favAction}
+                </div>
+              </div>
+            `;
+        }).join('');
+    };
+
+    const renderGifLibrary = (data) => {
+        if (!gifPickerEl) return;
+        const fav = gifPickerEl.querySelector('[data-gif-list="favorites"]');
+        const global = gifPickerEl.querySelector('[data-gif-list="global"]');
+        if (fav) fav.innerHTML = renderGifCards(data?.favorites, 'favorites');
+        if (global) global.innerHTML = renderGifCards(data?.global, 'global');
+    };
+
+    const loadGifLibrary = async () => {
+        if (!gifPickerEl) return;
+        const fav = gifPickerEl.querySelector('[data-gif-list="favorites"]');
+        const global = gifPickerEl.querySelector('[data-gif-list="global"]');
+        if (fav) fav.innerHTML = '<div class="gif-empty">Загрузка...</div>';
+        if (global) global.innerHTML = '<div class="gif-empty">Загрузка...</div>';
+        try {
+            const data = await api('/api/gifs');
+            renderGifLibrary(data || {});
+        } catch (err) {
+            console.warn('[GIF] load failed', err);
+            if (fav) fav.innerHTML = '<div class="gif-empty">Не удалось загрузить GIF</div>';
+            if (global) global.innerHTML = '';
+        }
+    };
+
+    const hideGifPicker = () => {
+        if (gifPickerBackdrop) gifPickerBackdrop.hidden = true;
+        if (gifPickerEl) gifPickerEl.hidden = true;
+    };
+
+    const sendGifAsset = async (assetId) => {
+        const id = Number(assetId);
+        if (!Number.isFinite(id) || id <= 0 || !ensureGifChat()) return;
+        try {
+            const res = await api('/api/gifs/clone', {
+                method: 'POST',
+                body: JSON.stringify({ asset_id: id, chat_id: Number(currentChatId) })
+            });
+            const fileId = res?.file_id ?? res?.fileId ?? res?.id;
+            if (!fileId) throw new Error('gif_clone_no_file_id');
+            await sendMessage(buildFileMarker(fileId, res?.original_name || 'animation.gif', res?.mime_type || 'image/gif', res?.file_size || 0));
+            hideGifPicker();
+        } catch (err) {
+            console.warn('[GIF] send failed', err);
+            showToast('Не удалось отправить GIF');
+        }
+    };
+
+    const favoriteGifAsset = async (assetId) => {
+        const id = Number(assetId);
+        if (!Number.isFinite(id) || id <= 0) return;
+        try {
+            await api('/api/gifs/favorites', {
+                method: 'POST',
+                body: JSON.stringify({ asset_id: id })
+            });
+            showToast('GIF добавлен в избранное');
+            await loadGifLibrary();
+        } catch (err) {
+            console.warn('[GIF] favorite failed', err);
+            showToast('Не удалось добавить GIF');
+        }
+    };
+
+    const removeFavoriteGif = async (assetId) => {
+        const id = Number(assetId);
+        if (!Number.isFinite(id) || id <= 0) return;
+        try {
+            await api(`/api/gifs/favorites/${id}`, { method: 'DELETE' });
+            showToast('GIF убран из избранного');
+            await loadGifLibrary();
+        } catch (err) {
+            console.warn('[GIF] remove favorite failed', err);
+            showToast('Не удалось убрать GIF');
+        }
+    };
+
+    const ensureGifPicker = () => {
+        if (gifPickerEl && gifPickerBackdrop) return;
+
+        gifPickerBackdrop = document.createElement('div');
+        gifPickerBackdrop.className = 'gif-backdrop';
+        gifPickerBackdrop.hidden = true;
+
+        gifPickerEl = document.createElement('div');
+        gifPickerEl.className = 'gif-picker';
+        gifPickerEl.hidden = true;
+        gifPickerEl.innerHTML = `
+          <div class="gif-picker-head">
+            <div>
+              <div class="gif-picker-title">GIF</div>
+              <div class="gif-picker-sub">Глобальные и избранные анимации</div>
+            </div>
+            <button type="button" class="gif-close" data-gif-act="close" title="Закрыть">×</button>
+          </div>
+          <div class="gif-picker-actions">
+            <button type="button" data-gif-act="upload-send">Загрузить и отправить</button>
+            <button type="button" data-gif-act="upload-favorite">В избранное</button>
+          </div>
+          <section class="gif-section">
+            <div class="gif-section-title">Избранное</div>
+            <div class="gif-grid" data-gif-list="favorites"></div>
+          </section>
+          <section class="gif-section">
+            <div class="gif-section-title">Глобальные</div>
+            <div class="gif-grid" data-gif-list="global"></div>
+          </section>
+        `;
+
+        gifPickerEl.addEventListener('click', (e) => {
+            const btn = e.target?.closest?.('[data-gif-act]');
+            if (!btn) return;
+            const act = btn.getAttribute('data-gif-act');
+            const assetId = btn.getAttribute('data-asset-id');
+            if (act === 'close') hideGifPicker();
+            if (act === 'send-asset') sendGifAsset(assetId);
+            if (act === 'favorite-asset') favoriteGifAsset(assetId);
+            if (act === 'remove-favorite') removeFavoriteGif(assetId);
+            if (act === 'upload-send' || act === 'upload-favorite') {
+                if (!ensureGifChat()) return;
+                gifUploadIntent = act === 'upload-send' ? 'send' : 'favorite';
+                gifFileInput?.click?.();
+            }
+        });
+
+        gifPickerBackdrop.addEventListener('click', () => hideGifPicker());
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') hideGifPicker();
+        });
+
+        document.body.appendChild(gifPickerBackdrop);
+        document.body.appendChild(gifPickerEl);
+    };
+
+    const openGifPicker = () => {
+        if (!ensureGifChat()) return;
+        ensureGifPicker();
+        if (!gifPickerEl || !gifPickerBackdrop) return;
+
+        let x = window.innerWidth / 2;
+        let y = window.innerHeight - 84;
+        if (gifBtn?.getBoundingClientRect) {
+            const r = gifBtn.getBoundingClientRect();
+            x = r.left;
+            y = r.top - 8;
+        }
+
+        gifPickerEl.style.left = '0px';
+        gifPickerEl.style.top = '0px';
+        gifPickerEl.hidden = false;
+        const pad = 10;
+        const w = gifPickerEl.offsetWidth || 380;
+        const h = gifPickerEl.offsetHeight || 480;
+        gifPickerEl.style.left = `${Math.max(pad, Math.min(x, window.innerWidth - w - pad))}px`;
+        gifPickerEl.style.top = `${Math.max(pad, Math.min(y - h, window.innerHeight - h - pad))}px`;
+        gifPickerBackdrop.hidden = false;
+        loadGifLibrary();
+    };
+
+    gifBtn?.addEventListener('click', openGifPicker);
+
+    gifFileInput?.addEventListener('change', async () => {
+        const file = gifFileInput.files?.[0] || null;
+        gifFileInput.value = '';
+        if (!file) return;
+        if (!ensureGifChat()) return;
+
+        const normalized = normalizeComposerFile(file, file.name || 'animation.gif');
+        const name = normalized?.name || file.name || 'animation.gif';
+        const mime = normalized?.mime || file.type || 'image/gif';
+        if (!/\.gif$/i.test(name) && !String(mime).toLowerCase().startsWith('image/gif')) {
+            showToast('Выберите GIF-файл');
+            return;
+        }
+
+        try {
+            const res = await uploadFileXHR(normalized.file, Number(currentChatId), null, null);
+            const fileId = res?.id ?? res?.file_id ?? res?.fileId;
+            if (!fileId) throw new Error('gif_upload_no_file_id');
+            await api('/api/gifs/favorites', {
+                method: 'POST',
+                body: JSON.stringify({ file_id: Number(fileId) })
+            });
+            if (gifUploadIntent === 'send') {
+                await sendMessage(buildFileMarker(fileId, name, 'image/gif', normalized.size || file.size || 0));
+                hideGifPicker();
+            } else {
+                showToast('GIF добавлен в избранное');
+                await loadGifLibrary();
+            }
+        } catch (err) {
+            console.warn('[GIF] upload failed', err);
+            showToast('Не удалось загрузить GIF');
+        }
+    });
 
     const cancelUploadJob = (jobId) => {
         const job = uploadJobs.find(j => j.jobId === jobId);
@@ -6023,6 +6302,34 @@ function setupAttachmentUi() {
             e.preventDefault();
             e.stopPropagation();
             triggerSignedAttachmentDownload(dl);
+            return;
+        }
+
+        const favBtn = e.target?.closest?.('.att-fav');
+        if (favBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const att = favBtn.closest('.msg-attachment');
+            const fileId = Number(att?.getAttribute?.('data-file-id') || 0);
+            if (!Number.isFinite(fileId) || fileId <= 0) return;
+            try {
+                api('/api/gifs/favorites', {
+                    method: 'POST',
+                    body: JSON.stringify({ file_id: fileId })
+                })
+                    .then(() => {
+                        favBtn.textContent = '★';
+                        favBtn.classList.add('saved');
+                        favBtn.setAttribute('title', 'GIF в избранном');
+                        showToast('GIF добавлен в избранное');
+                    })
+                    .catch((err) => {
+                        console.warn('[GIF] favorite from attachment failed', err);
+                        showToast('Не удалось добавить GIF');
+                    });
+            } catch (err) {
+                console.warn('[GIF] favorite from attachment failed', err);
+            }
             return;
         }
 
@@ -7281,12 +7588,15 @@ function renderMessageContent(content) {
         const rawHref = `/api/files/${encodeURIComponent(id)}/raw`; // inline / stream
         const previewHref = isGif ? rawHref : `/api/files/${encodeURIComponent(id)}/preview`;
         const badge = fileBadge(name, mime);
-        const mediaKindClass = isImage ? 'media-image' : isVideo ? 'media-video' : isAudio ? 'media-audio' : 'file-generic';
+        const mediaKindClass = isGif ? 'media-image media-gif gif-sticker' : isImage ? 'media-image' : isVideo ? 'media-video' : isAudio ? 'media-audio' : 'file-generic';
 
         const attData = `data-file-id="${escapeHtml(id)}" data-file-name="${escapeHtml(name)}" data-file-mime="${escapeHtml(mime)}" data-file-size="${escapeHtml(size)}"`;
+        const gifFavoriteBtn = isGif
+            ? `<button type="button" class="att-fav" title="Добавить GIF в избранное" aria-label="Добавить GIF в избранное">☆</button>`
+            : '';
 
         const previewHtml = isImage
-            ? `<div class="att-preview att-preview-image" tabindex="0" role="button" aria-label="Открыть изображение ${escapeHtml(name)}"><img class="att-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=" data-src="${previewHref}" data-raw-src="${rawHref}" alt="${escapeHtml(name)}" loading="lazy" decoding="async"><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`
+            ? `<div class="att-preview att-preview-image" tabindex="0" role="button" aria-label="Открыть изображение ${escapeHtml(name)}">${gifFavoriteBtn}<img class="att-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=" data-src="${previewHref}" data-raw-src="${rawHref}" alt="${escapeHtml(name)}" loading="lazy" decoding="async"><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`
             : isVideo
                 ? `<div class="att-preview att-preview-video"><video class="att-video" preload="metadata" playsinline></video><button type="button" class="att-play" title="Воспроизвести" aria-label="Воспроизвести">${playSvg}</button><a class="att-dl" href="${href}" download title="Скачать">${dlSvg}</a></div>`
                 : isAudio

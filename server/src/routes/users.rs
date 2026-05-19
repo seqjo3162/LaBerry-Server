@@ -323,6 +323,19 @@ pub struct ReportUserResponse {
     pub id: i64,
 }
 
+#[derive(Deserialize, Default)]
+pub struct SuggestionBody {
+    pub title: Option<String>,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct SuggestionResponse {
+    pub ok: bool,
+    pub id: i64,
+}
+
 fn sanitize_status(s: &str) -> String {
     match s.to_ascii_lowercase().as_str() {
         "online" => "online".to_string(),
@@ -344,6 +357,7 @@ pub fn router() -> Router<AppState> {
         .route("/me/blocks/:user_id", put(block_user).delete(unblock_user))
         .route("/me/status", get(my_status).put(set_my_status))
         .route("/me/settings", get(get_my_settings).put(update_my_settings))
+        .route("/me/suggestions", post(create_suggestion))
         .route("/me/password", put(change_password))
         .route("/me/username", put(change_username))
         .route("/", get(list_users))
@@ -1455,6 +1469,63 @@ fn sanitize_report_message(raw: Option<String>) -> String {
         out.truncate(1200);
     }
     out
+}
+
+fn trim_chars(raw: &str, max_chars: usize) -> String {
+    raw.trim().chars().take(max_chars).collect()
+}
+
+async fn create_suggestion(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Json(body): Json<SuggestionBody>,
+) -> impl IntoResponse {
+    let title = trim_chars(body.title.as_deref().unwrap_or(""), 80);
+    let message = trim_chars(&body.message, 2000);
+
+    if message.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"detail":"Suggestion text is required"})),
+        )
+            .into_response();
+    }
+
+    let rl_key = format!("user_suggestion:{}", me.id);
+    if !rate_limit::allow(&rl_key, 8, 3600) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"detail":"Too many suggestions"})),
+        )
+            .into_response();
+    }
+
+    let created_at = auth::now_iso();
+    let res = sqlx::query(
+        r#"
+        INSERT INTO user_suggestions(user_id, title, message, status, created_at)
+        VALUES(?, ?, ?, 'open', ?)
+        "#,
+    )
+    .bind(me.id)
+    .bind(&title)
+    .bind(&message)
+    .bind(&created_at)
+    .execute(&st.db)
+    .await;
+
+    let Ok(done) = res else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    (
+        StatusCode::OK,
+        Json(SuggestionResponse {
+            ok: true,
+            id: done.last_insert_rowid(),
+        }),
+    )
+        .into_response()
 }
 
 async fn report_user(

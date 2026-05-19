@@ -291,6 +291,47 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
         .execute(db)
         .await?;
 
+    // gif_assets: глобальные GIF и личное избранное для отправки как анимированных стикеров
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS gif_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            owner_id INTEGER,
+            source_file_id INTEGER,
+            filename TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            mime_type TEXT NOT NULL DEFAULT 'image/gif',
+            storage_path TEXT NOT NULL,
+            created_by_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES users(id),
+            FOREIGN KEY(source_file_id) REFERENCES files(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_gif_assets_scope ON gif_assets(scope, id);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_gif_assets_owner ON gif_assets(owner_id, id);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_gif_assets_storage_path ON gif_assets(storage_path);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_gif_favorites_owner_storage
+        ON gif_assets(owner_id, storage_path)
+        WHERE scope = 'favorite' AND owner_id IS NOT NULL;
+        "#,
+    )
+    .execute(db)
+    .await?;
+
     // friendships
     sqlx::query(
         r#"
@@ -464,6 +505,33 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
         .execute(db)
         .await?;
     sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_reports_reporter ON user_reports(reporter_id);"#)
+        .execute(db)
+        .await?;
+
+    // user_suggestions: идеи и предложения пользователей для разработчика
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT,
+            reviewed_by INTEGER,
+            admin_note TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(reviewed_by) REFERENCES users(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_suggestions_status_created ON user_suggestions(status, created_at);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_suggestions_user ON user_suggestions(user_id, created_at);"#)
         .execute(db)
         .await?;
 

@@ -170,7 +170,7 @@ function mountOverlay() {
           <button class="settings-nav-item" data-section="voice-video" type="button">Голос и видео</button>
           <button class="settings-nav-item" data-section="connections" type="button">Интеграции</button>
           <button class="settings-nav-item" data-section="keybinds" type="button">Клавиши</button>
-          <button class="settings-nav-item" data-section="advanced" type="button">Расширенные</button>
+          <button class="settings-nav-item" data-section="advanced" type="button">Дополнительные</button>
           <div class="settings-side-sep"></div>
           <button class="settings-nav-item danger" data-section="logout" type="button">Выйти</button>
         </div>
@@ -1582,12 +1582,21 @@ export function createSettingsUI(opts = {}) {
     };
 
     const renderAdvanced = async () => {
-        setHeader('Расширенные', 'Разработчик');
+        setHeader('Дополнительные', 'Разработчик и обратная связь');
 
         const s = normalizeSettings(currentSettings);
 
         setBody(`
           <div class="settings-section">
+            <div class="settings-card">
+              <h4>Предложение</h4>
+              <div class="muted settings-card-note">Этот пункт позволяет пользователям отправить свои идеи разработчику, а он, в свою очередь, рассмотрит идею.</div>
+              <div class="settings-suggestion-form">
+                <input class="inp" id="suggestionTitle" maxlength="80" placeholder="Короткий заголовок" autocomplete="off">
+                <textarea class="inp" id="suggestionMessage" rows="5" maxlength="2000" placeholder="Опишите идею"></textarea>
+                <button class="btn primary" id="sendSuggestion" type="button">Отправить предложение</button>
+              </div>
+            </div>
             <div class="settings-card">
               <div class="setting-row">
                 ${settingRow({
@@ -1612,6 +1621,36 @@ export function createSettingsUI(opts = {}) {
                 showInline('ok', 'Сохранено');
             });
         }
+
+        overlay.querySelector('#sendSuggestion')?.addEventListener('click', async () => {
+            const btn = overlay.querySelector('#sendSuggestion');
+            const titleEl = overlay.querySelector('#suggestionTitle');
+            const messageEl = overlay.querySelector('#suggestionMessage');
+            const title = (titleEl?.value || '').trim();
+            const message = (messageEl?.value || '').trim();
+
+            if (!message) {
+                showInline('err', 'Опишите идею');
+                messageEl?.focus();
+                return;
+            }
+
+            try {
+                if (btn) btn.disabled = true;
+                await api('/api/users/me/suggestions', {
+                    method: 'POST',
+                    body: JSON.stringify({ title, message }),
+                });
+                if (titleEl) titleEl.value = '';
+                if (messageEl) messageEl.value = '';
+                showInline('ok', 'Предложение отправлено');
+            } catch (e) {
+                console.warn('[SETTINGS] suggestion failed', e);
+                showInline('err', e?.data?.detail || 'Не удалось отправить предложение');
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        });
     };
 
     return {

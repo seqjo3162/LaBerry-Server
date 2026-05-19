@@ -274,7 +274,7 @@ async fn existing_thumb_path_for(stored_filename: &str, storage_path: Option<&st
 }
 
 async fn active_ref_count_by_storage_path(st: &AppState, storage_path: &str) -> i64 {
-    sqlx::query_scalar::<_, i64>(
+    let file_refs = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(1)
         FROM files
@@ -286,11 +286,21 @@ async fn active_ref_count_by_storage_path(st: &AppState, storage_path: &str) -> 
     .bind(storage_path)
     .fetch_one(&st.db)
     .await
-    .unwrap_or(0)
+    .unwrap_or(0);
+
+    let gif_refs = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(1) FROM gif_assets WHERE storage_path = ?",
+    )
+    .bind(storage_path)
+    .fetch_one(&st.db)
+    .await
+    .unwrap_or(0);
+
+    file_refs + gif_refs
 }
 
 async fn active_ref_count_by_filename(st: &AppState, filename: &str) -> i64 {
-    sqlx::query_scalar::<_, i64>(
+    let file_refs = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(1)
         FROM files
@@ -302,7 +312,17 @@ async fn active_ref_count_by_filename(st: &AppState, filename: &str) -> i64 {
     .bind(filename)
     .fetch_one(&st.db)
     .await
-    .unwrap_or(0)
+    .unwrap_or(0);
+
+    let gif_refs = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(1) FROM gif_assets WHERE filename = ?",
+    )
+    .bind(filename)
+    .fetch_one(&st.db)
+    .await
+    .unwrap_or(0);
+
+    file_refs + gif_refs
 }
 
 pub(crate) async fn cleanup_file_artifacts_if_unreferenced(
@@ -400,6 +420,19 @@ pub(crate) async fn cleanup_orphan_storage_files(st: &AppState) {
             for thumb in thumb_candidate_paths(&row.filename, Some(&row.storage_path)) {
                 active_thumbs.insert(thumb.to_string_lossy().to_string());
             }
+        }
+    }
+
+    let gif_rows = sqlx::query("SELECT filename, storage_path FROM gif_assets")
+        .fetch_all(&st.db)
+        .await
+        .unwrap_or_default();
+    for row in gif_rows {
+        let filename: String = row.get("filename");
+        let storage_path: String = row.get("storage_path");
+        active_paths.insert(PathBuf::from(&storage_path).to_string_lossy().to_string());
+        for thumb in thumb_candidate_paths(&filename, Some(&storage_path)) {
+            active_thumbs.insert(thumb.to_string_lossy().to_string());
         }
     }
 

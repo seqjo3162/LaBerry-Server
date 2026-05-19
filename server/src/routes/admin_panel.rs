@@ -2,7 +2,7 @@ use crate::{auth, server::{AdminSession, AppState}};
 
 use anyhow::Context;
 use axum::{
-    extract::{Form, Path, Query, State},
+    extract::{Form, Multipart, Path, Query, State},
     Json,
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect},
@@ -35,6 +35,12 @@ pub fn router() -> Router<AppState> {
         .route("/users/:id/ban_forever", post(user_ban_forever))
         .route("/users/:id/purge", post(user_purge_content))
         .route("/reports/:id/status", post(admin_report_status))
+        .route("/suggestions", get(suggestions_page))
+        .route("/suggestions/:id/status", post(admin_suggestion_status))
+        .route("/gifs", get(gifs_page))
+        .route("/gifs/upload", post(admin_gif_upload))
+        .route("/gifs/:id/delete", post(admin_gif_delete))
+        .route("/gifs/:id/raw", get(admin_gif_raw))
         .route("/test-users", get(test_users_page).post(test_users_delete))
         .route("/servers", get(servers_list))
         .route("/servers/:id/delete", post(server_delete))
@@ -355,6 +361,8 @@ fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
         [
             ("/admin/users", "Пользователи", title.contains("Пользователи")),
             ("/admin/servers", "Серверы", title.contains("Серверы")),
+            ("/admin/suggestions", "Предложения", title.contains("Предложения")),
+            ("/admin/gifs", "GIF", title.contains("GIF")),
             ("/admin/center", "Центр", title.contains("Центр")),
             ("/admin/db", "База данных", title.contains("База данных")),
         ]
@@ -369,6 +377,11 @@ fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
         String::new()
     };
 
+    let main_class = if title.contains("Центр") {
+        "admin-main admin-main-wide"
+    } else {
+        "admin-main"
+    };
 
     let center_script = if title.contains("Центр") {
         "<script src='/static/js/admin-center.js?v=6' defer></script>"
@@ -410,7 +423,8 @@ header {{ position:sticky; top:0; z-index:20; padding:12px 18px; background:#0f1
 .nav-link.active {{ background:#1b2850; border-color:#4d67b1; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.05); }}
 .nav-link:hover {{ background:#182243; }}
 header form {{ margin-left:auto; }}
-main {{ padding:18px; max-width:1280px; margin:0 auto; }}
+main.admin-main {{ padding:18px; max-width:1280px; margin:0 auto; }}
+main.admin-main-wide {{ width:100%; max-width:none; padding:20px clamp(18px,2.2vw,36px) 28px; }}
 .card {{ background:linear-gradient(180deg,#11172a 0%, #0d1324 100%); border:1px solid var(--border); border-radius:18px; padding:16px; margin-bottom:14px; box-shadow:0 20px 50px rgba(0,0,0,0.18); }}
 .card h2, .card h3 {{ margin:0 0 12px 0; }}
 .small {{ color:var(--muted); font-size:12px; }}
@@ -517,18 +531,18 @@ button:hover {{ background:#202c57; }}
 .center-note-card h3 {{ margin:0 0 10px 0; }}
 .center-note-list {{ display:flex; flex-direction:column; gap:8px; }}
 .center-note-line {{ color:var(--muted); font-size:13px; line-height:1.45; }}
-.panel-shell {{ display:grid; grid-template-columns:280px minmax(0,1fr); gap:16px; min-height:76vh; }}
-.panel-sidebar {{ display:flex; flex-direction:column; gap:10px; padding:14px; border:1px solid var(--border); border-radius:20px; background:linear-gradient(180deg,#10162a 0%, #0d1324 100%); }}
-.panel-stage {{ min-width:0; border:1px solid var(--border); border-radius:20px; background:linear-gradient(180deg,#10162a 0%, #0d1324 100%); box-shadow:0 18px 40px rgba(0,0,0,0.22); overflow:hidden; }}
-.panel-stage-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--border); background:#11182d; flex-wrap:wrap; }}
+.panel-shell {{ display:grid; grid-template-columns:280px minmax(0,1fr); gap:18px; min-height:calc(100vh - 118px); align-items:stretch; }}
+.panel-sidebar {{ display:flex; flex-direction:column; gap:10px; padding:0; border:0; border-radius:0; background:transparent; }}
+.panel-stage {{ min-width:0; border:0; border-radius:0; background:transparent; box-shadow:none; overflow:visible; }}
+.panel-stage-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:0 0 14px; border-bottom:1px solid rgba(255,255,255,0.08); background:transparent; flex-wrap:wrap; }}
 .panel-stage-title {{ font-size:22px; font-weight:800; }}
 .panel-stage-sub {{ color:var(--muted); font-size:13px; }}
-.panel-stage-body {{ min-height:68vh; padding:14px; }}
+.panel-stage-body {{ min-height:calc(100vh - 190px); padding:0; }}
 .panel-frame {{ width:100%; min-height:66vh; border:0; border-radius:16px; background:#0b1020; }}
 .panel-frame-wrap {{ border:1px solid var(--border); border-radius:16px; overflow:hidden; background:#0b1020; min-height:68vh; }}
 .messenger-frame-wrap {{ border:1px solid var(--border); border-radius:16px; overflow:hidden; background:#0b1020; height:72vh; }}
 .messenger-frame {{ width:100%; height:calc(100% + 68px); margin-top:-68px; border:0; display:block; background:#0b1020; }}
-.helper-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }}
+.helper-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
 .helper-card {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; }}
 .helper-card h3 {{ margin:0 0 10px 0; }}
 .center-inline-search {{ display:flex; gap:8px; width:min(520px,100%); }}
@@ -610,6 +624,31 @@ button:hover {{ background:#202c57; }}
 .admin-report-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }}
 .admin-report-actions form {{ margin:0; }}
 .admin-report-actions button {{ padding:7px 10px; font-size:12px; }}
+.admin-suggestions-shell {{ display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:14px; align-items:start; }}
+.admin-suggestion-list {{ display:flex; flex-direction:column; gap:10px; }}
+.admin-suggestion-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; padding:14px; }}
+.admin-suggestion-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap; margin-bottom:10px; }}
+.admin-suggestion-title {{ font-size:17px; font-weight:900; word-break:break-word; }}
+.admin-suggestion-meta {{ color:var(--muted); font-size:12px; margin-top:4px; word-break:break-word; }}
+.admin-suggestion-text {{ line-height:1.55; word-break:break-word; white-space:pre-wrap; }}
+.admin-suggestion-actions {{ display:flex; gap:8px; margin-top:12px; align-items:flex-start; flex-wrap:wrap; }}
+.admin-suggestion-action-form {{ display:flex; gap:8px; align-items:flex-start; flex:1 1 420px; margin:0; min-width:min(100%,420px); }}
+.admin-suggestion-actions textarea {{ flex:1 1 240px; max-width:none; min-height:40px; resize:vertical; }}
+.admin-suggestion-actions form.inline-form {{ margin:0; }}
+.admin-suggestion-actions button {{ white-space:nowrap; }}
+.admin-suggestion-side {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
+.admin-gif-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; align-items:start; }}
+.admin-gif-upload {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
+.admin-gif-upload form {{ display:flex; flex-direction:column; gap:10px; }}
+.admin-gif-upload input[type=file] {{ width:100%; color:var(--muted); }}
+.admin-gif-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }}
+.admin-gif-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; overflow:hidden; min-width:0; }}
+.admin-gif-thumb {{ aspect-ratio:1.45/1; background:#060914; display:flex; align-items:center; justify-content:center; }}
+.admin-gif-thumb img {{ width:100%; height:100%; object-fit:contain; display:block; }}
+.admin-gif-body {{ padding:10px; display:flex; flex-direction:column; gap:8px; }}
+.admin-gif-name {{ font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.admin-gif-actions {{ display:flex; gap:8px; flex-wrap:wrap; }}
+.admin-gif-actions form {{ margin:0; }}
 .admin-user-actions {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
 .admin-user-actions form {{ margin:0; }}
 .admin-ban-reason-input {{ width:100%; max-width:none; margin-bottom:8px; padding:9px 10px; border-radius:12px; border:1px solid var(--border); background:#090d18; color:var(--text); }}
@@ -633,8 +672,8 @@ button:hover {{ background:#202c57; }}
 .admin-user-toast {{ position:fixed; right:18px; bottom:18px; z-index:1200; max-width:min(420px,calc(100vw - 36px)); padding:12px 14px; border-radius:14px; border:1px solid #5a2730; background:#2d1420; color:#ffd7df; box-shadow:0 18px 50px rgba(0,0,0,.38); font-weight:800; }}
 .admin-user-toast[data-kind='ok'] {{ border-color:#28533a; background:#10261b; color:#baf0cf; }}
 .admin-user-toast[hidden] {{ display:none; }}
-@media (max-width: 980px) {{ .user-card, .server-row-card, .center-shell, .center-workspace, .panel-shell, .helper-grid, .user-fields, .admin-messenger, .admin-users-grid, .admin-user-info-grid, .admin-user-actions {{ grid-template-columns:1fr; }} .user-actions, .server-actions {{ justify-content:flex-start; }} .admin-user-list-scroll {{ max-height:none; }} }}
-@media (max-width: 640px) {{ main {{ padding:12px; }} header {{ padding:12px; }} .brand {{ font-size:22px; }} .search-row form {{ flex-direction:column; }} .search-row input[type=text], .search-row button {{ width:100%; }} .panel-stage-body {{ padding:10px; }} .messenger-frame {{ margin-top:-62px; height:calc(100% + 62px); }} }}
+@media (max-width: 980px) {{ .user-card, .server-row-card, .center-shell, .center-workspace, .panel-shell, .helper-grid, .user-fields, .admin-messenger, .admin-users-grid, .admin-user-info-grid, .admin-user-actions, .admin-suggestions-shell, .admin-gif-shell {{ grid-template-columns:1fr; }} .user-actions, .server-actions {{ justify-content:flex-start; }} .admin-user-list-scroll {{ max-height:none; }} .admin-suggestion-side, .admin-gif-upload {{ position:static; }} }}
+@media (max-width: 640px) {{ main.admin-main {{ padding:12px; }} header {{ padding:12px; }} .brand {{ font-size:22px; }} .search-row form {{ flex-direction:column; }} .search-row input[type=text], .search-row button {{ width:100%; }} .messenger-frame {{ margin-top:-62px; height:calc(100% + 62px); }} .admin-suggestion-action-form {{ flex-direction:column; }} .admin-suggestion-actions textarea, .admin-suggestion-actions button {{ width:100%; }} }}
 </style>
 </head>
 <body>
@@ -646,7 +685,7 @@ button:hover {{ background:#202c57; }}
     <button type='submit'>Выйти</button>
   </form>
 </header>
-<main>
+<main class='{main_class}'>
 {msg_html}
 {body}
 </main>
@@ -656,6 +695,7 @@ button:hover {{ background:#202c57; }}
         nav = nav,
         msg_html = msg_html,
         body = body,
+        main_class = main_class,
         center_script = center_script,
         users_script = users_script
     );
@@ -666,7 +706,7 @@ button:hover {{ background:#202c57; }}
 fn embedded_page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
     let mut html = page(title, body, msg).0;
     html = html.replacen("<header>", "<header style='display:none'>", 1);
-    html = html.replacen("<main>", "<main style='max-width:none;padding:12px;'>", 1);
+    html = html.replacen("<main class='admin-main'>", "<main class='admin-main' style='max-width:none;padding:12px;'>", 1);
     Html(html)
 }
 
@@ -791,6 +831,65 @@ async fn admin_profile_file_raw(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, ct),
+            (header::CONTENT_DISPOSITION, cd),
+            (header::CONTENT_LENGTH, len),
+            (header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff")),
+        ],
+        body,
+    ).into_response()
+}
+
+async fn admin_gif_raw(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<i64>,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = require_admin_panel_enabled() { return (code, msg).into_response(); }
+    if let Err((code, msg)) = require_allow_ip(&headers) { return (code, msg).into_response(); }
+    if let Err(redir) = require_auth(&st, &headers) { return redir.into_response(); }
+
+    let row = sqlx::query(
+        r#"
+        SELECT original_name, storage_path, file_size
+        FROM gif_assets
+        WHERE id = ? AND scope = 'global'
+        LIMIT 1
+        "#,
+    )
+    .bind(asset_id)
+    .fetch_optional(&st.db)
+    .await;
+
+    let row = match row {
+        Ok(Some(v)) => v,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("db_error: {e}")).into_response(),
+    };
+
+    let original_name: String = row.get("original_name");
+    let storage_path: String = row.get("storage_path");
+    let file_size: i64 = row.get("file_size");
+    let path = PathBuf::from(storage_path);
+    let meta = match fs::metadata(&path).await {
+        Ok(m) if m.is_file() && m.len() > 0 => m,
+        _ => return (StatusCode::NOT_FOUND, "GIF отсутствует на диске").into_response(),
+    };
+    let file = match File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("open_failed: {e}")).into_response(),
+    };
+
+    let safe_name = admin_sanitize_filename(&original_name);
+    let cd = HeaderValue::from_str(&format!("inline; filename=\"{}\"", safe_name))
+        .unwrap_or_else(|_| HeaderValue::from_static("inline"));
+    let len_value = std::cmp::max(file_size, meta.len() as i64).to_string();
+    let len = HeaderValue::from_str(&len_value).unwrap_or_else(|_| HeaderValue::from_static("0"));
+    let body = axum::body::Body::from_stream(ReaderStream::new(file));
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("image/gif")),
             (header::CONTENT_DISPOSITION, cd),
             (header::CONTENT_LENGTH, len),
             (header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff")),
@@ -931,6 +1030,7 @@ struct MsgQuery {
     view: Option<String>,
     q: Option<String>,
     mode: Option<String>,
+    status: Option<String>,
     user_id: Option<i64>,
 }
 
@@ -1084,6 +1184,187 @@ fn report_status_label(status: &str) -> &'static str {
         "rejected" => "Отклонено",
         _ => "Новая",
     }
+}
+
+fn normalized_suggestion_status(input: Option<&str>) -> &'static str {
+    match input.unwrap_or("open").trim().to_ascii_lowercase().as_str() {
+        "all" => "all",
+        "reviewed" => "reviewed",
+        "rejected" => "rejected",
+        _ => "open",
+    }
+}
+
+fn suggestion_status_label(status: &str) -> &'static str {
+    match status {
+        "reviewed" => "Просмотрено",
+        "rejected" => "Отклонено",
+        _ => "Новое",
+    }
+}
+
+fn suggestion_status_class(status: &str) -> &'static str {
+    match status {
+        "reviewed" => "done",
+        "rejected" => "done",
+        _ => "open",
+    }
+}
+
+fn suggestions_page_url(base_path: &str, embedded: bool, status: &str) -> String {
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    if embedded {
+        ser.append_pair("view", "suggestions");
+    }
+    if status != "open" {
+        ser.append_pair("status", status);
+    }
+    let query = ser.finish();
+    if query.is_empty() { base_path.to_string() } else { format!("{base_path}?{query}") }
+}
+
+fn render_suggestions_panel_body(
+    sess: &AdminSession,
+    suggestions: &[UserSuggestionRow],
+    status: &str,
+    embedded: bool,
+    current_return_to: &str,
+) -> String {
+    let base_path = if embedded { "/admin/center" } else { "/admin/suggestions" };
+    let status = normalized_suggestion_status(Some(status));
+    let open_href = suggestions_page_url(base_path, embedded, "open");
+    let all_href = suggestions_page_url(base_path, embedded, "all");
+    let reviewed_href = suggestions_page_url(base_path, embedded, "reviewed");
+    let rejected_href = suggestions_page_url(base_path, embedded, "rejected");
+
+    let mut rows_html = String::new();
+    if suggestions.is_empty() {
+        rows_html.push_str("<div class='empty-state'>Предложений в этом статусе пока нет.</div>");
+    } else {
+        for item in suggestions {
+            let title = if item.title.trim().is_empty() {
+                format!("Предложение #{}", item.id)
+            } else {
+                item.title.clone()
+            };
+            let reviewed = item.reviewed_at.as_deref().unwrap_or("").trim();
+            let reviewed_html = if reviewed.is_empty() {
+                String::new()
+            } else {
+                format!("<div class='admin-suggestion-meta'>Рассмотрено: {}</div>", escape_html(&fmt_admin_dt(reviewed)))
+            };
+            let admin_note_html = if item.admin_note.trim().is_empty() {
+                String::new()
+            } else {
+                format!("<div class='admin-suggestion-meta'>Заметка: {}</div>", escape_html(&item.admin_note))
+            };
+            let note_value = escape_html(&item.admin_note);
+            let actions = if item.status == "open" {
+                format!(
+                    r#"<div class='admin-suggestion-actions'>
+  <form method='post' action='/admin/suggestions/{id}/status' class='admin-suggestion-action-form'>
+    <input type='hidden' name='csrf' value='{csrf}' />
+    <input type='hidden' name='return_to' value='{return_to}' />
+    <input type='hidden' name='status' value='reviewed' />
+    <textarea name='admin_note' rows='2' placeholder='Заметка администратора'>{note}</textarea>
+    <button type='submit' class='btn-soft'>Просмотрено</button>
+  </form>
+  <form method='post' action='/admin/suggestions/{id}/status' class='inline-form'>
+    <input type='hidden' name='csrf' value='{csrf}' />
+    <input type='hidden' name='return_to' value='{return_to}' />
+    <input type='hidden' name='status' value='rejected' />
+    <button type='submit' class='btn-soft'>Отклонить</button>
+  </form>
+</div>"#,
+                    id = item.id,
+                    csrf = escape_html(&sess.csrf),
+                    return_to = escape_html(current_return_to),
+                    note = note_value,
+                )
+            } else {
+                format!(
+                    r#"<div class='admin-suggestion-actions'>
+  <form method='post' action='/admin/suggestions/{id}/status' class='inline-form'>
+    <input type='hidden' name='csrf' value='{csrf}' />
+    <input type='hidden' name='return_to' value='{return_to}' />
+    <input type='hidden' name='status' value='open' />
+    <button type='submit' class='btn-soft'>Вернуть в новые</button>
+  </form>
+</div>"#,
+                    id = item.id,
+                    csrf = escape_html(&sess.csrf),
+                    return_to = escape_html(current_return_to),
+                )
+            };
+
+            rows_html.push_str(&format!(
+                r#"<article class='admin-suggestion-card'>
+  <div class='admin-suggestion-head'>
+    <div>
+      <div class='admin-suggestion-title'>{title}</div>
+      <div class='admin-suggestion-meta'>От: #{user_id} {username} · {created_at}</div>
+      {reviewed_html}
+    </div>
+    <span class='admin-report-status {status_class}'>{status_label}</span>
+  </div>
+  <div class='admin-suggestion-text'>{message}</div>
+  {admin_note_html}
+  {actions}
+</article>"#,
+                title = escape_html(&title),
+                user_id = item.user_id,
+                username = escape_html(&item.username),
+                created_at = escape_html(&fmt_admin_dt(&item.created_at)),
+                reviewed_html = reviewed_html,
+                status_class = suggestion_status_class(&item.status),
+                status_label = suggestion_status_label(&item.status),
+                message = escape_html(&item.message),
+                admin_note_html = admin_note_html,
+                actions = actions,
+            ));
+        }
+    }
+
+    let current_label = match status {
+        "all" => "Все",
+        "reviewed" => "Просмотрено",
+        "rejected" => "Отклонено",
+        _ => "Новые",
+    };
+
+    format!(
+        r#"<div class='card'>
+  <div class='search-row'>
+    <div class='hstack'>
+      <h2 style='margin:0;'>Предложения</h2>
+      <span class='pill'>{current_label}</span>
+    </div>
+    <div class='admin-user-tabs'>
+      <a href='{open_href}' class='{open_cls}'>Новые</a>
+      <a href='{all_href}' class='{all_cls}'>Все</a>
+      <a href='{reviewed_href}' class='{reviewed_cls}'>Просмотрено</a>
+      <a href='{rejected_href}' class='{rejected_cls}'>Отклонено</a>
+    </div>
+  </div>
+</div>
+<div class='admin-suggestions-shell'>
+  <section class='admin-suggestion-list'>{rows_html}</section>
+  <aside class='admin-suggestion-side'>
+    <h3 style='margin:0 0 8px;'>Просмотр</h3>
+    <div class='small'>Здесь отображаются идеи, отправленные пользователями из настроек. Новые предложения можно пометить просмотренными или отклонёнными.</div>
+  </aside>
+</div>"#,
+        current_label = current_label,
+        open_href = escape_html(&open_href),
+        all_href = escape_html(&all_href),
+        reviewed_href = escape_html(&reviewed_href),
+        rejected_href = escape_html(&rejected_href),
+        open_cls = if status == "open" { "active" } else { "" },
+        all_cls = if status == "all" { "active" } else { "" },
+        reviewed_cls = if status == "reviewed" { "active" } else { "" },
+        rejected_cls = if status == "rejected" { "active" } else { "" },
+        rows_html = rows_html,
+    )
 }
 
 fn render_user_reports_html(sess: &AdminSession, reports: &[UserReportRow], return_to: &str) -> String {
@@ -1667,6 +1948,24 @@ struct ReportStatusForm {
     return_to: String,
 }
 
+#[derive(Deserialize, Default)]
+struct SuggestionsQuery {
+    msg: Option<String>,
+    status: Option<String>,
+    embed: Option<u8>,
+    return_to: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SuggestionStatusForm {
+    csrf: String,
+    status: String,
+    #[serde(default)]
+    admin_note: String,
+    #[serde(default)]
+    return_to: String,
+}
+
 async fn admin_report_status(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -1705,6 +2004,287 @@ async fn admin_report_status(
     };
     match res {
         Ok(_) => admin_redirect_with_msg(&return_to, "Готово").into_response(),
+        Err(e) => admin_redirect_with_msg(&return_to, &format!("Ошибка: {e}")).into_response(),
+    }
+}
+
+async fn suggestions_page(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SuggestionsQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let status = normalized_suggestion_status(q.status.as_deref());
+    let embed = q.embed == Some(1);
+    let fallback_return_to = suggestions_page_url(if embed { "/admin/center" } else { "/admin/suggestions" }, embed, status);
+    let return_to = safe_admin_return_to(q.return_to.as_deref().unwrap_or(""), &fallback_return_to);
+    let body = match fetch_suggestions(&st.db, status, 200).await {
+        Ok(list) => render_suggestions_panel_body(&sess, &list, status, embed, &return_to),
+        Err(err) => format!(
+            "<div class='card'><div class='empty-state'>Ошибка БД: {}</div></div>",
+            escape_html(&format!("{}", err))
+        ),
+    };
+
+    if embed {
+        embedded_page("Админка • Предложения", &body, q.msg.as_deref()).into_response()
+    } else {
+        page("Админка • Предложения", &body, q.msg.as_deref()).into_response()
+    }
+}
+
+async fn admin_suggestion_status(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(f): Form<SuggestionStatusForm>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let return_to = safe_admin_return_to(&f.return_to, "/admin/suggestions");
+    if f.csrf != sess.csrf {
+        return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
+    }
+
+    let status = match f.status.trim() {
+        "open" => "open",
+        "rejected" => "rejected",
+        "reviewed" => "reviewed",
+        _ => "reviewed",
+    };
+    let note: String = f.admin_note.trim().chars().take(800).collect();
+    let now = auth::now_iso();
+    let res = if status == "open" {
+        sqlx::query(
+            "UPDATE user_suggestions SET status = 'open', reviewed_at = NULL, reviewed_by = NULL WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&st.db)
+        .await
+    } else {
+        sqlx::query(
+            "UPDATE user_suggestions SET status = ?, reviewed_at = ?, reviewed_by = NULL, admin_note = ? WHERE id = ?",
+        )
+        .bind(status)
+        .bind(&now)
+        .bind(&note)
+        .bind(id)
+        .execute(&st.db)
+        .await
+    };
+
+    match res {
+        Ok(_) => admin_redirect_with_msg(&return_to, "Готово").into_response(),
+        Err(e) => admin_redirect_with_msg(&return_to, &format!("Ошибка: {e}")).into_response(),
+    }
+}
+
+async fn gifs_page(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<MsgQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let embedded = q.embed == Some(1);
+    let return_to = if embedded { "/admin/gifs?embed=1" } else { "/admin/gifs" };
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, original_name, file_size, created_at
+        FROM gif_assets
+        WHERE scope = 'global'
+        ORDER BY id DESC
+        LIMIT 240
+        "#,
+    )
+    .fetch_all(&st.db)
+    .await
+    .unwrap_or_default();
+
+    let cards = if rows.is_empty() {
+        "<div class='empty-state'>Глобальных GIF пока нет. Загрузи первую анимацию слева.</div>".to_string()
+    } else {
+        rows.into_iter()
+            .map(|r| {
+                let id: i64 = r.get("id");
+                let name: String = r.get("original_name");
+                let size: i64 = r.get("file_size");
+                let created_at: String = r.get("created_at");
+                format!(
+                    r#"<div class='admin-gif-card'>
+  <div class='admin-gif-thumb'><img src='/admin/gifs/{id}/raw' alt='{name}' loading='lazy'></div>
+  <div class='admin-gif-body'>
+    <div class='admin-gif-name' title='{name}'>{name}</div>
+    <div class='small'>{size} • {created_at}</div>
+    <div class='admin-gif-actions'>
+      <form method='post' action='/admin/gifs/{id}/delete'>
+        <input type='hidden' name='csrf' value='{csrf}'>
+        <input type='hidden' name='return_to' value='{return_to}'>
+        <button type='submit' class='btn-danger'>Удалить</button>
+      </form>
+    </div>
+  </div>
+</div>"#,
+                    id = id,
+                    name = escape_html(&name),
+                    size = escape_html(&admin_format_bytes(size)),
+                    created_at = escape_html(&fmt_admin_dt(&created_at)),
+                    csrf = escape_html(&sess.csrf),
+                    return_to = escape_html(return_to),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
+
+    let body = format!(
+        r#"<div class='admin-gif-shell'>
+  <aside class='admin-gif-upload'>
+    <h2>Глобальные GIF</h2>
+    <p class='small'>Эти GIF видят все пользователи в пикере. Личные избранные пользователи добавляют сами из чата.</p>
+    <form method='post' action='/admin/gifs/upload' enctype='multipart/form-data'>
+      <input type='hidden' name='csrf' value='{csrf}'>
+      <input type='hidden' name='return_to' value='{return_to}'>
+      <input type='file' name='file' accept='image/gif,.gif' required>
+      <button type='submit'>Добавить GIF</button>
+    </form>
+  </aside>
+  <section>
+    <div class='admin-gif-grid'>{cards}</div>
+  </section>
+</div>"#,
+        csrf = escape_html(&sess.csrf),
+        return_to = escape_html(return_to),
+        cards = cards,
+    );
+
+    if embedded {
+        embedded_page("Админка • GIF", &body, q.msg.as_deref()).into_response()
+    } else {
+        page("Админка • GIF", &body, q.msg.as_deref()).into_response()
+    }
+}
+
+async fn admin_gif_upload(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let mut csrf = String::new();
+    let mut return_to = "/admin/gifs".to_string();
+    let mut original_name = "global.gif".to_string();
+    let mut bytes: Option<Vec<u8>> = None;
+
+    loop {
+        let next = match multipart.next_field().await {
+            Ok(v) => v,
+            Err(_) => return admin_redirect_with_msg("/admin/gifs", "Некорректная форма загрузки").into_response(),
+        };
+        let Some(field) = next else { break; };
+        let name = field.name().unwrap_or("").to_string();
+        if name == "csrf" {
+            csrf = field.text().await.unwrap_or_default();
+        } else if name == "return_to" {
+            return_to = safe_admin_return_to(&field.text().await.unwrap_or_default(), "/admin/gifs");
+        } else if name == "file" {
+            original_name = field.file_name().unwrap_or("global.gif").to_string();
+            let data = match field.bytes().await {
+                Ok(v) => v,
+                Err(_) => return admin_redirect_with_msg("/admin/gifs", "Не удалось прочитать GIF").into_response(),
+            };
+            bytes = Some(data.to_vec());
+        }
+    }
+
+    if csrf != sess.csrf {
+        return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
+    }
+    let Some(data) = bytes else {
+        return admin_redirect_with_msg(&return_to, "GIF не выбран").into_response();
+    };
+
+    match crate::routes::gifs::save_global_gif_asset(&st.db, &original_name, &data).await {
+        Ok(_) => admin_redirect_with_msg(&return_to, "GIF добавлен в глобальный список").into_response(),
+        Err(e) => {
+            let msg = if e.to_string().contains("gif_required") {
+                "Нужен корректный GIF до 50 МБ".to_string()
+            } else {
+                format!("Ошибка: {e}")
+            };
+            admin_redirect_with_msg(&return_to, &msg).into_response()
+        }
+    }
+}
+
+async fn admin_gif_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(f): Form<ActionForm>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let return_to = safe_admin_return_to(&f.return_to, "/admin/gifs");
+    if f.csrf != sess.csrf {
+        return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
+    }
+
+    let res = sqlx::query("DELETE FROM gif_assets WHERE id = ? AND scope = 'global'")
+        .bind(id)
+        .execute(&st.db)
+        .await;
+    match res {
+        Ok(done) if done.rows_affected() > 0 => {
+            let _ = cleanup_file_storage_orphans_db(&st.db).await;
+            admin_redirect_with_msg(&return_to, "GIF удалён из глобального списка").into_response()
+        }
+        Ok(_) => admin_redirect_with_msg(&return_to, "GIF не найден").into_response(),
         Err(e) => admin_redirect_with_msg(&return_to, &format!("Ошибка: {e}")).into_response(),
     }
 }
@@ -2766,6 +3346,11 @@ async fn center_page(
     if server_cards.is_empty() { server_cards.push_str("<div class='empty-state'>Серверы не найдены.</div>"); }
     let servers_panel = render_servers_panel_body("", &server_cards, true);
     let db_panel = render_db_panel_body(&sess, "/admin/center");
+    let gifs_panel = "<div class='panel-frame-wrap'><iframe class='panel-frame' src='/admin/gifs?embed=1' title='Глобальные GIF'></iframe></div>".to_string();
+    let suggestion_status = normalized_suggestion_status(q.status.as_deref());
+    let suggestions = fetch_suggestions(&st.db, suggestion_status, 120).await.unwrap_or_default();
+    let suggestions_return_to = suggestions_page_url("/admin/center", true, suggestion_status);
+    let suggestions_panel = render_suggestions_panel_body(&sess, &suggestions, suggestion_status, true, &suggestions_return_to);
 
     let msg_rows = sqlx::query(
         r#"SELECT m.id, COALESCE(m.content,'') AS content, m.timestamp AS created_at, COALESCE(u.username,'Системный') AS username,
@@ -2855,7 +3440,7 @@ async fn center_page(
         r#"<div class='center-hero'>
   <div>
     <h2 class='center-hero-title'>Центр управления</h2>
-    <div class='center-hero-sub'>Одна страница для админки и мессенджера. Переключение идёт внутри квадрата справа, а поиски и выбранная секция сохраняются.</div>
+    <div class='center-hero-sub'>Одна рабочая область для админки и мессенджера. Секции раскрываются по всей доступной ширине, а поиски и выбранная панель сохраняются.</div>
   </div>
   <div class='center-stat-row'>
     <div class='center-stat'><div class='center-stat-label'>Пользователи</div><div class='center-stat-value'>{users_total}</div></div>
@@ -2865,17 +3450,20 @@ async fn center_page(
   </div>
 </div>
 <div class='helper-grid'>
-  <div class='helper-card'><h3>Как это работает</h3><div class='center-note-list'>
-    <div class='center-note-line'>• слева выбираешь секцию;</div>
-    <div class='center-note-line'>• справа секция открывается без перезагрузки;</div>
-    <div class='center-note-line'>• введённый поиск сохраняется при переходе между панелями;</div>
-    <div class='center-note-line'>• после обновления страницы восстанавливается последняя панель.</div>
+  <div class='helper-card'><h3>Навигация</h3><div class='center-note-list'>
+    <div class='center-note-line'>• слева выбираешь нужную секцию;</div>
+    <div class='center-note-line'>• справа открывается рабочая область без перезагрузки;</div>
+    <div class='center-note-line'>• состояние панели сохраняется после обновления.</div>
   </div></div>
-  <div class='helper-card'><h3>Что дальше добавить сюда</h3><div class='center-note-list'>
-    <div class='center-note-line'>• репорты и жалобы;</div>
-    <div class='center-note-line'>• feedback / корзину пожеланий;</div>
-    <div class='center-note-line'>• сигналы антиспама и карантин;</div>
-    <div class='center-note-line'>• действия модерации прямо из потока сообщений.</div>
+  <div class='helper-card'><h3>Модерация</h3><div class='center-note-list'>
+    <div class='center-note-line'>• репорты видны в карточке пользователя;</div>
+    <div class='center-note-line'>• предложения вынесены в отдельную панель;</div>
+    <div class='center-note-line'>• опасные действия требуют админ-доступ.</div>
+  </div></div>
+  <div class='helper-card'><h3>Мониторинг</h3><div class='center-note-list'>
+    <div class='center-note-line'>• мессенджер открыт в read-only режиме;</div>
+    <div class='center-note-line'>• Homie AI остаётся отдельным инструментом;</div>
+    <div class='center-note-line'>• время в админке показывается в UTC.</div>
   </div></div>
 </div>"#,
         users_total=users_total, servers_total=servers_total, messages_total=messages_total, banned_total=banned_total,
@@ -2888,7 +3476,9 @@ async fn center_page(
   <aside class='panel-sidebar'>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='overview'><strong>Центр</strong><span class='small'>Общий вид и точка входа в остальные панели.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='users'><strong>Пользователи</strong><span class='small'>Почта, ник и действия по аккаунтам без прыжков по страницам.</span></button>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='suggestions'><strong>Предложения</strong><span class='small'>Идеи пользователей из настроек и быстрый просмотр статусов.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='servers'><strong>Серверы</strong><span class='small'>Проверка владельцев и удаление прямо внутри рабочей области.</span></button>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='gifs'><strong>GIF</strong><span class='small'>Глобальный список анимированных стикеров для пользователей.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='db'><strong>База данных</strong><span class='small'>Сервисные действия и обслуживание без отдельной вкладки.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='messenger'><strong>Мессенджер</strong><span class='small'>Read-only поток и переключение чатов в той же странице.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='homie'><strong>Homie AI</strong><span class='small'>Личный агент только для админки.</span></button>
@@ -2903,14 +3493,16 @@ async fn center_page(
     <div class='panel-stage-body'>
       <div class='panel-view' data-panel-view='overview' data-stage-title='Центр управления' data-stage-sub='Одна рабочая страница для админки и внутреннего мониторинга мессенджера.'>{overview_panel}</div>
       <div class='panel-view' data-panel-view='users' data-stage-title='Пользователи' data-stage-sub=''>{users_panel}</div>
-      <div class='panel-view' data-panel-view='servers' data-stage-title='Панель серверов' data-stage-sub='Проверка серверов и действия с ними живут в одном квадрате справа.'>{servers_panel}</div>
+      <div class='panel-view' data-panel-view='suggestions' data-stage-title='Предложения' data-stage-sub='Идеи пользователей из настроек и статус их рассмотрения.'>{suggestions_panel}</div>
+      <div class='panel-view' data-panel-view='servers' data-stage-title='Панель серверов' data-stage-sub='Проверка серверов и действия с ними в общей рабочей области.'>{servers_panel}</div>
+      <div class='panel-view' data-panel-view='gifs' data-stage-title='Глобальные GIF' data-stage-sub='Анимированные стикеры, доступные всем пользователям.'>{gifs_panel}</div>
       <div class='panel-view' data-panel-view='db' data-stage-title='Панель базы данных' data-stage-sub='Сервисные инструменты открываются здесь же, без переходов по страницам.'>{db_panel}</div>
       <div class='panel-view' data-panel-view='messenger' data-stage-title='Мессенджер внутри админки' data-stage-sub='Read-only поток сообщений и переключение чатов без второй вкладки браузера.'>{messenger_panel}</div>
       <div class='panel-view' data-panel-view='homie' data-stage-title='Homie AI' data-stage-sub='Локальный агент админ-панели.'>{homie_panel}</div>
     </div>
   </section>
 </div>"#,
-        overview_panel=overview_panel, users_panel=users_panel, servers_panel=servers_panel, db_panel=db_panel, messenger_panel=messenger_panel, homie_panel=homie_panel,
+        overview_panel=overview_panel, users_panel=users_panel, suggestions_panel=suggestions_panel, servers_panel=servers_panel, gifs_panel=gifs_panel, db_panel=db_panel, messenger_panel=messenger_panel, homie_panel=homie_panel,
     );
 
     page("Админка • Центр", &body, q.msg.as_deref()).into_response()
@@ -2947,6 +3539,19 @@ struct UserReportRow {
     message: String,
     status: String,
     created_at: String,
+}
+
+#[derive(Clone)]
+struct UserSuggestionRow {
+    id: i64,
+    user_id: i64,
+    username: String,
+    title: String,
+    message: String,
+    status: String,
+    created_at: String,
+    reviewed_at: Option<String>,
+    admin_note: String,
 }
 
 fn map_user_row(r: sqlx::sqlite::SqliteRow) -> UserRow {
@@ -3066,6 +3671,55 @@ async fn fetch_user_reports(db: &SqlitePool, user_id: i64, limit: i64) -> anyhow
             message: r.get("message"),
             status: r.get("status"),
             created_at: r.get("created_at"),
+        })
+        .collect())
+}
+
+async fn fetch_suggestions(db: &SqlitePool, status: &str, limit: i64) -> anyhow::Result<Vec<UserSuggestionRow>> {
+    let status = normalized_suggestion_status(Some(status));
+    let base = r#"
+        SELECT s.id,
+               s.user_id,
+               COALESCE(u.username, 'deleted') AS username,
+               COALESCE(s.title, '') AS title,
+               s.message,
+               s.status,
+               s.created_at,
+               s.reviewed_at,
+               COALESCE(s.admin_note, '') AS admin_note
+        FROM user_suggestions s
+        LEFT JOIN users u ON u.id = s.user_id
+    "#;
+
+    let rows = if status == "all" {
+        sqlx::query(&format!(
+            "{base} ORDER BY CASE s.status WHEN 'open' THEN 0 ELSE 1 END, s.id DESC LIMIT ?"
+        ))
+        .bind(limit)
+        .fetch_all(db)
+        .await?
+    } else {
+        sqlx::query(&format!(
+            "{base} WHERE s.status = ? ORDER BY s.id DESC LIMIT ?"
+        ))
+        .bind(status)
+        .bind(limit)
+        .fetch_all(db)
+        .await?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|r| UserSuggestionRow {
+            id: r.get("id"),
+            user_id: r.get("user_id"),
+            username: r.get("username"),
+            title: r.get("title"),
+            message: r.get("message"),
+            status: r.get("status"),
+            created_at: r.get("created_at"),
+            reviewed_at: r.try_get("reviewed_at").ok(),
+            admin_note: r.get("admin_note"),
         })
         .collect())
 }
@@ -3227,6 +3881,18 @@ async fn cleanup_file_storage_orphans_db(db: &SqlitePool) -> anyhow::Result<()> 
         active_thumbs.insert(admin_thumb_path_for(&filename).to_string_lossy().to_string());
     }
 
+    let gif_rows = sqlx::query("SELECT filename, storage_path FROM gif_assets")
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+
+    for r in gif_rows {
+        let storage_path: String = r.get("storage_path");
+        let filename: String = r.get("filename");
+        active_paths.insert(PathBuf::from(storage_path).to_string_lossy().to_string());
+        active_thumbs.insert(admin_thumb_path_for(&filename).to_string_lossy().to_string());
+    }
+
     let storage_dir = PathBuf::from("storage/files");
     if let Ok(entries) = std::fs::read_dir(&storage_dir) {
         for entry in entries.flatten() {
@@ -3362,6 +4028,20 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
     .execute(&mut *tx)
     .await?;
 
+    let _ = sqlx::query("DELETE FROM gif_assets WHERE owner_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let _ = sqlx::query(
+        r#"UPDATE gif_assets
+           SET source_file_id = NULL
+           WHERE source_file_id IN (SELECT id FROM files WHERE uploaded_by = ?)"#,
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
     let _ = sqlx::query("DELETE FROM files WHERE uploaded_by = ?")
         .bind(user_id)
         .execute(&mut *tx)
@@ -3450,6 +4130,15 @@ async fn purge_server_exec(db: &SqlitePool, server_id: i64) -> anyhow::Result<()
             .bind(*chat_id)
             .execute(&mut *tx)
             .await?;
+
+        let _ = sqlx::query(
+            r#"UPDATE gif_assets
+               SET source_file_id = NULL
+               WHERE source_file_id IN (SELECT id FROM files WHERE chat_id = ?)"#,
+        )
+        .bind(*chat_id)
+        .execute(&mut *tx)
+        .await?;
 
         let _ = sqlx::query("DELETE FROM files WHERE chat_id = ?")
             .bind(*chat_id)
@@ -3638,6 +4327,16 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
 
+    let _ = sqlx::query("DELETE FROM user_suggestions WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let _ = sqlx::query("DELETE FROM gif_assets WHERE owner_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
     let _ = sqlx::query("DELETE FROM user_blocks WHERE blocker_id = ? OR blocked_id = ?")
         .bind(user_id)
         .bind(user_id)
@@ -3679,6 +4378,15 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
 
+    let _ = sqlx::query(
+        r#"UPDATE gif_assets
+           SET source_file_id = NULL
+           WHERE source_file_id IN (SELECT id FROM files WHERE uploaded_by = ?)"#,
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
     let _ = sqlx::query("DELETE FROM files WHERE uploaded_by = ?")
         .bind(user_id)
         .execute(&mut *tx)
@@ -3715,6 +4423,15 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
             .bind(chat_id)
             .execute(&mut *tx)
             .await?;
+
+        let _ = sqlx::query(
+            r#"UPDATE gif_assets
+               SET source_file_id = NULL
+               WHERE source_file_id IN (SELECT id FROM files WHERE chat_id = ?)"#,
+        )
+        .bind(chat_id)
+        .execute(&mut *tx)
+        .await?;
 
         let _ = sqlx::query("DELETE FROM files WHERE chat_id = ?")
             .bind(chat_id)
@@ -3808,6 +4525,10 @@ async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
 
+    sqlx::query("UPDATE gif_assets SET source_file_id = NULL")
+        .execute(&mut *tx)
+        .await?;
+
     sqlx::query("DELETE FROM files")
         .execute(&mut *tx)
         .await?;
@@ -3886,6 +4607,9 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM user_reports")
         .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM user_suggestions")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM message_reactions")
         .execute(&mut *tx)
         .await?;
@@ -3897,6 +4621,10 @@ async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
         .await?;
 
     sqlx::query("DELETE FROM dm_chats")
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("DELETE FROM gif_assets")
         .execute(&mut *tx)
         .await?;
 

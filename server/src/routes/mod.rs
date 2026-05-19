@@ -5,6 +5,7 @@ pub mod servers;
 pub mod chats;
 pub mod presence;
 pub mod files;
+pub mod gifs;
 pub mod pages;
 pub mod messages;
 pub mod embeds;

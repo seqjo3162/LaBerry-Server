@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LaBerry</title>
-  <link rel="stylesheet" href="/static/css/main.css?v=55">
+  <link rel="stylesheet" href="/static/css/main.css?v=56">
 </head>
 <body>
   <div id="appRoot" class="app-root">
@@ -130,8 +130,11 @@
           <div class="composer-row">
             <button class="icon-btn attach-btn" id="attachBtn" type="button" title="Прикрепить файл">📎</button>
             <button class="icon-btn md-attach-btn" id="mdAttachBtn" type="button" title="Markdown-файл">MD</button>
+            <button class="icon-btn composer-emoji-btn" id="composerEmojiBtn" type="button" title="Эмодзи">😊</button>
+            <button class="icon-btn gif-btn" id="gifBtn" type="button" title="GIF">GIF</button>
             <input type="file" id="fileInput" class="file-input" multiple />
             <input type="file" id="mdFileInput" class="file-input" accept=".md,.markdown,text/markdown,text/plain" />
+            <input type="file" id="gifFileInput" class="file-input" accept="image/gif,.gif" />
             <textarea class="inp message-textarea" id="message" placeholder="Напишите сообщение..." autocomplete="off" rows="1"></textarea>
             <button class="btn btn-primary" type="submit" id="sendBtn">Отправить</button>
           </div>
@@ -373,6 +376,6 @@
   </div>
 
   <script src="/static/js/start-page-link.js?v=1"></script>
-  <script type="module" src="/static/js/app.js?v=50"></script>
+  <script type="module" src="/static/js/app.js?v=51"></script>
 </body>
 </html>
