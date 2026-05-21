@@ -17,6 +17,7 @@ use sqlx::{Row, SqlitePool};
 use std::{env, net::IpAddr, path::PathBuf};
 use tokio::{fs, fs::File};
 use tokio_util::io::ReaderStream;
+use uuid::Uuid;
 
 // =============================
 // Router
@@ -41,6 +42,9 @@ pub fn router() -> Router<AppState> {
         .route("/gifs/upload", post(admin_gif_upload))
         .route("/gifs/:id/delete", post(admin_gif_delete))
         .route("/gifs/:id/raw", get(admin_gif_raw))
+        .route("/downloads", get(downloads_page))
+        .route("/downloads/upload", post(admin_download_upload))
+        .route("/downloads/:id/delete", post(admin_download_delete))
         .route("/test-users", get(test_users_page).post(test_users_delete))
         .route("/servers", get(servers_list))
         .route("/servers/:id/delete", post(server_delete))
@@ -363,6 +367,7 @@ fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
             ("/admin/servers", "Серверы", title.contains("Серверы")),
             ("/admin/suggestions", "Предложения", title.contains("Предложения")),
             ("/admin/gifs", "GIF", title.contains("GIF")),
+            ("/admin/downloads", "Загрузки", title.contains("Загрузки")),
             ("/admin/center", "Центр", title.contains("Центр")),
             ("/admin/db", "База данных", title.contains("База данных")),
         ]
@@ -649,6 +654,18 @@ button:hover {{ background:#202c57; }}
 .admin-gif-name {{ font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
 .admin-gif-actions {{ display:flex; gap:8px; flex-wrap:wrap; }}
 .admin-gif-actions form {{ margin:0; }}
+.admin-download-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; align-items:start; }}
+.admin-download-upload {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
+.admin-download-upload form {{ display:flex; flex-direction:column; gap:10px; }}
+.admin-download-upload input[type=file] {{ width:100%; color:var(--muted); }}
+.admin-download-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }}
+.admin-download-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; padding:14px; display:flex; flex-direction:column; gap:10px; min-width:0; }}
+.admin-download-top {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
+.admin-download-title {{ font-weight:900; font-size:16px; word-break:break-word; }}
+.admin-download-meta {{ color:var(--muted); font-size:12px; line-height:1.45; word-break:break-word; }}
+.admin-download-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:auto; }}
+.admin-download-actions form {{ margin:0; }}
+.admin-download-actions a {{ text-decoration:none; border:1px solid var(--border); background:#151d37; color:var(--text); border-radius:14px; padding:10px 14px; font-weight:800; }}
 .admin-user-actions {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
 .admin-user-actions form {{ margin:0; }}
 .admin-ban-reason-input {{ width:100%; max-width:none; margin-bottom:8px; padding:9px 10px; border-radius:12px; border:1px solid var(--border); background:#090d18; color:var(--text); }}
@@ -672,7 +689,7 @@ button:hover {{ background:#202c57; }}
 .admin-user-toast {{ position:fixed; right:18px; bottom:18px; z-index:1200; max-width:min(420px,calc(100vw - 36px)); padding:12px 14px; border-radius:14px; border:1px solid #5a2730; background:#2d1420; color:#ffd7df; box-shadow:0 18px 50px rgba(0,0,0,.38); font-weight:800; }}
 .admin-user-toast[data-kind='ok'] {{ border-color:#28533a; background:#10261b; color:#baf0cf; }}
 .admin-user-toast[hidden] {{ display:none; }}
-@media (max-width: 980px) {{ .user-card, .server-row-card, .center-shell, .center-workspace, .panel-shell, .helper-grid, .user-fields, .admin-messenger, .admin-users-grid, .admin-user-info-grid, .admin-user-actions, .admin-suggestions-shell, .admin-gif-shell {{ grid-template-columns:1fr; }} .user-actions, .server-actions {{ justify-content:flex-start; }} .admin-user-list-scroll {{ max-height:none; }} .admin-suggestion-side, .admin-gif-upload {{ position:static; }} }}
+@media (max-width: 980px) {{ .user-card, .server-row-card, .center-shell, .center-workspace, .panel-shell, .helper-grid, .user-fields, .admin-messenger, .admin-users-grid, .admin-user-info-grid, .admin-user-actions, .admin-suggestions-shell, .admin-gif-shell, .admin-download-shell {{ grid-template-columns:1fr; }} .user-actions, .server-actions {{ justify-content:flex-start; }} .admin-user-list-scroll {{ max-height:none; }} .admin-suggestion-side, .admin-gif-upload, .admin-download-upload {{ position:static; }} }}
 @media (max-width: 640px) {{ main.admin-main {{ padding:12px; }} header {{ padding:12px; }} .brand {{ font-size:22px; }} .search-row form {{ flex-direction:column; }} .search-row input[type=text], .search-row button {{ width:100%; }} .messenger-frame {{ margin-top:-62px; height:calc(100% + 62px); }} .admin-suggestion-action-form {{ flex-direction:column; }} .admin-suggestion-actions textarea, .admin-suggestion-actions button {{ width:100%; }} }}
 </style>
 </head>
@@ -2115,7 +2132,26 @@ async fn gifs_page(
     let embedded = q.embed == Some(1);
     let return_to = if embedded { "/admin/gifs?embed=1" } else { "/admin/gifs" };
 
-    let rows = sqlx::query(
+    let rows = fetch_admin_global_gifs(&st.db).await;
+
+    let body = render_admin_gifs_panel_body(&sess, &rows, return_to);
+
+    if embedded {
+        embedded_page("Админка • GIF", &body, q.msg.as_deref()).into_response()
+    } else {
+        page("Админка • GIF", &body, q.msg.as_deref()).into_response()
+    }
+}
+
+struct AdminGifRow {
+    id: i64,
+    original_name: String,
+    file_size: i64,
+    created_at: String,
+}
+
+async fn fetch_admin_global_gifs(db: &SqlitePool) -> Vec<AdminGifRow> {
+    sqlx::query(
         r#"
         SELECT id, original_name, file_size, created_at
         FROM gif_assets
@@ -2124,19 +2160,25 @@ async fn gifs_page(
         LIMIT 240
         "#,
     )
-    .fetch_all(&st.db)
+    .fetch_all(db)
     .await
-    .unwrap_or_default();
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| AdminGifRow {
+        id: r.get("id"),
+        original_name: r.get("original_name"),
+        file_size: r.get("file_size"),
+        created_at: r.get("created_at"),
+    })
+    .collect()
+}
 
+fn render_admin_gifs_panel_body(sess: &AdminSession, rows: &[AdminGifRow], return_to: &str) -> String {
     let cards = if rows.is_empty() {
         "<div class='empty-state'>Глобальных GIF пока нет. Загрузи первую анимацию слева.</div>".to_string()
     } else {
-        rows.into_iter()
+        rows.iter()
             .map(|r| {
-                let id: i64 = r.get("id");
-                let name: String = r.get("original_name");
-                let size: i64 = r.get("file_size");
-                let created_at: String = r.get("created_at");
                 format!(
                     r#"<div class='admin-gif-card'>
   <div class='admin-gif-thumb'><img src='/admin/gifs/{id}/raw' alt='{name}' loading='lazy'></div>
@@ -2152,10 +2194,10 @@ async fn gifs_page(
     </div>
   </div>
 </div>"#,
-                    id = id,
-                    name = escape_html(&name),
-                    size = escape_html(&admin_format_bytes(size)),
-                    created_at = escape_html(&fmt_admin_dt(&created_at)),
+                    id = r.id,
+                    name = escape_html(&r.original_name),
+                    size = escape_html(&admin_format_bytes(r.file_size)),
+                    created_at = escape_html(&fmt_admin_dt(&r.created_at)),
                     csrf = escape_html(&sess.csrf),
                     return_to = escape_html(return_to),
                 )
@@ -2164,7 +2206,7 @@ async fn gifs_page(
             .join("")
     };
 
-    let body = format!(
+    format!(
         r#"<div class='admin-gif-shell'>
   <aside class='admin-gif-upload'>
     <h2>Глобальные GIF</h2>
@@ -2183,13 +2225,7 @@ async fn gifs_page(
         csrf = escape_html(&sess.csrf),
         return_to = escape_html(return_to),
         cards = cards,
-    );
-
-    if embedded {
-        embedded_page("Админка • GIF", &body, q.msg.as_deref()).into_response()
-    } else {
-        page("Админка • GIF", &body, q.msg.as_deref()).into_response()
-    }
+    )
 }
 
 async fn admin_gif_upload(
@@ -2285,6 +2321,369 @@ async fn admin_gif_delete(
             admin_redirect_with_msg(&return_to, "GIF удалён из глобального списка").into_response()
         }
         Ok(_) => admin_redirect_with_msg(&return_to, "GIF не найден").into_response(),
+        Err(e) => admin_redirect_with_msg(&return_to, &format!("Ошибка: {e}")).into_response(),
+    }
+}
+
+#[derive(Clone)]
+struct AdminDownloadRow {
+    id: i64,
+    platform: String,
+    version: String,
+    original_name: String,
+    file_size: i64,
+    uploaded_at: String,
+    is_active: bool,
+}
+
+fn admin_download_platform(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "android" | "mobile" | "apk" => Some("android"),
+        "pc" | "windows" | "desktop" => Some("pc"),
+        _ => None,
+    }
+}
+
+fn admin_download_platform_label(platform: &str) -> &'static str {
+    match platform {
+        "android" => "Android APK",
+        "pc" => "ПК клиент",
+        _ => "Клиент",
+    }
+}
+
+fn admin_download_ext(original_name: &str, platform: &str) -> Option<String> {
+    let sanitized = admin_sanitize_filename(original_name);
+    let ext = std::path::Path::new(&sanitized)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    match platform {
+        "android" if ext == "apk" => Some(ext),
+        "pc" if matches!(ext.as_str(), "exe" | "msi" | "zip" | "7z" | "rar") => Some(ext),
+        _ => None,
+    }
+}
+
+fn admin_download_mime(ext: &str) -> &'static str {
+    match ext {
+        "apk" => "application/vnd.android.package-archive",
+        "exe" => "application/vnd.microsoft.portable-executable",
+        "msi" => "application/x-msi",
+        "zip" => "application/zip",
+        "7z" => "application/x-7z-compressed",
+        "rar" => "application/vnd.rar",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn fetch_admin_downloads(db: &SqlitePool) -> Vec<AdminDownloadRow> {
+    sqlx::query(
+        r#"
+        SELECT id, platform, version, original_name, file_size, uploaded_at, is_active
+        FROM app_downloads
+        ORDER BY platform ASC, is_active DESC, id DESC
+        LIMIT 80
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| AdminDownloadRow {
+        id: r.get("id"),
+        platform: r.get("platform"),
+        version: r.try_get("version").unwrap_or_default(),
+        original_name: r.try_get("original_name").unwrap_or_default(),
+        file_size: r.try_get("file_size").unwrap_or(0),
+        uploaded_at: r.try_get("uploaded_at").unwrap_or_default(),
+        is_active: r.try_get::<i64, _>("is_active").unwrap_or(0) != 0,
+    })
+    .collect()
+}
+
+fn render_admin_downloads_panel_body(sess: &AdminSession, rows: &[AdminDownloadRow], return_to: &str) -> String {
+    let cards = if rows.is_empty() {
+        "<div class='empty-state'>Загрузок пока нет. Загрузите APK или ПК клиент слева.</div>".to_string()
+    } else {
+        rows.iter()
+            .map(|r| {
+                let platform = admin_download_platform_label(&r.platform);
+                let active = if r.is_active { "Активна" } else { "Скрыта" };
+                let active_cls = if r.is_active { "status-active" } else { "" };
+                let download_link = if r.is_active {
+                    format!(
+                        "<a href='/api/downloads/{}/file' target='_blank' rel='noopener'>Скачать</a>",
+                        escape_html(&r.platform)
+                    )
+                } else {
+                    String::new()
+                };
+                let version_text = if r.version.trim().is_empty() { "без версии" } else { r.version.as_str() };
+                format!(
+                    r#"<div class='admin-download-card'>
+  <div class='admin-download-top'>
+    <div>
+      <div class='admin-download-title'>{platform}</div>
+      <div class='admin-download-meta'>{name}</div>
+    </div>
+    <span class='status-badge {active_cls}'>{active}</span>
+  </div>
+  <div class='admin-download-meta'>Версия: {version}</div>
+  <div class='admin-download-meta'>{size} • {uploaded_at}</div>
+  <div class='admin-download-actions'>
+    {download_link}
+    <form method='post' action='/admin/downloads/{id}/delete'>
+      <input type='hidden' name='csrf' value='{csrf}'>
+      <input type='hidden' name='return_to' value='{return_to}'>
+      <button type='submit' class='btn-danger'>Удалить</button>
+    </form>
+  </div>
+</div>"#,
+                    id = r.id,
+                    platform = escape_html(platform),
+                    name = escape_html(&r.original_name),
+                    version = escape_html(version_text),
+                    size = escape_html(&admin_format_bytes(r.file_size)),
+                    uploaded_at = escape_html(&fmt_admin_dt(&r.uploaded_at)),
+                    active = active,
+                    active_cls = active_cls,
+                    download_link = download_link,
+                    csrf = escape_html(&sess.csrf),
+                    return_to = escape_html(return_to),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
+
+    format!(
+        r#"<div class='admin-download-shell'>
+  <aside class='admin-download-upload'>
+    <h2>Загрузки приложения</h2>
+    <p class='small'>Файлы отсюда раздаются сервером на странице скачивания LaBerry. Новая загрузка заменяет активную версию выбранной платформы.</p>
+    <form method='post' action='/admin/downloads/upload' enctype='multipart/form-data'>
+      <input type='hidden' name='csrf' value='{csrf}'>
+      <input type='hidden' name='return_to' value='{return_to}'>
+      <label class='small'>Платформа</label>
+      <select name='platform' required>
+        <option value='android'>Android APK</option>
+        <option value='pc'>ПК клиент</option>
+      </select>
+      <label class='small'>Версия</label>
+      <input type='text' name='version' maxlength='64' placeholder='Например: 0.9.3'>
+      <input type='file' name='file' accept='.apk,.exe,.msi,.zip,.7z,.rar' required>
+      <button type='submit'>Загрузить</button>
+    </form>
+  </aside>
+  <section>
+    <div class='admin-download-grid'>{cards}</div>
+  </section>
+</div>"#,
+        csrf = escape_html(&sess.csrf),
+        return_to = escape_html(return_to),
+        cards = cards,
+    )
+}
+
+async fn downloads_page(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<MsgQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let embedded = q.embed == Some(1);
+    let return_to = if embedded { "/admin/downloads?embed=1" } else { "/admin/downloads" };
+    let rows = fetch_admin_downloads(&st.db).await;
+    let body = render_admin_downloads_panel_body(&sess, &rows, return_to);
+
+    if embedded {
+        embedded_page("Админка • Загрузки", &body, q.msg.as_deref()).into_response()
+    } else {
+        page("Админка • Загрузки", &body, q.msg.as_deref()).into_response()
+    }
+}
+
+async fn admin_download_upload(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let mut csrf = String::new();
+    let mut return_to = "/admin/downloads".to_string();
+    let mut platform_raw = "android".to_string();
+    let mut version = String::new();
+    let mut original_name = "laberry.apk".to_string();
+    let mut bytes: Option<Vec<u8>> = None;
+
+    loop {
+        let next = match multipart.next_field().await {
+            Ok(v) => v,
+            Err(_) => return admin_redirect_with_msg("/admin/downloads", "Некорректная форма загрузки").into_response(),
+        };
+        let Some(field) = next else { break; };
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "csrf" => csrf = field.text().await.unwrap_or_default(),
+            "return_to" => {
+                return_to = safe_admin_return_to(&field.text().await.unwrap_or_default(), "/admin/downloads");
+            }
+            "platform" => platform_raw = field.text().await.unwrap_or_else(|_| "android".to_string()),
+            "version" => version = field.text().await.unwrap_or_default().trim().chars().take(64).collect(),
+            "file" => {
+                original_name = field.file_name().unwrap_or("laberry.bin").to_string();
+                let data = match field.bytes().await {
+                    Ok(v) => v,
+                    Err(_) => return admin_redirect_with_msg("/admin/downloads", "Не удалось прочитать файл").into_response(),
+                };
+                bytes = Some(data.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    if csrf != sess.csrf {
+        return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
+    }
+
+    let Some(platform) = admin_download_platform(&platform_raw) else {
+        return admin_redirect_with_msg(&return_to, "Неизвестная платформа").into_response();
+    };
+    let Some(data) = bytes else {
+        return admin_redirect_with_msg(&return_to, "Файл не выбран").into_response();
+    };
+    if data.is_empty() {
+        return admin_redirect_with_msg(&return_to, "Файл пустой").into_response();
+    }
+    if data.len() > 512 * 1024 * 1024 {
+        return admin_redirect_with_msg(&return_to, "Файл слишком большой (максимум 512 МБ)").into_response();
+    }
+    let Some(ext) = admin_download_ext(&original_name, platform) else {
+        return admin_redirect_with_msg(&return_to, "Для Android нужен .apk, для ПК: .exe, .msi, .zip, .7z или .rar").into_response();
+    };
+
+    let storage_dir = PathBuf::from("storage/app_downloads");
+    if let Err(e) = fs::create_dir_all(&storage_dir).await {
+        return admin_redirect_with_msg(&return_to, &format!("Не удалось создать каталог: {e}")).into_response();
+    }
+    let stored_filename = format!("{}.{}", Uuid::new_v4(), ext);
+    let storage_path = storage_dir.join(stored_filename);
+    if let Err(e) = fs::write(&storage_path, &data).await {
+        return admin_redirect_with_msg(&return_to, &format!("Не удалось сохранить файл: {e}")).into_response();
+    }
+
+    let now = auth::now_iso();
+    let mime = admin_download_mime(&ext);
+    let storage_path_str = storage_path.to_string_lossy().to_string();
+    let mut tx = match st.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            let _ = fs::remove_file(&storage_path).await;
+            return admin_redirect_with_msg(&return_to, &format!("Ошибка БД: {e}")).into_response();
+        }
+    };
+
+    let res = async {
+        sqlx::query("UPDATE app_downloads SET is_active = 0 WHERE platform = ?")
+            .bind(platform)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO app_downloads(platform, version, original_name, mime_type, file_size, storage_path, uploaded_at, is_active)
+            VALUES(?, ?, ?, ?, ?, ?, ?, 1)
+            "#,
+        )
+        .bind(platform)
+        .bind(&version)
+        .bind(&original_name)
+        .bind(mime)
+        .bind(data.len() as i64)
+        .bind(&storage_path_str)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
+    }
+    .await;
+
+    match res {
+        Ok(_) => admin_redirect_with_msg(&return_to, "Файл приложения загружен").into_response(),
+        Err(e) => {
+            let _ = fs::remove_file(&storage_path).await;
+            admin_redirect_with_msg(&return_to, &format!("Ошибка: {e}")).into_response()
+        }
+    }
+}
+
+async fn admin_download_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Form(f): Form<ActionForm>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&headers) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let return_to = safe_admin_return_to(&f.return_to, "/admin/downloads");
+    if f.csrf != sess.csrf {
+        return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
+    }
+
+    let row = sqlx::query("SELECT storage_path FROM app_downloads WHERE id = ? LIMIT 1")
+        .bind(id)
+        .fetch_optional(&st.db)
+        .await
+        .ok()
+        .flatten();
+    let Some(row) = row else {
+        return admin_redirect_with_msg(&return_to, "Загрузка не найдена").into_response();
+    };
+    let storage_path: String = row.try_get("storage_path").unwrap_or_default();
+
+    let res = sqlx::query("DELETE FROM app_downloads WHERE id = ?")
+        .bind(id)
+        .execute(&st.db)
+        .await;
+
+    match res {
+        Ok(done) if done.rows_affected() > 0 => {
+            if !storage_path.trim().is_empty() {
+                let _ = fs::remove_file(PathBuf::from(storage_path)).await;
+            }
+            admin_redirect_with_msg(&return_to, "Загрузка удалена").into_response()
+        }
+        Ok(_) => admin_redirect_with_msg(&return_to, "Загрузка не найдена").into_response(),
         Err(e) => admin_redirect_with_msg(&return_to, &format!("Ошибка: {e}")).into_response(),
     }
 }
@@ -3346,7 +3745,10 @@ async fn center_page(
     if server_cards.is_empty() { server_cards.push_str("<div class='empty-state'>Серверы не найдены.</div>"); }
     let servers_panel = render_servers_panel_body("", &server_cards, true);
     let db_panel = render_db_panel_body(&sess, "/admin/center");
-    let gifs_panel = "<div class='panel-frame-wrap'><iframe class='panel-frame' src='/admin/gifs?embed=1' title='Глобальные GIF'></iframe></div>".to_string();
+    let gif_rows = fetch_admin_global_gifs(&st.db).await;
+    let gifs_panel = render_admin_gifs_panel_body(&sess, &gif_rows, "/admin/center?view=gifs");
+    let download_rows = fetch_admin_downloads(&st.db).await;
+    let downloads_panel = render_admin_downloads_panel_body(&sess, &download_rows, "/admin/center?view=downloads");
     let suggestion_status = normalized_suggestion_status(q.status.as_deref());
     let suggestions = fetch_suggestions(&st.db, suggestion_status, 120).await.unwrap_or_default();
     let suggestions_return_to = suggestions_page_url("/admin/center", true, suggestion_status);
@@ -3479,6 +3881,7 @@ async fn center_page(
     <button type='button' class='center-nav-item panel-switch' data-center-switch='suggestions'><strong>Предложения</strong><span class='small'>Идеи пользователей из настроек и быстрый просмотр статусов.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='servers'><strong>Серверы</strong><span class='small'>Проверка владельцев и удаление прямо внутри рабочей области.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='gifs'><strong>GIF</strong><span class='small'>Глобальный список анимированных стикеров для пользователей.</span></button>
+    <button type='button' class='center-nav-item panel-switch' data-center-switch='downloads'><strong>Загрузки</strong><span class='small'>APK и ПК клиент, которые сервер отдает на странице скачивания.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='db'><strong>База данных</strong><span class='small'>Сервисные действия и обслуживание без отдельной вкладки.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='messenger'><strong>Мессенджер</strong><span class='small'>Read-only поток и переключение чатов в той же странице.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='homie'><strong>Homie AI</strong><span class='small'>Личный агент только для админки.</span></button>
@@ -3496,13 +3899,14 @@ async fn center_page(
       <div class='panel-view' data-panel-view='suggestions' data-stage-title='Предложения' data-stage-sub='Идеи пользователей из настроек и статус их рассмотрения.'>{suggestions_panel}</div>
       <div class='panel-view' data-panel-view='servers' data-stage-title='Панель серверов' data-stage-sub='Проверка серверов и действия с ними в общей рабочей области.'>{servers_panel}</div>
       <div class='panel-view' data-panel-view='gifs' data-stage-title='Глобальные GIF' data-stage-sub='Анимированные стикеры, доступные всем пользователям.'>{gifs_panel}</div>
+      <div class='panel-view' data-panel-view='downloads' data-stage-title='Загрузки приложения' data-stage-sub='APK и ПК клиент, которые пользователи скачивают с сервера.'>{downloads_panel}</div>
       <div class='panel-view' data-panel-view='db' data-stage-title='Панель базы данных' data-stage-sub='Сервисные инструменты открываются здесь же, без переходов по страницам.'>{db_panel}</div>
       <div class='panel-view' data-panel-view='messenger' data-stage-title='Мессенджер внутри админки' data-stage-sub='Read-only поток сообщений и переключение чатов без второй вкладки браузера.'>{messenger_panel}</div>
       <div class='panel-view' data-panel-view='homie' data-stage-title='Homie AI' data-stage-sub='Локальный агент админ-панели.'>{homie_panel}</div>
     </div>
   </section>
 </div>"#,
-        overview_panel=overview_panel, users_panel=users_panel, suggestions_panel=suggestions_panel, servers_panel=servers_panel, gifs_panel=gifs_panel, db_panel=db_panel, messenger_panel=messenger_panel, homie_panel=homie_panel,
+        overview_panel=overview_panel, users_panel=users_panel, suggestions_panel=suggestions_panel, servers_panel=servers_panel, gifs_panel=gifs_panel, downloads_panel=downloads_panel, db_panel=db_panel, messenger_panel=messenger_panel, homie_panel=homie_panel,
     );
 
     page("Админка • Центр", &body, q.msg.as_deref()).into_response()

@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, delete},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,12 @@ use crate::middleware::auth_guard::AuthUser;
 #[derive(Deserialize)]
 pub struct CreateServerBody {
     pub name: String,
+    pub is_public: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateServerBody {
+    pub name: Option<String>,
     pub is_public: Option<bool>,
 }
 
@@ -529,7 +535,7 @@ pub fn router() -> Router<AppState> {
         .route("/:server_id/join", post(join))
         .route("/:server_id/join-request", post(create_join_request))
         .route("/:server_id/invite", post(invite_member))
-        .route("/:server_id", delete(delete_server))
+        .route("/:server_id", patch(update_server).delete(delete_server))
         .route("/:server_id/chats", get(list_chats).post(create_chat))
         .route("/:server_id/chats/:chat_id", delete(delete_chat))
         .route("/:server_id/members", get(list_members))
@@ -1252,6 +1258,73 @@ async fn list_members(
         .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(members)).into_response()
+}
+
+async fn update_server(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(server_id): Path<i64>,
+    Json(body): Json<UpdateServerBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let owner = sqlx::query_scalar::<_, i64>(
+        "SELECT owner_id FROM servers WHERE id = ? LIMIT 1",
+    )
+    .bind(server_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(owner_id) = owner else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    if owner_id != me.id {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    if let Some(name) = body.name {
+        let name = name.trim().chars().take(80).collect::<String>();
+        if name.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"detail":"server_name_required"})),
+            )
+                .into_response();
+        }
+        if sqlx::query("UPDATE servers SET name = ? WHERE id = ?")
+            .bind(&name)
+            .bind(server_id)
+            .execute(db)
+            .await
+            .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    if let Some(is_public) = body.is_public {
+        if sqlx::query("UPDATE servers SET is_public = ? WHERE id = ?")
+            .bind(if is_public { 1 } else { 0 })
+            .bind(server_id)
+            .execute(db)
+            .await
+            .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": server_id,
+            "status": "ok"
+        })),
+    )
+        .into_response()
 }
 
 async fn delete_server(

@@ -10,6 +10,7 @@ pub mod pages;
 pub mod messages;
 pub mod embeds;
 pub mod dms;
+pub mod downloads;
 pub mod sessions;
 pub mod rtc;
 

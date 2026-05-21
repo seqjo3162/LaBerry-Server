@@ -535,6 +535,28 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
         .execute(db)
         .await?;
 
+    // app_downloads: публичные сборки мобильного и ПК клиента, загружаемые из админ-панели
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS app_downloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            version TEXT NOT NULL DEFAULT '',
+            original_name TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            storage_path TEXT NOT NULL,
+            uploaded_at TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_app_downloads_platform_active ON app_downloads(platform, is_active, id);"#)
+        .execute(db)
+        .await?;
+
     // moderation_events: история действий модерации по пользователю
     sqlx::query(
         r#"

@@ -1,4 +1,4 @@
-import { api } from "./api.js?v=7";
+import { api } from "./api.js?v=8";
 import { openAvatarCropper } from "./avatar-cropper.js?v=7";
 import { wsManager } from "./websocket-manager.js?v=12";
 
@@ -10,6 +10,7 @@ const DEFAULT_SETTINGS = {
     show_header_status: false,
     compact_mode: false,
     show_timestamps: true,
+    show_send_button: false,
 
     // 0.8..1.3
     font_scale: 1.0,
@@ -46,6 +47,7 @@ function normalizeSettings(s) {
     v.show_header_status = false;
     v.compact_mode = !!v.compact_mode;
     v.show_timestamps = !!v.show_timestamps;
+    v.show_send_button = !!v.show_send_button;
 
     v.notify_desktop = !!v.notify_desktop;
     v.notify_sounds = !!v.notify_sounds;
@@ -116,6 +118,7 @@ function applyUiSettings(settings, applyТема) {
     document.body.classList.add('hide-header-status');
     document.body.classList.toggle('compact-mode', !!s.compact_mode);
     document.body.classList.toggle('hide-timestamps', !s.show_timestamps);
+    document.body.classList.toggle('show-send-button', !!s.show_send_button);
 
     // ui scale (like Discord zoom)
     try {
@@ -258,7 +261,10 @@ export function createSettingsUI(opts = {}) {
         overlay.dataset.bound = '1';
     };
 
-    const open = async () => {
+    const open = async (section) => {
+        if (typeof section === 'string' && section.trim()) {
+            activeSection = section.trim();
+        }
         overlay = mountOverlay();
         bindOverlay();
         overlay.classList.remove('hidden');
@@ -1421,6 +1427,22 @@ export function createSettingsUI(opts = {}) {
             </div>
           </div>
         `);
+        const messagesCard = overlay.querySelector('.settings-section .settings-card:last-child');
+        if (messagesCard && !overlay.querySelector('#showSendButton')) {
+            const sendButtonRow = document.createElement('div');
+            sendButtonRow.className = 'setting-row';
+            sendButtonRow.innerHTML = `
+                ${settingRow({
+                    title: 'Показывать кнопку отправки',
+                    help: 'Если выключено, сообщения отправляются клавишей Enter, а кнопка не занимает место в строке ввода.'
+                })}
+                <label class="switch">
+                  <input type="checkbox" id="showSendButton" ${s.show_send_button ? 'checked' : ''}>
+                  <span class="slider"></span>
+                </label>
+            `;
+            messagesCard.appendChild(sendButtonRow);
+        }
         bindSettingHelps();
 
         const themeSel = overlay.querySelector('#themeSel');
@@ -1443,6 +1465,7 @@ export function createSettingsUI(opts = {}) {
 
         bindToggle('#compactMode', 'compact_mode');
         bindToggle('#showTime', 'show_timestamps');
+        bindToggle('#showSendButton', 'show_send_button');
 
         const fs = overlay.querySelector('#fontScale');
         const fsVal = overlay.querySelector('#fontScaleVal');
@@ -1581,20 +1604,68 @@ export function createSettingsUI(opts = {}) {
         `);
     };
 
+    const suggestionStatusLabel = (status) => {
+        const s = (status || 'open').toString().toLowerCase();
+        if (s === 'reviewed') return 'Рассмотрено';
+        if (s === 'rejected') return 'Отклонено';
+        return 'Открыто';
+    };
+
+    const renderSuggestionTicketList = (tickets) => {
+        const list = Array.isArray(tickets) ? tickets : [];
+        if (!list.length) {
+            return '<div class="settings-ticket-empty">Пока нет тикетов. Отправьте первую идею выше.</div>';
+        }
+
+        return list.map((ticket) => {
+            const title = (ticket?.title || `Тикет #${ticket?.id || ''}`).toString().trim() || `Тикет #${ticket?.id || ''}`;
+            const note = (ticket?.admin_note || '').toString().trim();
+            return `
+              <article class="settings-ticket-card">
+                <div class="settings-ticket-head">
+                  <div>
+                    <div class="settings-ticket-title">${escapeHtml(title)}</div>
+                    <div class="settings-ticket-meta">#${escapeHtml(ticket?.id || '')} • ${escapeHtml(formatSessionTime(ticket?.created_at))}</div>
+                  </div>
+                  <span class="settings-ticket-status status-${escapeHtml(ticket?.status || 'open')}">${escapeHtml(suggestionStatusLabel(ticket?.status))}</span>
+                </div>
+                <div class="settings-ticket-message">${escapeHtml(ticket?.message || '')}</div>
+                <div class="settings-ticket-answer ${note ? '' : 'empty'}">
+                  <b>Ответ разработчика</b>
+                  <span>${escapeHtml(note || 'Ответа пока нет')}</span>
+                </div>
+              </article>
+            `;
+        }).join('');
+    };
+
     const renderAdvanced = async () => {
         setHeader('Дополнительные', 'Разработчик и обратная связь');
 
         const s = normalizeSettings(currentSettings);
+        let tickets = [];
+        try {
+            tickets = await api('/api/users/me/suggestions');
+        } catch (e) {
+            console.warn('[SETTINGS] suggestions list failed', e);
+        }
 
         setBody(`
           <div class="settings-section">
             <div class="settings-card">
               <h4>Предложение</h4>
-              <div class="muted settings-card-note">Этот пункт позволяет пользователям отправить свои идеи разработчику, а он, в свою очередь, рассмотрит идею.</div>
+              <div class="muted settings-card-note">Отправьте идею разработчику. После рассмотрения ответ появится в вашем тикете.</div>
               <div class="settings-suggestion-form">
                 <input class="inp" id="suggestionTitle" maxlength="80" placeholder="Короткий заголовок" autocomplete="off">
                 <textarea class="inp" id="suggestionMessage" rows="5" maxlength="2000" placeholder="Опишите идею"></textarea>
                 <button class="btn primary" id="sendSuggestion" type="button">Отправить предложение</button>
+              </div>
+              <div class="settings-slow-note">Медленный режим: одно предложение раз в 5 минут. Ограничение проверяет сервер.</div>
+            </div>
+            <div class="settings-card">
+              <h4>Мои тикеты</h4>
+              <div class="settings-ticket-list" id="suggestionTicketList">
+                ${renderSuggestionTicketList(tickets)}
               </div>
             </div>
             <div class="settings-card">
@@ -1644,9 +1715,15 @@ export function createSettingsUI(opts = {}) {
                 if (titleEl) titleEl.value = '';
                 if (messageEl) messageEl.value = '';
                 showInline('ok', 'Предложение отправлено');
+                await renderAdvanced();
             } catch (e) {
                 console.warn('[SETTINGS] suggestion failed', e);
-                showInline('err', e?.data?.detail || 'Не удалось отправить предложение');
+                const retry = Number(e?.data?.retry_after_sec || 0);
+                if (retry > 0) {
+                    showInline('err', `Медленный режим: попробуйте через ${Math.ceil(retry / 60)} мин.`);
+                } else {
+                    showInline('err', e?.data?.detail || 'Не удалось отправить предложение');
+                }
             } finally {
                 if (btn) btn.disabled = false;
             }

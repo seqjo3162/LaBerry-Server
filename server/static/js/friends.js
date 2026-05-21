@@ -31,8 +31,10 @@ export function initFriends() {
   const membersPanel = document.getElementById("membersPanel");
 
   const channelsTitle = channelsPanel?.querySelector(".panelHeader h3");
+  const dmHomeMenu = document.getElementById("dmHomeMenu");
   const dmList = document.getElementById("dmList");
   const channelsList = document.getElementById("channels-list");
+  const utilityView = document.getElementById("utilityView");
 
   const friendsList = document.getElementById("friendsList");
   const addFriendBtn = document.getElementById("addFriendBtn");
@@ -285,6 +287,7 @@ export function initFriends() {
 
     setHidden(chatView, true);
     setHidden(friendsView, false);
+    setHidden(utilityView, true);
 
     const friendsScroll = document.getElementById("friendsList") || document.getElementById("friendsItems") || friendsView;
     requestAnimationFrame(() => {
@@ -297,6 +300,7 @@ export function initFriends() {
     channelsPanel?.classList.add("dm-mode");
 
     setHidden(channelsList, true);
+    setHidden(dmHomeMenu, false);
     setHidden(dmList, false);
 
     try {
@@ -325,11 +329,13 @@ export function initFriends() {
 
     setHidden(friendsView, true);
     setHidden(chatView, false);
+    setHidden(utilityView, true);
 
     if (channelsTitle) channelsTitle.textContent = "Каналы";
     channelsPanel?.classList.remove("dm-mode");
 
     setHidden(dmList, true);
+    setHidden(dmHomeMenu, true);
     setHidden(channelsList, false);
 
     setHidden(membersPanel, false);

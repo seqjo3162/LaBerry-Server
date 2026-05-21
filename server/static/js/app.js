@@ -16,10 +16,10 @@ if (typeof fetch === 'undefined') {
     throw new Error('fetch not available');
 }
 
-import { api } from "./api.js?v=10";
-import { initFriends } from "./friends.js?v=9";
+import { api } from "./api.js?v=11";
+import { initFriends } from "./friends.js?v=10";
 import { wsManager } from "./websocket-manager.js?v=12";
-import { createSettingsUI } from "./settings.js?v=15";
+import { createSettingsUI } from "./settings.js?v=16";
 import { showUserMenu } from "./user-menu.js?v=10";
 import { initVoice } from "./voice.js?v=26";
 import { initProfileModal } from "./profile-modal.js?v=13";
@@ -50,6 +50,7 @@ const chatServerById = new Map(); // chat_id -> server_id
 const SERVER_MUTED_KEY = 'lb:muted_servers:v1';
 const DM_PROFILE_PANEL_HIDDEN_KEY = 'lb:dm_profile_panel_hidden:v1';
 const DM_CALL_FLOAT_CORNER_KEY = 'lb:dm_call_float_corner:v1';
+const APP_HOME_SEEN_KEY = 'lb:home_seen:v1';
 let mutedServerIds = new Set();
 let dmProfilePanelHidden = false;
 let activeDmCall = null;
@@ -869,10 +870,11 @@ function applyTheme(theme) {
     localStorage.setItem('theme', t === 'light' ? 'light' : 'dark');
 }
 
-async function openSettings() {
+async function openSettings(section) {
     try { hideChannelsMenu(); } catch (_) {}
     if (settingsUI) {
-        settingsUI.open();
+        const target = typeof section === 'string' ? section : undefined;
+        settingsUI.open(target);
     }
 }
 
@@ -1223,6 +1225,7 @@ function dmCallMetaForChat(chatId) {
     const meta = dmMetaByChatId.get(id) || hiddenDmMeta.get(id) || {};
     const otherName = (meta.otherName || chatNameById.get(id) || 'DM').toString();
     const otherId = Number(meta.otherId || 0);
+    const otherAvatarFileId = Number(meta.otherAvatarFileId || 0) || null;
     return { chatId: id, otherId, otherName };
 }
 
@@ -2482,89 +2485,250 @@ function buildServerMenuButtonLabel(server) {
     return isServerMuted(server?.id) ? 'Включить уведомления' : 'Отключить уведомления';
 }
 
+function getServerSettingsGroups(server) {
+    const name = (server?.name || 'seqjo ಥ_ಥ').toString();
+    return [
+        {
+            title: `СЕРВЕР ${name}`,
+            items: [
+                ['profile', 'Профиль сервера'],
+                ['tag', 'Тег сервера'],
+                ['engagement', 'Вовлечённость'],
+                ['boost', 'Бонусы буста'],
+            ],
+        },
+        {
+            title: 'РЕАКЦИИ',
+            items: [
+                ['emoji', 'Эмодзи'],
+                ['stickers', 'Стикеры'],
+                ['soundboard', 'Звуковая панель'],
+            ],
+        },
+        {
+            title: 'ЛЮДИ',
+            items: [
+                ['members', 'Участники'],
+                ['roles', 'Роли'],
+                ['invites', 'Приглашения'],
+                ['access', 'Доступ'],
+            ],
+        },
+        {
+            title: 'ПРИЛОЖЕНИЯ',
+            items: [
+                ['integrations', 'Интеграция'],
+                ['app-directory', 'Каталог приложений'],
+            ],
+        },
+        {
+            title: 'МОДЕРАЦИЯ',
+            items: [
+                ['safety', 'Настройка безопасности'],
+                ['audit', 'Журнал аудита'],
+                ['bans', 'Баны'],
+                ['automod', 'Автомод'],
+            ],
+        },
+        { title: '', items: [['community', 'Включить сообщество']] },
+        { title: '', items: [['template', 'Шаблон сервера'], ['delete', 'Удалить сервер']] },
+    ];
+}
+
+function renderServerSettingsContent(key, server) {
+    const name = (server?.name || 'Сервер').toString();
+    const letter = (name.trim().charAt(0) || 'S').toUpperCase();
+    const created = formatProfileDate(server?.created_at);
+    const publicLabel = server?.is_public === false ? 'Приватный' : 'Публичный';
+
+    if (key === 'profile') {
+        return `
+          <div class="server-settings-page-grid">
+            <section class="server-settings-main-section">
+              <h2>Профиль сервера</h2>
+              <p>Настройте отображение сервера в приглашениях, списках и карточках.</p>
+
+              <label class="field server-settings-field">
+                <span>Имя</span>
+                <input class="inp" id="serverSettingsNameInput" value="${escapeHtml(name)}" maxlength="80" autocomplete="off" />
+              </label>
+
+              <div class="server-settings-divider"></div>
+
+              <div class="server-settings-block-title">Значок</div>
+              <div class="server-settings-note">Рекомендуется изображение 512x512. Сейчас доступна буквенная заглушка.</div>
+              <button class="btn" type="button" data-act="server-icon-soon">Изменить значок сервера</button>
+
+              <div class="server-settings-divider"></div>
+
+              <div class="server-settings-block-title">Баннер</div>
+              <div class="server-banner-swatches">
+                ${['dark','pink','red','orange','yellow','purple','blue','mint','green','gray'].map((x) => `<button type="button" class="server-banner-swatch ${x}" data-banner="${x}" aria-label="${x}"></button>`).join('')}
+              </div>
+
+              <div class="server-settings-divider"></div>
+
+              <div class="server-settings-block-title">Особенности</div>
+              <div class="server-traits-grid">
+                <input class="inp" placeholder="🙂" />
+                <input class="inp" placeholder="🎮" />
+                <input class="inp" placeholder="🎧" />
+                <input class="inp" placeholder="💬" />
+                <input class="inp" placeholder="👥" />
+              </div>
+
+              <div class="server-settings-footer-actions">
+                <button class="btn btn-primary" type="button" data-act="save-profile">Сохранить</button>
+              </div>
+            </section>
+
+            <aside class="server-profile-preview">
+              <div class="server-profile-preview-banner"></div>
+              <div class="server-profile-preview-icon">${escapeHtml(letter)}</div>
+              <div class="server-profile-preview-name">${escapeHtml(name)}</div>
+              <div class="server-profile-preview-meta"><span class="online-dot"></span> 1 в сети • ${escapeHtml(publicLabel)}</div>
+              <div class="server-profile-preview-date">Дата основания: ${escapeHtml(created)}</div>
+              <div class="server-profile-preview-badges"><span>VRC</span><span>osu!</span><span>★</span></div>
+            </aside>
+          </div>
+        `;
+    }
+
+    const cardsByKey = {
+        tag: ['Тег сервера', 'Короткая метка рядом с названием сервера. Под неё позже можно добавить проверку уникальности.'],
+        engagement: ['Вовлечённость', 'Сводка активности, удержания участников и событий сервера.'],
+        boost: ['Бонусы буста', 'Уровни буста, улучшения качества и видимые бонусы сообщества.'],
+        emoji: ['Эмодзи', 'Глобальные и серверные эмодзи, лимиты и загрузка новых наборов.'],
+        stickers: ['Стикеры', 'Наборы стикеров сервера и правила их публикации.'],
+        soundboard: ['Звуковая панель', 'Короткие звуки для голосовых каналов и права на их запуск.'],
+        members: ['Участники', 'Список участников, роли, дата входа и модераторские действия.'],
+        roles: ['Роли', 'Иерархия ролей, цвета и права доступа к каналам.'],
+        invites: ['Приглашения', 'Активные ссылки, срок действия и ограничения по использованию.'],
+        access: ['Доступ', 'Права каналов, приватные зоны и правила видимости.'],
+        integrations: ['Интеграция', 'Подключённые сервисы, боты, webhooks и внешние аккаунты.'],
+        'app-directory': ['Каталог приложений', 'Подборка приложений, которые можно добавить на сервер.'],
+        safety: ['Настройка безопасности', 'Фильтры входящих, защита от рейдов и базовые ограничения.'],
+        audit: ['Журнал аудита', 'История административных действий: кто, что и когда изменил.'],
+        bans: ['Баны', 'Список забаненных пользователей и причины блокировок.'],
+        automod: ['Автомод', 'Фильтры ключевых слов, спама и массовых упоминаний.'],
+        community: ['Включить сообщество', 'Переход к community-режиму, онбординг, правила и экран приветствия.'],
+        template: ['Шаблон сервера', 'Создание шаблона с текущей структурой каналов и базовыми настройками.'],
+    };
+
+    if (key === 'delete') {
+        return `
+          <section class="server-settings-main-section danger-page">
+            <h2>Удалить сервер</h2>
+            <p>Это действие удалит каналы, сообщения, файлы и участников сервера.</p>
+            <button class="btn btn-danger" type="button" data-act="delete-server">Удалить сервер</button>
+          </section>
+        `;
+    }
+
+    const [title, text] = cardsByKey[key] || ['Настройки', 'Раздел будет наполнен логикой позже.'];
+    return `
+      <section class="server-settings-main-section">
+        <h2>${escapeHtml(title)}</h2>
+        <p>${escapeHtml(text)}</p>
+        <div class="server-settings-info-grid">
+          <div class="server-settings-info-card"><b>Состояние</b><span>Заготовка интерфейса</span></div>
+          <div class="server-settings-info-card"><b>Доступ</b><span>${canManageChannels(server?.id) ? 'Владелец сервера' : 'Только просмотр'}</span></div>
+          <div class="server-settings-info-card"><b>Сервер</b><span>${escapeHtml(name)}</span></div>
+        </div>
+      </section>
+    `;
+}
+
 function openServerSettingsModal(server) {
     closeAnyServerMenu();
     const sid = Number(server?.id);
     if (!Number.isFinite(sid) || sid <= 0) return;
 
     const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    const muted = isServerMuted(sid);
+    overlay.className = 'modal-overlay server-settings-overlay';
+    const groups = getServerSettingsGroups(server);
     overlay.innerHTML = `
-      <div class="modal server-settings-modal" role="dialog" aria-modal="true">
-        <div class="modal-header">
-          <div class="modal-title">Настройки сервера</div>
-          <button class="modal-close" type="button">✕</button>
-        </div>
-        <div class="modal-body server-settings-body">
-          <div class="server-settings-head">
-            <div class="server-settings-avatar">${escapeHtml(((server?.name || 'S').toString().trim().charAt(0) || 'S').toUpperCase())}</div>
-            <div class="server-settings-meta">
-              <div class="server-settings-name">${escapeHtml((server?.name || 'Сервер').toString())}</div>
-              <div class="server-settings-sub">Быстрые действия и локальные настройки.</div>
+      <div class="server-settings-workspace" role="dialog" aria-modal="true">
+        <aside class="server-settings-nav">
+          ${groups.map((group) => `
+            <div class="server-settings-nav-group">
+              ${group.title ? `<div class="server-settings-nav-title">${escapeHtml(group.title)}</div>` : ''}
+              ${group.items.map(([key, label]) => `
+                <button class="server-settings-nav-item ${key === 'profile' ? 'active' : ''} ${key === 'delete' ? 'danger' : ''}" type="button" data-settings-tab="${escapeHtml(key)}">${escapeHtml(label)}</button>
+              `).join('')}
             </div>
-          </div>
-
-          <div class="server-settings-section">
-            <div class="server-settings-row">
-              <div>
-                <div class="server-settings-label">Уведомления</div>
-                <div class="server-settings-note">Только для этого устройства.</div>
-              </div>
-              <button class="btn ${muted ? '' : 'btn-primary'}" type="button" data-act="toggle-notify">${muted ? 'Включить' : 'Отключить'}</button>
-            </div>
-          </div>
-
-          ${canManageChannels(sid) ? `
-          <div class="server-settings-section">
-            <div class="server-settings-title">Управление каналами</div>
-            <div class="server-settings-actions-grid">
-              <button class="btn" type="button" data-act="create-text">Создать текстовый канал</button>
-              <button class="btn" type="button" data-act="create-voice">Создать голосовой канал</button>
-            </div>
-          </div>
-
-          <div class="server-settings-section danger">
-            <div class="server-settings-title">Опасная зона</div>
-            <button class="btn btn-danger" type="button" data-act="delete-server">Удалить сервер</button>
-          </div>
-          ` : ''}
-        </div>
+          `).join('')}
+        </aside>
+        <main class="server-settings-content">
+          <div class="server-settings-content-inner" id="serverSettingsContent"></div>
+        </main>
+        <button class="server-settings-close" type="button" title="Закрыть"><span>✕</span><small>ESC</small></button>
       </div>`;
 
     const close = () => overlay.remove();
+    overlay.querySelector('.server-settings-close')?.addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-    overlay.querySelector('.modal-close')?.addEventListener('click', close);
 
-    overlay.querySelector('[data-act="toggle-notify"]')?.addEventListener('click', () => {
-        const nowMuted = toggleServerMuted(sid);
-        close();
-        showToast(nowMuted ? 'Уведомления сервера отключены' : 'Уведомления сервера включены');
-    });
+    let active = 'profile';
+    const content = overlay.querySelector('#serverSettingsContent');
+    const render = () => {
+        if (!content) return;
+        content.innerHTML = renderServerSettingsContent(active, server);
+        wireServerSettingsContent();
+    };
 
-    overlay.querySelector('[data-act="create-text"]')?.addEventListener('click', async () => {
-        close();
-        await createChannelForServer(sid, 'text');
-    });
+    const wireServerSettingsContent = () => {
+        content?.querySelector('[data-act="save-profile"]')?.addEventListener('click', async () => {
+            const nextName = (content.querySelector('#serverSettingsNameInput')?.value || '').toString().trim();
+            if (!nextName) {
+                showToast('Введите название сервера');
+                return;
+            }
+            try {
+                await api(`/api/servers/${sid}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ name: nextName }),
+                });
+                server.name = nextName;
+                lastServersSnapshot = (Array.isArray(lastServersSnapshot) ? lastServersSnapshot : []).map((s) => {
+                    if (Number(s?.id) === sid) return { ...s, name: nextName };
+                    return s;
+                });
+                renderServers(lastServersSnapshot);
+                showToast('Профиль сервера сохранён');
+                render();
+            } catch (err) {
+                console.warn('[UI] save server profile failed', err);
+                showToast('Не удалось сохранить сервер');
+            }
+        });
 
-    overlay.querySelector('[data-act="create-voice"]')?.addEventListener('click', async () => {
-        close();
-        await createChannelForServer(sid, 'voice');
-    });
+        content?.querySelector('[data-act="server-icon-soon"]')?.addEventListener('click', () => {
+            showToast('Загрузка значка сервера будет добавлена отдельно');
+        });
 
-    overlay.querySelector('[data-act="delete-server"]')?.addEventListener('click', async () => {
-        close();
-        if (!confirm(`Удалить сервер «${(server?.name || 'сервер').toString()}»?`)) return;
-        try {
-            await api(`/api/servers/${sid}`, { method: 'DELETE' });
-            window.location.reload();
-        } catch (err) {
-            console.warn('[UI] delete server failed', err);
-            showToast('Не удалось удалить сервер');
-        }
+        content?.querySelector('[data-act="delete-server"]')?.addEventListener('click', async () => {
+            if (!confirm(`Удалить сервер «${(server?.name || 'сервер').toString()}»?`)) return;
+            try {
+                await api(`/api/servers/${sid}`, { method: 'DELETE' });
+                window.location.reload();
+            } catch (err) {
+                console.warn('[UI] delete server failed', err);
+                showToast('Не удалось удалить сервер');
+            }
+        });
+    };
+
+    overlay.querySelectorAll('[data-settings-tab]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            active = btn.dataset.settingsTab || 'profile';
+            overlay.querySelectorAll('[data-settings-tab]').forEach((x) => x.classList.toggle('active', x === btn));
+            render();
+        });
     });
 
     document.body.appendChild(overlay);
+    render();
 }
 
 
@@ -2586,6 +2750,7 @@ function openServerQuickMenu(server, anchorEl) {
     closeAnyServerMenu();
     const sid = Number(server?.id);
     if (!Number.isFinite(sid) || sid <= 0 || !anchorEl) return;
+    const canManage = canManageChannels(sid);
 
     const backdrop = document.createElement('button');
     backdrop.type = 'button';
@@ -2594,24 +2759,113 @@ function openServerQuickMenu(server, anchorEl) {
 
     const pop = document.createElement('div');
     pop.className = 'server-menu-popover';
+    const item = (label, icon, act) => `
+      <button type="button" class="server-menu-item" data-act="${escapeHtml(act)}">
+        <span>${escapeHtml(label)}</span><span class="server-menu-ic">${escapeHtml(icon)}</span>
+      </button>`;
     pop.innerHTML = `
-      <button type="button" class="server-menu-item" data-act="toggle-notify">${escapeHtml(buildServerMenuButtonLabel(server))}</button>
-      ${canManageChannels(sid) ? `<button type="button" class="server-menu-item" data-act="settings">Настройки сервера</button>` : ''}
+      ${item('Буст сервера', '◇', 'boost')}
+      <div class="server-menu-divider"></div>
+      ${item('Пригласить на сервер', '👥', 'invite')}
+      ${canManage ? item('Настройки сервера', '⚙', 'settings') : ''}
+      ${canManage ? item('Создать канал', '＋', 'create-channel') : ''}
+      ${canManage ? item('Создать категорию', '▣', 'create-category') : ''}
+      ${canManage ? item('Создать событие', '▤', 'create-event') : ''}
+      ${item('Каталог приложений', '✦', 'app-directory')}
+      <div class="server-menu-divider"></div>
+      ${item('Параметры уведомлений', '🔔', 'toggle-notify')}
+      ${item('Настройки конфиденциальности', '◇', 'privacy')}
+      <div class="server-menu-divider"></div>
+      ${item('Редактировать личный профиль', '✎', 'profile')}
+      ${item('Скрыть заглушённые каналы', '□', 'hide-muted')}
+      <div class="server-menu-divider"></div>
+      ${item('Копировать ID сервера', 'ID', 'copy-id')}
     `;
 
     const rect = anchorEl.getBoundingClientRect();
     pop.style.top = `${Math.round(rect.bottom + 8)}px`;
-    pop.style.left = `${Math.round(Math.max(12, rect.right - 220))}px`;
+    pop.style.left = `${Math.round(Math.max(12, rect.right - 260))}px`;
 
     backdrop.addEventListener('click', closeAnyServerMenu);
-    pop.querySelector('[data-act="toggle-notify"]')?.addEventListener('click', () => {
-        const nowMuted = toggleServerMuted(sid);
+    pop.addEventListener('click', async (e) => {
+        const btn = e.target?.closest?.('[data-act]');
+        if (!btn) return;
+        const act = btn.dataset.act;
+
+        if (act === 'toggle-notify') {
+            const nowMuted = toggleServerMuted(sid);
+            closeAnyServerMenu();
+            showToast(nowMuted ? 'Уведомления сервера отключены' : 'Уведомления сервера включены');
+            return;
+        }
+
+        if (act === 'settings') {
+            closeAnyServerMenu();
+            openServerSettingsModal(server);
+            return;
+        }
+
+        if (act === 'boost') {
+            closeAnyServerMenu();
+            openUtilityPanel('subscription', { mode: 'server' });
+            return;
+        }
+
+        if (act === 'invite') {
+            closeAnyServerMenu();
+            const username = await askTextModal({
+                title: 'Пригласить на сервер',
+                label: 'Ник пользователя',
+                placeholder: 'username',
+                okText: 'Пригласить',
+                cancelText: 'Отмена',
+            });
+            if (!username) return;
+            try {
+                await api(`/api/servers/${sid}/invite`, {
+                    method: 'POST',
+                    body: JSON.stringify({ username }),
+                });
+                showToast('Приглашение отправлено');
+            } catch (err) {
+                console.warn('[UI] invite failed', err);
+                showToast('Не удалось отправить приглашение');
+            }
+            return;
+        }
+
+        if (act === 'create-channel') {
+            closeAnyServerMenu();
+            createChannelFlow();
+            return;
+        }
+
+        if (act === 'app-directory') {
+            closeAnyServerMenu();
+            openUtilityPanel('store');
+            return;
+        }
+
+        if (act === 'copy-id') {
+            closeAnyServerMenu();
+            try {
+                await navigator.clipboard?.writeText?.(String(sid));
+                showToast('ID сервера скопирован');
+            } catch (_) {
+                showToast(`ID сервера: ${sid}`);
+            }
+            return;
+        }
+
         closeAnyServerMenu();
-        showToast(nowMuted ? 'Уведомления сервера отключены' : 'Уведомления сервера включены');
-    });
-    pop.querySelector('[data-act="settings"]')?.addEventListener('click', () => {
-        closeAnyServerMenu();
-        openServerSettingsModal(server);
+        const messages = {
+            'create-category': 'Категории каналов будут добавлены отдельной моделью данных',
+            'create-event': 'События сервера будут добавлены отдельным разделом',
+            privacy: 'Настройки конфиденциальности сервера пока как заготовка',
+            profile: 'Личный профиль на сервере будет подключён к профилю пользователя',
+            'hide-muted': 'Скрытие заглушённых каналов будет добавлено после статусов каналов',
+        };
+        showToast(messages[act] || 'Раздел будет добавлен позже');
     });
 
     document.body.appendChild(backdrop);
@@ -3040,9 +3294,7 @@ function renderChannels(chats) {
         const hasUnread = !isVoice && Number.isFinite(unread) && unread > 0;
 
         // IMPORTANT: last message preview should NOT be shown in public server channels.
-        const subText = isVoice
-            ? 'Голосовой канал'
-            : (chat.description || 'Канал');
+        const subText = (chat.description || '').toString().trim();
 
         const delBtn = canManage ? `<button class="channel-del" type="button" title="Удалить канал">🗑</button>` : '';
 
@@ -3053,7 +3305,7 @@ function renderChannels(chats) {
                   <span class="title-text">${escapeHtml(chat.name || '')}</span>
                   ${hasUnread ? `<span class="badge-unread" title="Непрочитано">${unread > 99 ? '99+' : unread}</span>` : ''}
                 </div>
-                <div class="sub">${escapeHtml(subText)}</div>
+                ${subText ? `<div class="sub">${escapeHtml(subText)}</div>` : ''}
                 ${isVoice ? `<div class="voice-users" hidden></div>` : ''}
             </div>
             ${delBtn}
@@ -3372,15 +3624,19 @@ document.addEventListener('lb:voiceJoined', (ev) => {
 function setUiModeServer() {
     const channelsPanel = document.getElementById('channelsPanel');
     const channelsTitle = channelsPanel?.querySelector('.panelHeader h3');
+    const dmHomeMenu = document.getElementById('dmHomeMenu');
     const dmList = document.getElementById('dmList');
     const channelsList = document.getElementById('channels-list');
     const membersPanel = document.getElementById('membersPanel');
+    const utilityView = document.getElementById('utilityView');
 
     if (channelsTitle) channelsTitle.textContent = 'Каналы';
     channelsPanel?.classList.remove('dm-mode');
 
+    if (dmHomeMenu) dmHomeMenu.hidden = true;
     if (dmList) dmList.hidden = true;
     if (channelsList) channelsList.hidden = false;
+    if (utilityView) utilityView.hidden = true;
     if (membersPanel) membersPanel.hidden = false;
     document.body.classList.remove('dm-profile-panel-hidden');
     syncDmProfilePanelButtons();
@@ -3391,6 +3647,7 @@ function setUiModeServer() {
 function setUiModeDm() {
     const channelsPanel = document.getElementById('channelsPanel');
     const channelsTitle = channelsPanel?.querySelector('.panelHeader h3');
+    const dmHomeMenu = document.getElementById('dmHomeMenu');
     const dmList = document.getElementById('dmList');
     const channelsList = document.getElementById('channels-list');
     const membersPanel = document.getElementById('membersPanel');
@@ -3399,6 +3656,7 @@ function setUiModeDm() {
     channelsPanel?.classList.add('dm-mode');
 
     if (channelsList) channelsList.hidden = true;
+    if (dmHomeMenu) dmHomeMenu.hidden = false;
     if (dmList) dmList.hidden = false;
     // On desktop keep the DM profile visible unless the user collapsed it.
     if (membersPanel) membersPanel.hidden = isTouchUi();
@@ -3408,6 +3666,439 @@ function setUiModeDm() {
     applyDmProfilePanelVisibility();
 
     try { updateChannelAdminUi(); } catch (_) {}
+}
+
+function setDmHomeActive(tab) {
+    const key = (tab || '').toString();
+    document.querySelectorAll('.dm-home-item').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.dmTab === key);
+    });
+}
+
+function hideUtilityView() {
+    const utilityView = document.getElementById('utilityView');
+    if (utilityView) utilityView.hidden = true;
+}
+
+function renderHomeUtility() {
+    return `
+      <section class="utility-shell home-shell">
+        <div class="utility-hero">
+          <div>
+            <div class="utility-kicker">LaBerry</div>
+            <h2>Начальная страница</h2>
+            <p>Быстрый вход в основные разделы: личные сообщения, предложения, загрузки клиента, магазин и задания.</p>
+          </div>
+        </div>
+        <div class="utility-grid">
+          <button class="utility-card utility-action-card" type="button" data-home-action="friends"><div class="utility-card-ic">👥</div><h3>Друзья</h3><p>Открыть список друзей и личные сообщения.</p></button>
+          <button class="utility-card utility-action-card" type="button" data-home-action="downloads"><div class="utility-card-ic">⬇</div><h3>Скачать клиент</h3><p>Мобильная версия и ПК клиент загружаются прямо с сервера.</p></button>
+          <button class="utility-card utility-action-card" type="button" data-home-action="suggestions"><div class="utility-card-ic">✎</div><h3>Предложения</h3><p>Тикеты с идеями и ответы разработчика находятся в настройках.</p></button>
+        </div>
+      </section>
+    `;
+}
+
+function utilityPlanCard(name, price, tone, lines) {
+    const list = (Array.isArray(lines) ? lines : [])
+        .map((line) => `<li>${escapeHtml(line)}</li>`)
+        .join('');
+    return `
+      <button class="subscription-plan ${tone || ''}" type="button" data-plan="${escapeHtml(name)}">
+        <span class="subscription-plan-name">${escapeHtml(name)}</span>
+        <span class="subscription-plan-price">${escapeHtml(price)}</span>
+        <ul>${list}</ul>
+      </button>
+    `;
+}
+
+function formatDownloadSize(size) {
+    const n = Number(size || 0);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    if (n >= 1024 * 1024 * 1024) return `${(n / (1024 * 1024 * 1024)).toFixed(1)} ГБ`;
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} МБ`;
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} КБ`;
+    return `${n} Б`;
+}
+
+function renderDownloadsUtility(items = null) {
+    const list = Array.isArray(items) ? items : [];
+    const byPlatform = new Map(list.map((item) => [item?.platform, item]));
+    const cards = ['android', 'pc'].map((platform) => {
+        const item = byPlatform.get(platform) || {};
+        const title = item.title || (platform === 'android' ? 'Мобильная версия' : 'ПК клиент');
+        const sub = item.available
+            ? `${item.version ? `Версия ${item.version}` : 'Сборка доступна'}${item.file_size ? ` • ${formatDownloadSize(item.file_size)}` : ''}`
+            : 'Сборка ещё не загружена в админ-панели';
+        return `
+          <div class="download-card ${item.available ? '' : 'disabled'}">
+            <div class="download-card-ic">${platform === 'android' ? 'APK' : 'PC'}</div>
+            <div class="download-card-main">
+              <h3>${escapeHtml(title)}</h3>
+              <p>${escapeHtml(sub)}</p>
+              ${item.original_name ? `<div class="download-file-name">${escapeHtml(item.original_name)}</div>` : ''}
+            </div>
+            ${item.available && item.download_url
+                ? `<a class="btn btn-primary" href="${escapeHtml(item.download_url)}" download>Скачать</a>`
+                : '<button class="btn" type="button" disabled>Недоступно</button>'}
+          </div>
+        `;
+    }).join('');
+
+    return `
+      <section class="utility-shell downloads-shell">
+        <div class="utility-hero compact">
+          <div>
+            <div class="utility-kicker">Загрузки</div>
+            <h2>Скачать LaBerry</h2>
+            <p>Выберите мобильную версию или ПК клиент. Файлы публикуются из админ-панели и отдаются сервером.</p>
+          </div>
+        </div>
+        <div class="download-list">${items === null ? '<div class="muted">Загрузка...</div>' : cards}</div>
+      </section>
+    `;
+}
+
+async function loadDownloadsUtility(utilityView) {
+    try {
+        const items = await api('/api/downloads/');
+        utilityView.innerHTML = renderDownloadsUtility(items);
+    } catch (e) {
+        console.warn('[DOWNLOADS] load failed', e);
+        utilityView.innerHTML = renderDownloadsUtility([]);
+        showToast('Не удалось загрузить список сборок');
+    }
+}
+
+function subscriptionServerOptionsHtml() {
+    const servers = (Array.isArray(lastServersSnapshot) ? lastServersSnapshot : [])
+        .filter((server) => Number(server?.id) > 0);
+
+    if (!servers.length) {
+        return '<option value="">Нет доступных серверов</option>';
+    }
+
+    return servers
+        .map((server) => `<option value="${Number(server.id)}">${escapeHtml(server.name || `Сервер ${server.id}`)}</option>`)
+        .join('');
+}
+
+function renderSubscriptionUtility(mode = 'personal') {
+    const isServer = mode === 'server';
+    const checkoutBody = isServer
+        ? `
+            <label class="subscription-field">
+              <span>Сервер для поддержки</span>
+              <select class="inp" id="subscriptionServerSelect">
+                ${subscriptionServerOptionsHtml()}
+              </select>
+            </label>
+            <button class="btn btn-primary" type="button" id="subscriptionPayBtn">Поддержать</button>
+          `
+        : `
+            <label class="subscription-option"><input type="radio" name="subTarget" value="self" checked /> <span>Купить себе</span></label>
+            <label class="subscription-option"><input type="radio" name="subTarget" value="gift" /> <span>Подарить подписку</span></label>
+            <input class="inp" id="subscriptionGiftInput" placeholder="Ник получателя подарка" autocomplete="off" hidden />
+            <button class="btn btn-primary" type="button" id="subscriptionPayBtn">Перейти к оплате</button>
+          `;
+    return `
+      <section class="utility-shell subscription-shell">
+        <div class="utility-hero">
+          <div>
+            <div class="utility-kicker">Подписка</div>
+            <h2>${isServer ? 'Поддержать сервер' : 'Личная подписка'}</h2>
+            <p>${isServer
+                ? 'Помощь серверу, бусты и видимые бонусы для сообщества будут подключаться через платежный backend.'
+                : 'Выберите план для себя или подготовьте подарок другому пользователю.'}</p>
+          </div>
+          <div class="subscription-switch">
+            <button class="${isServer ? 'active' : ''}" type="button" data-sub-mode="server">Поддержать сервер</button>
+            <button class="${!isServer ? 'active' : ''}" type="button" data-sub-mode="personal">Личная подписка</button>
+          </div>
+        </div>
+
+        <div class="subscription-layout">
+          <div class="subscription-plans">
+            ${utilityPlanCard('Berry Lite', '149 ₽ / мес', '', ['Расширенные реакции', 'Акцент профиля', 'Бейдж подписчика'])}
+            ${utilityPlanCard('Berry Plus', '299 ₽ / мес', 'featured', ['GIF-избранное без лимита', 'Подарочные месяцы', 'Приоритетные функции'])}
+            ${utilityPlanCard('Berry Ultra', '599 ₽ / мес', '', ['Буст сервера', 'Расширенные темы', 'Ранний доступ'])}
+          </div>
+
+          <div class="subscription-checkout-card">
+            <div class="subscription-checkout-title">${isServer ? 'Поддержка сервера' : 'Оформление'}</div>
+            ${checkoutBody}
+            <div class="subscription-payment-methods">
+              <label class="subscription-option"><input type="radio" name="paymentMethod" value="qr" checked /> <span>Оплата по QR-Code</span></label>
+              <label class="subscription-option"><input type="radio" name="paymentMethod" value="card" /> <span>Карта через провайдера</span></label>
+            </div>
+            <div class="subscription-qr-box" id="subscriptionQrBox">
+              <div class="subscription-qr-mark">QR</div>
+              <span>Безопасный сценарий: код открывает платёжную страницу провайдера, данные карты не попадают в мессенджер.</span>
+            </div>
+            <label class="subscription-save-pay">
+              <input type="checkbox" id="subscriptionSavePayment" />
+              <span>Оставить платёжные данные в браузере</span>
+            </label>
+            <div class="subscription-danger-note" id="subscriptionPaymentWarning" hidden>
+              Осторожно: сейчас сервер не имеет полноценной защиты для хранения платёжных данных. При входе в ваш аккаунт данные могут быть украдены. Безопаснее использовать QR-Code и не сохранять карту.
+            </div>
+            <div class="subscription-note">Сейчас это интерфейсная заготовка. Реальное списание нужно подключать через платежного провайдера и webhook-подтверждение.</div>
+          </div>
+        </div>
+      </section>
+    `;
+}
+
+function renderStoreUtility() {
+    return `
+      <section class="utility-shell">
+        <div class="utility-hero compact">
+          <div>
+            <div class="utility-kicker">Магазин</div>
+            <h2>Оформление, GIF и бонусы</h2>
+            <p>Место для визуальных тем, наборов GIF, бейджей и серверных улучшений.</p>
+          </div>
+        </div>
+        <div class="utility-grid">
+          <div class="utility-card"><div class="utility-card-ic">GIF</div><h3>Наборы GIF</h3><p>Глобальные коллекции и личные подборки.</p></div>
+          <div class="utility-card"><div class="utility-card-ic">★</div><h3>Бейджи</h3><p>Видимые отметки профиля без лишней нагрузки на чат.</p></div>
+          <div class="utility-card"><div class="utility-card-ic">▣</div><h3>Темы</h3><p>Аккуратные темы интерфейса для тёмного режима.</p></div>
+        </div>
+      </section>
+    `;
+}
+
+function renderQuestsUtility() {
+    return `
+      <section class="utility-shell">
+        <div class="utility-hero compact">
+          <div>
+            <div class="utility-kicker">Задания</div>
+            <h2>Активности и награды</h2>
+            <p>Ежедневные задачи, приглашения друзей и серверные цели можно будет подключить к системе наград.</p>
+          </div>
+        </div>
+        <div class="quests-list">
+          <div class="quest-row"><span>01</span><div><b>Отправить первое сообщение</b><small>Награда: 10 ягод</small></div><button class="btn" type="button">В процессе</button></div>
+          <div class="quest-row"><span>02</span><div><b>Добавить GIF в избранное</b><small>Награда: бейдж активности</small></div><button class="btn" type="button">Открыть</button></div>
+          <div class="quest-row"><span>03</span><div><b>Пригласить друга</b><small>Награда: бонус профиля</small></div><button class="btn" type="button">Открыть</button></div>
+        </div>
+      </section>
+    `;
+}
+
+function openUtilityPanel(tab, opts = {}) {
+    const utilityView = document.getElementById('utilityView');
+    const chatView = document.getElementById('chatView');
+    const friendsView = document.getElementById('friendsView');
+    const membersPanel = document.getElementById('membersPanel');
+    if (!utilityView) return;
+
+    currentServerId = null;
+    updateServerSelection(null);
+    closeAnyServerMenu();
+    if (typeof window.closeFriends === 'function') {
+        try { window.closeFriends({ clearHash: true }); } catch (_) {}
+    }
+    setUiModeDm();
+    setDmHomeActive(tab);
+
+    if (chatView) chatView.hidden = true;
+    if (friendsView) friendsView.hidden = true;
+    if (membersPanel) membersPanel.hidden = true;
+    utilityView.hidden = false;
+
+    if (tab === 'home') {
+        utilityView.innerHTML = renderHomeUtility();
+        utilityView.querySelectorAll('[data-home-action]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const action = btn.dataset.homeAction || '';
+                if (action === 'friends') openDmHomeTab('friends');
+                if (action === 'downloads') openUtilityPanel('downloads');
+                if (action === 'suggestions') openSettings('advanced');
+            });
+        });
+    } else if (tab === 'downloads') {
+        utilityView.innerHTML = renderDownloadsUtility(null);
+        loadDownloadsUtility(utilityView).catch(() => {});
+    } else if (tab === 'subscription') {
+        utilityView.innerHTML = renderSubscriptionUtility(opts.mode || 'personal');
+        utilityView.querySelectorAll('[data-sub-mode]')?.forEach?.((btn) => {
+            btn.addEventListener('click', () => {
+                openUtilityPanel('subscription', { mode: btn.dataset.subMode || 'personal' });
+            });
+        });
+        utilityView.querySelectorAll('.subscription-plan').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                utilityView.querySelectorAll('.subscription-plan').forEach((x) => x.classList.remove('selected'));
+                btn.classList.add('selected');
+            });
+        });
+        const syncGiftInput = () => {
+            const target = utilityView.querySelector('input[name="subTarget"]:checked')?.value || 'self';
+            const giftInput = utilityView.querySelector('#subscriptionGiftInput');
+            if (giftInput) {
+                giftInput.hidden = target !== 'gift';
+                if (target !== 'gift') giftInput.value = '';
+            }
+        };
+        utilityView.querySelectorAll('input[name="subTarget"]').forEach((radio) => {
+            radio.addEventListener('change', syncGiftInput);
+        });
+        syncGiftInput();
+        const syncPaymentStorageWarning = () => {
+            const warning = utilityView.querySelector('#subscriptionPaymentWarning');
+            const save = utilityView.querySelector('#subscriptionSavePayment');
+            if (warning) warning.hidden = !save?.checked;
+        };
+        utilityView.querySelector('#subscriptionSavePayment')?.addEventListener('change', syncPaymentStorageWarning);
+        syncPaymentStorageWarning();
+        utilityView.querySelector('#subscriptionPayBtn')?.addEventListener('click', () => {
+            showToast('Платежный backend пока не подключен');
+        });
+    } else if (tab === 'store') {
+        utilityView.innerHTML = renderStoreUtility();
+    } else {
+        utilityView.innerHTML = renderQuestsUtility();
+    }
+}
+
+function openDmHomeTab(tab) {
+    const key = (tab || 'friends').toString();
+    if (key === 'friends') {
+        hideUtilityView();
+        setDmHomeActive('friends');
+        if (typeof window.openFriends === 'function') {
+            try { window.openFriends(); return; } catch (_) {}
+        }
+        location.hash = '#/friends';
+        return;
+    }
+    openUtilityPanel(key);
+}
+
+async function openCreateGroupChatModal() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal group-chat-modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <div class="modal-title">Создать групповой чат</div>
+          <button class="modal-close" type="button">✕</button>
+        </div>
+        <div class="modal-body group-chat-body">
+          <label class="field">
+            <span>Название</span>
+            <input class="inp" id="groupChatNameInput" placeholder="Например: игровой вечер" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Участники</span>
+            <input class="inp" id="groupChatSearchInput" placeholder="Поиск по друзьям..." autocomplete="off" />
+          </label>
+          <div class="group-chat-picker" id="groupChatPicker">
+            <div class="muted" style="padding:12px;">Загрузка друзей...</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" type="button" data-act="cancel">Отмена</button>
+          <button class="btn btn-primary" type="button" data-act="create" disabled>Создать</button>
+        </div>
+      </div>
+    `;
+
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('.modal-close')?.addEventListener('click', close);
+    overlay.querySelector('[data-act="cancel"]')?.addEventListener('click', close);
+    document.body.appendChild(overlay);
+
+    const picker = overlay.querySelector('#groupChatPicker');
+    const search = overlay.querySelector('#groupChatSearchInput');
+    const createBtn = overlay.querySelector('[data-act="create"]');
+    const selected = new Set();
+    let friends = [];
+
+    const syncCreate = () => {
+        if (createBtn) createBtn.disabled = selected.size < 2;
+    };
+
+    const renderFriends = () => {
+        const q = (search?.value || '').toString().trim().toLowerCase();
+        const visible = friends.filter((u) => (u?.username || '').toString().toLowerCase().includes(q));
+        if (!picker) return;
+        if (!visible.length) {
+            picker.innerHTML = `<div class="muted" style="padding:12px;">Нет подходящих друзей</div>`;
+            return;
+        }
+        picker.innerHTML = visible.map((u) => {
+            const id = Number(u?.id || 0);
+            const name = (u?.username || 'Unknown').toString();
+            const checked = selected.has(id) ? 'checked' : '';
+            return `
+              <label class="group-chat-user">
+                <input type="checkbox" value="${id}" ${checked} />
+                <span class="avatar small">${escapeHtml((name.charAt(0) || 'U').toUpperCase())}</span>
+                <span class="group-chat-user-main">
+                  <span>${escapeHtml(name)}</span>
+                  <small>${escapeHtml(statusToLabel(u?.status || (u?.is_online ? 'online' : 'offline')))}</small>
+                </span>
+              </label>
+            `;
+        }).join('');
+
+        picker.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+            box.addEventListener('change', () => {
+                const id = Number(box.value);
+                if (!Number.isFinite(id) || id <= 0) return;
+                if (box.checked) selected.add(id);
+                else selected.delete(id);
+                syncCreate();
+            });
+        });
+    };
+
+    try {
+        friends = await api('/api/friends');
+        if (!Array.isArray(friends)) friends = [];
+        renderFriends();
+    } catch (e) {
+        console.warn('[DM] friends load failed for group modal', e);
+        if (picker) picker.innerHTML = `<div class="muted" style="padding:12px;">Не удалось загрузить друзей</div>`;
+    }
+
+    search?.addEventListener('input', renderFriends);
+    createBtn?.addEventListener('click', async () => {
+        if (selected.size < 2) return;
+        const name = (overlay.querySelector('#groupChatNameInput')?.value || '').toString().trim();
+        createBtn.disabled = true;
+        try {
+            const res = await api('/api/dms/groups', {
+                method: 'POST',
+                body: JSON.stringify({ name: name || null, user_ids: [...selected] }),
+            });
+            close();
+            await loadDmList();
+            await openDmChat(Number(res?.chat_id), (res?.title || name || 'Групповой чат').toString());
+        } catch (e) {
+            console.warn('[DM] group create failed', e);
+            showToast('Не удалось создать групповой чат');
+            createBtn.disabled = false;
+        }
+    });
+    syncCreate();
+}
+
+function setupDmHomeMenu() {
+    const menu = document.getElementById('dmHomeMenu');
+    if (!menu || menu.dataset.wired === '1') return;
+    menu.dataset.wired = '1';
+
+    menu.querySelectorAll('.dm-home-item').forEach((btn) => {
+        btn.addEventListener('click', () => openDmHomeTab(btn.dataset.dmTab || 'friends'));
+    });
+
+    document.getElementById('dmFindBtn')?.addEventListener('click', () => openCreateGroupChatModal());
+    document.getElementById('createGroupChatBtn')?.addEventListener('click', () => openCreateGroupChatModal());
 }
 
 const HIDDEN_DMS_KEY = 'lb:hidden_dm_chats_v1';
@@ -3627,6 +4318,9 @@ function loadHiddenDmMeta() {
             hiddenDmMeta.set(chatId, {
                 otherId: Number.isFinite(otherId) ? otherId : 0,
                 otherName,
+                isGroup: !!v.isGroup,
+                memberCount: Number(v.memberCount || 0) || 0,
+                memberNames: Array.isArray(v.memberNames) ? v.memberNames : [],
             });
         }
     } catch (_) {
@@ -3641,6 +4335,9 @@ function saveHiddenDmMeta() {
             obj[String(chatId)] = {
                 otherId: meta?.otherId ?? 0,
                 otherName: (meta?.otherName || 'Unknown').toString(),
+                isGroup: !!meta?.isGroup,
+                memberCount: Number(meta?.memberCount || 0) || 0,
+                memberNames: Array.isArray(meta?.memberNames) ? meta.memberNames : [],
             };
         }
         localStorage.setItem(HIDDEN_DMS_META_KEY, JSON.stringify(obj));
@@ -3658,6 +4355,9 @@ function hideDmChat(chatId, meta) {
         hiddenDmMeta.set(id, {
             otherId: Number(meta.otherId) || 0,
             otherName: (meta.otherName || 'Unknown').toString(),
+            isGroup: !!meta.isGroup,
+            memberCount: Number(meta.memberCount || 0) || 0,
+            memberNames: Array.isArray(meta.memberNames) ? meta.memberNames : [],
         });
         saveHiddenDmMeta();
     }
@@ -3769,7 +4469,11 @@ function renderDmList(dms) {
         const item = document.createElement('div');
         const chatId = Number(dm?.chat_id);
         const otherId = Number(dm?.other_user_id);
-        const otherName = (dm?.other_username || 'Unknown').toString();
+        const otherAvatarFileId = Number(dm?.other_avatar_file_id || 0) || null;
+        const memberCount = Number(dm?.member_count || 0) || 0;
+        const isGroup = !!dm?.is_group || memberCount > 2;
+        const memberNames = Array.isArray(dm?.member_names) ? dm.member_names.map((x) => (x || '').toString()).filter(Boolean) : [];
+        const otherName = (isGroup ? (dm?.title || dm?.other_username || 'Групповой чат') : (dm?.other_username || 'Unknown')).toString();
         const preview = dmPreviewFrom(dm);
 
         // cache activity from API
@@ -3784,14 +4488,14 @@ function renderDmList(dms) {
         }
 
         if (Number.isFinite(chatId) && chatId > 0) {
-            dmMetaByChatId.set(chatId, { otherId, otherName });
+            dmMetaByChatId.set(chatId, { otherId, otherName, otherAvatarFileId, isGroup, memberCount, memberNames });
             try { chatKindById.set(chatId, 'dm'); } catch (_) {}
         }
 
         if (hiddenDmChats.has(chatId)) {
             // keep meta for auto-unhide
             if (Number.isFinite(chatId) && chatId > 0) {
-                hiddenDmMeta.set(chatId, { otherId, otherName });
+                hiddenDmMeta.set(chatId, { otherId, otherName, otherAvatarFileId, isGroup, memberCount, memberNames });
                 saveHiddenDmMeta();
             }
             continue;
@@ -3800,22 +4504,31 @@ function renderDmList(dms) {
         item.className = `item dm ${(!currentServerId && currentChatId === chatId) ? 'active' : ''}`;
         item.dataset.chatId = String(chatId);
         item.dataset.otherUserId = String(otherId);
+        item.dataset.group = isGroup ? '1' : '0';
 
         const letter = (otherName.charAt(0) || 'U').toUpperCase();
+        const subText = isGroup
+            ? `${memberCount || memberNames.length || 1} участника${preview ? ` • ${preview}` : ''}`
+            : (preview || 'Личное сообщение');
 
         item.innerHTML = `
-            <div class="avatar">${escapeHtml(letter)}</div>
+            <div class="avatar ${isGroup ? 'dm-group-avatar' : ''}">${isGroup ? '👥' : escapeHtml(letter)}</div>
             <div class="text">
                 <div class="title">${escapeHtml(otherName)}</div>
-                <div class="sub">${escapeHtml(preview || 'Личное сообщение')}</div>
+                <div class="sub">${escapeHtml(subText)}</div>
             </div>
             <button class="dm-hide" type="button" title="Скрыть чат">✕</button>
         `;
 
+        if (!isGroup) {
+            const avatarEl = item.querySelector('.avatar');
+            if (avatarEl) avatarEl.innerHTML = avatarInnerHtml(otherAvatarFileId, otherName);
+        }
+
         item.querySelector('.dm-hide')?.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            hideDmChat(chatId, { otherId, otherName });
+            hideDmChat(chatId, { otherId, otherName, otherAvatarFileId, isGroup, memberCount, memberNames });
         });
 
         item.addEventListener('click', () => {
@@ -3825,6 +4538,8 @@ function renderDmList(dms) {
 
         dmList.appendChild(item);
     }
+
+    wireAvatarFallbacks(dmList);
 }
 
 function renderDmMembers(chatId) {
@@ -3888,7 +4603,7 @@ function renderDmMembers(chatId) {
     block.appendChild(makeRow({
         id: otherId,
         username: otherName,
-        avatar_file_id: null,
+        avatar_file_id: otherAvatarFileId,
         role: 'Личные сообщения',
         clickable: true,
     }));
@@ -3942,6 +4657,78 @@ function dmProfileConnectionsHtml(connections) {
         : '<div class="profile-text empty">Интеграции не добавлены</div>';
 }
 
+async function renderGroupDmPanel(chatId, meta = {}) {
+    const membersPanel = document.getElementById('membersPanel');
+    const membersWrap = document.getElementById('membersPanelMembers');
+    const membersList = document.getElementById('membersList');
+    const countEl = membersPanel?.querySelector('.count');
+    const titleEl = membersPanel?.querySelector('.panelHeader h3');
+    if (!membersPanel || !membersList) return;
+
+    const cid = Number(chatId);
+    const title = (meta.otherName || chatNameById.get(cid) || 'Групповой чат').toString();
+
+    if (titleEl) titleEl.innerHTML = `Участники <span class="count">(${Number(meta.memberCount || 0) || ''})</span>`;
+    if (countEl) countEl.textContent = Number(meta.memberCount || 0) ? `(${Number(meta.memberCount)})` : '';
+    if (membersWrap) membersWrap.hidden = false;
+    membersPanel.hidden = false;
+    membersList.innerHTML = '<div class="dm-profile-panel"><div class="muted">Загрузка участников...</div></div>';
+
+    let participants = [];
+    try {
+        participants = await api(`/api/dms/${cid}/participants`);
+    } catch (e) {
+        console.warn('[DM] group participants load failed', e);
+    }
+
+    const rows = Array.isArray(participants) ? participants : [];
+    if (titleEl) titleEl.innerHTML = `Участники <span class="count">(${rows.length || Number(meta.memberCount || 0) || 0})</span>`;
+
+    const listHtml = rows.map((p) => {
+        const id = Number(p?.id || 0);
+        const name = (p?.username || 'Unknown').toString();
+        const statusClass = statusToClass(p?.is_online === false ? 'offline' : (p?.status || 'offline'));
+        return `
+          <button class="dm-group-member" type="button" data-user-id="${id}" data-username="${escapeHtml(name)}">
+            <span class="avatar small">${avatarInnerHtml(p?.avatar_file_id, name)}</span>
+            <span class="dm-group-member-main">
+              <span class="dm-group-member-name">${escapeHtml(name)}${p?.is_me ? ' <em>Вы</em>' : ''}</span>
+              <span class="dm-group-member-status status-${escapeHtml(statusClass)}">${escapeHtml(statusToLabel(statusClass))}</span>
+            </span>
+          </button>
+        `;
+    }).join('');
+
+    membersList.innerHTML = `
+      <div class="dm-profile-panel dm-group-profile-panel">
+        <div class="dm-group-profile-head">
+          <div class="dm-group-profile-avatar">👥</div>
+          <div class="dm-profile-meta">
+            <div class="dm-profile-name">${escapeHtml(title)}</div>
+            <div class="dm-profile-username">${rows.length || Number(meta.memberCount || 0) || 0} участников</div>
+          </div>
+        </div>
+        <div class="dm-group-members-list">
+          ${listHtml || '<div class="profile-text empty">Участники не загружены</div>'}
+        </div>
+      </div>
+    `;
+
+    membersList.querySelector('.dm-group-profile-head')?.remove();
+    wireAvatarFallbacks(membersList);
+    membersList.querySelectorAll('.dm-group-member').forEach((row) => {
+        const uid = Number(row.dataset.userId || 0);
+        const username = (row.dataset.username || 'Unknown').toString();
+        if (!Number.isFinite(uid) || uid <= 0 || uid === Number(currentUser?.id)) return;
+        row.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('laberry:profile-open', {
+                detail: { userId: uid, username },
+            }));
+        });
+    });
+    applyDmProfilePanelVisibility();
+}
+
 async function renderDmProfile(chatId) {
     const membersPanel = document.getElementById('membersPanel');
     const membersWrap = document.getElementById('membersPanelMembers');
@@ -3954,6 +4741,11 @@ async function renderDmProfile(chatId) {
     const meta = dmMetaByChatId.get(cid) || {};
     const otherName = (meta.otherName || chatNameById.get(cid) || 'Собеседник').toString();
     const otherId = Number(meta.otherId || 0);
+
+    if (meta.isGroup) {
+        await renderGroupDmPanel(cid, meta);
+        return;
+    }
 
     if (titleEl) titleEl.innerHTML = 'Профиль';
     if (countEl) countEl.textContent = '';
@@ -4032,6 +4824,7 @@ async function openDmChat(chatId, otherName) {
     }
 
     setUiModeDm();
+    setDmHomeActive('');
     await loadDmList(); // refresh active state + order
     await openChat(chatId, otherName);
     renderDmProfile(chatId).catch((e) => console.warn('[DM] render profile failed', e));
@@ -4059,8 +4852,10 @@ async function openChat(chatId, title) {
     try {
         const chatView = document.getElementById('chatView');
         const friendsView = document.getElementById('friendsView');
+        const utilityView = document.getElementById('utilityView');
         if (chatView) chatView.hidden = false;
         if (friendsView) friendsView.hidden = true;
+        if (utilityView) utilityView.hidden = true;
     } catch (_) {}
     appLog(`[UI] Opening chat ${chatId} (${title})`);
     const seq = ++openChatSeq;
@@ -4089,13 +4884,15 @@ async function openChat(chatId, title) {
     const chatTitleElement = $("chat-title");
     if (chatTitleElement) {
         const isDm = !currentServerId;
-        chatTitleElement.textContent = isDm ? `@ ${title}` : `# ${title}`;
+        const dmMeta = isDm ? (dmMetaByChatId.get(Number(chatId)) || {}) : {};
+        chatTitleElement.textContent = isDm ? (dmMeta.isGroup ? `${title}` : `@ ${title}`) : `# ${title}`;
     }
 
     const dmCallBtn = document.getElementById('dmCallBtn');
     if (dmCallBtn) {
         const isDm = !currentServerId;
-        dmCallBtn.hidden = !isDm;
+        const dmMeta = isDm ? (dmMetaByChatId.get(Number(chatId)) || {}) : {};
+        dmCallBtn.hidden = !isDm || !!dmMeta.isGroup;
     }
     syncDmProfilePanelButtons();
     refreshDmCallFloat();
@@ -4585,9 +5382,7 @@ function setupMessageComposer() {
     const form = document.getElementById('composer');
     const input = document.getElementById('message');
     const attachBtn = document.getElementById('attachBtn');
-    const mdAttachBtn = document.getElementById('mdAttachBtn');
     const composerEmojiBtn = document.getElementById('composerEmojiBtn');
-    const gifBtn = document.getElementById('gifBtn');
     const fileInput = document.getElementById('fileInput');
     const mdFileInput = document.getElementById('mdFileInput');
     const gifFileInput = document.getElementById('gifFileInput');
@@ -4653,7 +5448,10 @@ function setupMessageComposer() {
         // The .md filename is the source of truth; server will detect Markdown by extension.
         // This avoids multipart/MIME edge-cases with text/markdown;charset=utf-8 and text/plain.
         const shouldNormalizeMarkdown = lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
-        const safeType = shouldNormalizeMarkdown ? 'application/octet-stream' : (rawType || 'application/octet-stream');
+        const shouldNormalizeGif = lowerName.endsWith('.gif') || rawType === 'image/gif';
+        const safeType = shouldNormalizeMarkdown
+            ? 'application/octet-stream'
+            : (shouldNormalizeGif ? 'image/gif' : (rawType || 'application/octet-stream'));
 
         try {
             if (f.name !== name || (f.type || '').toString().toLowerCase() !== safeType) {
@@ -4723,9 +5521,19 @@ function setupMessageComposer() {
                 <div class="md-file-title">Markdown-файл</div>
                 <div class="md-file-sub">Сделай текст сам или загрузи готовый .md</div>
               </div>
+              <button class="md-help-btn" type="button" data-act="help" title="Подсказка Markdown">?</button>
               <button class="md-file-x" type="button" data-act="close">✕</button>
             </div>
             <div class="md-file-body">
+              <div class="md-help-panel" hidden>
+                <div><b>**жирный**</b> — жирный текст</div>
+                <div><b>*курсив*</b> — курсив</div>
+                <div><b>&#96;код&#96;</b> — inline-код</div>
+                <div><b>&#96;&#96;&#96;js</b> — блок кода</div>
+                <div><b># Заголовок</b> — заголовок</div>
+                <div><b>&gt; цитата</b> — цитата</div>
+                <div><b>- пункт</b> или <b>1. пункт</b> — списки</div>
+              </div>
               <label class="md-file-label">Имя файла</label>
               <input class="md-file-name" type="text" maxlength="80" placeholder="message.md" value="message.md">
               <label class="md-file-label">Содержимое</label>
@@ -4747,6 +5555,11 @@ function setupMessageComposer() {
             const act = btn.getAttribute('data-act');
             if (act === 'close') {
                 close();
+                return;
+            }
+            if (act === 'help') {
+                const panel = overlay.querySelector('.md-help-panel');
+                if (panel) panel.hidden = !panel.hidden;
                 return;
             }
             if (act === 'upload') {
@@ -4771,24 +5584,83 @@ function setupMessageComposer() {
         return overlay;
     };
 
-    attachBtn?.addEventListener('click', () => {
-        if (!fileInput) return;
-        // iOS Safari может игнорировать programmatic click, если инпут был hidden/display:none.
-        // Если attachBtn это <label for="fileInput"> — нативный клик уже откроет пикер.
-        if ((attachBtn?.tagName || '').toUpperCase() === 'LABEL') return;
-        fileInput.click();
-    });
+    let attachMenuEl = null;
+    let attachMenuBackdrop = null;
 
-    mdAttachBtn?.addEventListener('click', () => {
-        const overlay = ensureMarkdownFileModal();
-        overlay.classList.remove('hidden');
-        overlay.querySelector('.md-file-text')?.focus?.();
+    const hideAttachMenu = () => {
+        if (attachMenuBackdrop) attachMenuBackdrop.hidden = true;
+        if (attachMenuEl) attachMenuEl.hidden = true;
+    };
+
+    const ensureAttachMenu = () => {
+        if (attachMenuEl && attachMenuBackdrop) return;
+
+        attachMenuBackdrop = document.createElement('div');
+        attachMenuBackdrop.className = 'composer-menu-backdrop';
+        attachMenuBackdrop.hidden = true;
+
+        attachMenuEl = document.createElement('div');
+        attachMenuEl.className = 'composer-attach-menu';
+        attachMenuEl.hidden = true;
+        attachMenuEl.innerHTML = `
+          <button type="button" data-attach-act="files">
+            <span class="composer-menu-ic">📎</span>
+            <span><b>Файлы</b><small>Изображения, видео, аудио, архивы и любые документы</small></span>
+          </button>
+          <button type="button" data-attach-act="markdown">
+            <span class="composer-menu-ic">MD</span>
+            <span><b>Markdown</b><small>Отдельный вид искусства: редактор, файл и предпросмотр в чате</small></span>
+          </button>
+        `;
+
+        attachMenuEl.addEventListener('click', (ev) => {
+            const btn = ev.target?.closest?.('[data-attach-act]');
+            if (!btn) return;
+            const act = btn.getAttribute('data-attach-act');
+            hideAttachMenu();
+            if (act === 'files') fileInput?.click?.();
+            if (act === 'markdown') {
+                const overlay = ensureMarkdownFileModal();
+                overlay.classList.remove('hidden');
+                overlay.querySelector('.md-file-text')?.focus?.();
+            }
+        });
+
+        attachMenuBackdrop.addEventListener('click', hideAttachMenu);
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape') hideAttachMenu();
+        });
+
+        document.body.appendChild(attachMenuBackdrop);
+        document.body.appendChild(attachMenuEl);
+    };
+
+    const openAttachMenu = () => {
+        ensureAttachMenu();
+        if (!attachMenuEl || !attachMenuBackdrop) return;
+        const rect = attachBtn?.getBoundingClientRect?.();
+        const x = rect ? rect.left : 18;
+        const y = rect ? rect.top - 8 : window.innerHeight - 80;
+
+        attachMenuEl.style.left = '0px';
+        attachMenuEl.style.top = '0px';
+        attachMenuEl.hidden = false;
+        const pad = 10;
+        const w = attachMenuEl.offsetWidth || 300;
+        const h = attachMenuEl.offsetHeight || 160;
+        attachMenuEl.style.left = `${Math.max(pad, Math.min(x, window.innerWidth - w - pad))}px`;
+        attachMenuEl.style.top = `${Math.max(pad, Math.min(y - h, window.innerHeight - h - pad))}px`;
+        attachMenuBackdrop.hidden = false;
+    };
+
+    attachBtn?.addEventListener('click', () => {
+        openAttachMenu();
     });
 
     if (composerEmojiBtn) {
         composerEmojiBtn.hidden = isTouchUi();
         composerEmojiBtn.addEventListener('click', () => {
-            showEmojiPicker({ anchorEl: composerEmojiBtn, mode: 'composer' });
+            openComposerStickerPicker('gifs');
         });
     }
 
@@ -5123,6 +5995,13 @@ function setupMessageComposer() {
     let gifPickerEl = null;
     let gifPickerBackdrop = null;
     let gifUploadIntent = 'send';
+    let stickerScope = 'favorites';
+    let gifLibraryCache = { favorites: [], global: [] };
+    let gifSearchQuery = '';
+
+    const composerEmojis = [
+        '😀','😁','😂','🤣','😊','😍','😘','😎','🤔','😴','😭','😡','👍','👎','🙏','👏','🔥','💯','🎉','❤️','💔','✅','❌','⭐','⚡','🍀','🎧','🎮','📌','📎'
+    ];
 
     const buildFileMarker = (fileId, name, mime = 'image/gif', size = 0) => {
         const cleanMime = String(mime || 'image/gif').toLowerCase().replaceAll('|', '/');
@@ -5137,9 +6016,13 @@ function setupMessageComposer() {
     };
 
     const renderGifCards = (items, kind) => {
-        const list = Array.isArray(items) ? items : [];
+        const query = (gifSearchQuery || '').trim().toLowerCase();
+        const source = Array.isArray(items) ? items : [];
+        const list = query
+            ? source.filter((item) => (item?.original_name || 'animation.gif').toString().toLowerCase().includes(query))
+            : source;
         if (!list.length) {
-            return `<div class="gif-empty">${kind === 'favorites' ? 'В избранном пока нет GIF' : 'Глобальные GIF ещё не добавлены'}</div>`;
+            return `<div class="gif-empty">${kind === 'favorites' ? 'В избранном пока нет стикеров' : 'Глобальные стикеры ещё не добавлены'}</div>`;
         }
 
         return list.map((item) => {
@@ -5155,7 +6038,7 @@ function setupMessageComposer() {
             return `
               <div class="gif-card" data-asset-id="${id}">
                 <button type="button" class="gif-thumb" data-gif-act="send-asset" data-asset-id="${id}" title="Отправить GIF">
-                  <img src="${escapeHtml(rawUrl)}" alt="${escapeHtml(name)}" loading="lazy">
+                  <img src="${escapeHtml(rawUrl)}" alt="${escapeHtml(name)}" loading="eager" decoding="sync">
                 </button>
                 <div class="gif-card-bar">
                   <span title="${escapeHtml(name)}">${escapeHtml(name)}</span>
@@ -5168,10 +6051,22 @@ function setupMessageComposer() {
 
     const renderGifLibrary = (data) => {
         if (!gifPickerEl) return;
-        const fav = gifPickerEl.querySelector('[data-gif-list="favorites"]');
-        const global = gifPickerEl.querySelector('[data-gif-list="global"]');
-        if (fav) fav.innerHTML = renderGifCards(data?.favorites, 'favorites');
-        if (global) global.innerHTML = renderGifCards(data?.global, 'global');
+        gifLibraryCache = {
+            favorites: Array.isArray(data?.favorites) ? data.favorites : [],
+            global: Array.isArray(data?.global) ? data.global : [],
+        };
+        gifPickerEl.querySelectorAll('[data-gif-list="favorites"]').forEach((fav) => {
+            fav.innerHTML = renderGifCards(gifLibraryCache.favorites, 'favorites');
+        });
+        gifPickerEl.querySelectorAll('[data-gif-list="global"]').forEach((global) => {
+            global.innerHTML = renderGifCards(gifLibraryCache.global, 'global');
+        });
+        gifPickerEl.querySelectorAll('[data-sticker-scope]').forEach((btn) => {
+            btn.classList.toggle('active', btn.dataset.stickerScope === stickerScope);
+        });
+        gifPickerEl.querySelectorAll('[data-gif-list]').forEach((el) => {
+            el.hidden = el.getAttribute('data-gif-list') !== stickerScope;
+        });
     };
 
     const loadGifLibrary = async () => {
@@ -5255,26 +6150,118 @@ function setupMessageComposer() {
         gifPickerEl.innerHTML = `
           <div class="gif-picker-head">
             <div>
-              <div class="gif-picker-title">GIF</div>
-              <div class="gif-picker-sub">Глобальные и избранные анимации</div>
+              <div class="gif-picker-title">Эмодзи и стикеры</div>
+              <div class="gif-picker-sub">Эмодзи для текста и анимированные стикеры из списка</div>
             </div>
             <button type="button" class="gif-close" data-gif-act="close" title="Закрыть">×</button>
           </div>
-          <div class="gif-picker-actions">
-            <button type="button" data-gif-act="upload-send">Загрузить и отправить</button>
-            <button type="button" data-gif-act="upload-favorite">В избранное</button>
+          <div class="composer-picker-tabs">
+            <button type="button" class="active" data-picker-tab="emoji">Эмодзи</button>
+            <button type="button" data-picker-tab="stickers">Стикеры</button>
           </div>
-          <section class="gif-section">
-            <div class="gif-section-title">Избранное</div>
-            <div class="gif-grid" data-gif-list="favorites"></div>
+          <section class="composer-picker-panel active" data-picker-panel="emoji">
+            <div class="emoji-grid composer-emoji-grid">
+              ${composerEmojis.map(e => `<button type="button" class="emoji-btn" data-composer-emoji="${escapeHtml(e)}">${escapeHtml(e)}</button>`).join('')}
+            </div>
           </section>
-          <section class="gif-section">
-            <div class="gif-section-title">Глобальные</div>
-            <div class="gif-grid" data-gif-list="global"></div>
+          <section class="composer-picker-panel" data-picker-panel="stickers">
+            <div class="gif-picker-actions">
+              <button type="button" data-gif-act="upload-send">Загрузить и отправить</button>
+              <button type="button" data-gif-act="upload-favorite">В избранное</button>
+            </div>
+            <div class="sticker-scope-tabs">
+              <button type="button" class="active" data-sticker-scope="favorites">Избранное</button>
+              <button type="button" data-sticker-scope="global">Стикеры</button>
+            </div>
+            <section class="gif-section">
+              <div class="gif-grid" data-gif-list="favorites"></div>
+              <div class="gif-grid" data-gif-list="global" hidden></div>
+            </section>
+          </section>
+        `;
+
+        gifPickerEl.className = 'gif-picker discord-picker';
+        gifPickerEl.innerHTML = `
+          <div class="discord-picker-top">
+            <div class="composer-picker-tabs">
+              <button type="button" class="active" data-picker-tab="gifs">Гифки</button>
+              <button type="button" data-picker-tab="stickers">Стикеры</button>
+              <button type="button" data-picker-tab="emoji">Эмодзи</button>
+            </div>
+            <button type="button" class="gif-close" data-gif-act="close" title="Закрыть">×</button>
+          </div>
+          <div class="gif-search-row" data-gif-search-wrap>
+            <input class="gif-search-input" type="search" data-gif-search placeholder="Поиск GIF">
+          </div>
+          <section class="composer-picker-panel active" data-picker-panel="gifs">
+            <div class="gif-category-grid">
+              <button type="button" class="gif-category-card favorite" data-gif-category data-sticker-scope="favorites">
+                <span>Избранное</span>
+              </button>
+              <button type="button" class="gif-category-card popular" data-gif-category data-sticker-scope="global">
+                <span>Популярные GIF</span>
+              </button>
+              <button type="button" class="gif-category-card calm" data-gif-category data-sticker-scope="global">
+                <span>Милые</span>
+              </button>
+              <button type="button" class="gif-category-card mood" data-gif-category data-sticker-scope="global">
+                <span>Реакции</span>
+              </button>
+            </div>
+          </section>
+          <section class="composer-picker-panel" data-picker-panel="stickers">
+            <div class="sticker-scope-tabs">
+              <button type="button" class="active" data-sticker-scope="favorites">Избранное</button>
+              <button type="button" data-sticker-scope="global">Стикеры</button>
+            </div>
+            <section class="gif-section">
+              <div class="gif-grid" data-gif-list="favorites"></div>
+              <div class="gif-grid" data-gif-list="global" hidden></div>
+            </section>
+          </section>
+          <section class="composer-picker-panel" data-picker-panel="emoji">
+            <div class="emoji-grid composer-emoji-grid">
+              ${composerEmojis.map(e => `<button type="button" class="emoji-btn" data-composer-emoji="${escapeHtml(e)}">${escapeHtml(e)}</button>`).join('')}
+            </div>
           </section>
         `;
 
         gifPickerEl.addEventListener('click', (e) => {
+            const emojiBtn = e.target?.closest?.('[data-composer-emoji]');
+            if (emojiBtn) {
+                insertTextIntoComposer(emojiBtn.getAttribute('data-composer-emoji') || '');
+                hideGifPicker();
+                return;
+            }
+
+            const tabBtn = e.target?.closest?.('[data-picker-tab]');
+            if (tabBtn) {
+                const tab = tabBtn.dataset.pickerTab || 'gifs';
+                gifPickerEl.querySelectorAll('[data-picker-tab]').forEach((x) => x.classList.toggle('active', x === tabBtn));
+                gifPickerEl.querySelectorAll('[data-picker-panel]').forEach((panel) => {
+                    panel.classList.toggle('active', panel.dataset.pickerPanel === tab);
+                });
+                const searchWrap = gifPickerEl.querySelector('[data-gif-search-wrap]');
+                if (searchWrap) searchWrap.hidden = tab === 'emoji';
+                if (tab !== 'emoji') loadGifLibrary();
+                return;
+            }
+
+            const scopeBtn = e.target?.closest?.('[data-sticker-scope]');
+            if (scopeBtn) {
+                stickerScope = scopeBtn.dataset.stickerScope || 'favorites';
+                gifPickerEl.querySelectorAll('[data-sticker-scope]').forEach((x) => x.classList.toggle('active', x === scopeBtn));
+                gifPickerEl.querySelectorAll('[data-gif-list]').forEach((el) => {
+                    el.hidden = el.getAttribute('data-gif-list') !== stickerScope;
+                });
+                if (scopeBtn.hasAttribute('data-gif-category')) {
+                    const stickersTab = gifPickerEl.querySelector('[data-picker-tab="stickers"]');
+                    if (stickersTab) stickersTab.click();
+                    else loadGifLibrary();
+                }
+                return;
+            }
+
             const btn = e.target?.closest?.('[data-gif-act]');
             if (!btn) return;
             const act = btn.getAttribute('data-gif-act');
@@ -5290,6 +6277,11 @@ function setupMessageComposer() {
             }
         });
 
+        gifPickerEl.querySelector('[data-gif-search]')?.addEventListener('input', (e) => {
+            gifSearchQuery = (e.target?.value || '').toString();
+            renderGifLibrary(gifLibraryCache);
+        });
+
         gifPickerBackdrop.addEventListener('click', () => hideGifPicker());
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') hideGifPicker();
@@ -5299,18 +6291,29 @@ function setupMessageComposer() {
         document.body.appendChild(gifPickerEl);
     };
 
-    const openGifPicker = () => {
+    const openComposerStickerPicker = (initialTab = 'gifs') => {
         if (!ensureGifChat()) return;
         ensureGifPicker();
         if (!gifPickerEl || !gifPickerBackdrop) return;
 
         let x = window.innerWidth / 2;
         let y = window.innerHeight - 84;
-        if (gifBtn?.getBoundingClientRect) {
-            const r = gifBtn.getBoundingClientRect();
+        const anchor = composerEmojiBtn;
+        if (anchor?.getBoundingClientRect) {
+            const r = anchor.getBoundingClientRect();
             x = r.left;
             y = r.top - 8;
         }
+
+        const tab = ['gifs', 'stickers', 'emoji'].includes(initialTab) ? initialTab : 'gifs';
+        gifPickerEl.querySelectorAll('[data-picker-tab]').forEach((btn) => {
+            btn.classList.toggle('active', btn.dataset.pickerTab === tab);
+        });
+        gifPickerEl.querySelectorAll('[data-picker-panel]').forEach((panel) => {
+            panel.classList.toggle('active', panel.dataset.pickerPanel === tab);
+        });
+        const searchWrap = gifPickerEl.querySelector('[data-gif-search-wrap]');
+        if (searchWrap) searchWrap.hidden = tab === 'emoji';
 
         gifPickerEl.style.left = '0px';
         gifPickerEl.style.top = '0px';
@@ -5321,10 +6324,8 @@ function setupMessageComposer() {
         gifPickerEl.style.left = `${Math.max(pad, Math.min(x, window.innerWidth - w - pad))}px`;
         gifPickerEl.style.top = `${Math.max(pad, Math.min(y - h, window.innerHeight - h - pad))}px`;
         gifPickerBackdrop.hidden = false;
-        loadGifLibrary();
+        if (tab !== 'emoji') loadGifLibrary();
     };
-
-    gifBtn?.addEventListener('click', openGifPicker);
 
     gifFileInput?.addEventListener('change', async () => {
         const file = gifFileInput.files?.[0] || null;
@@ -8048,12 +9049,18 @@ async function initializeApp() {
 
         // global buttons
         document.getElementById('settingsBtn')?.addEventListener('click', openSettings);
+        document.getElementById('downloadsPageBtn')?.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openUtilityPanel('downloads');
+        });
         document.getElementById('pinsBtn')?.addEventListener('click', () => openPinsModal());
         document.getElementById('addChannelBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openCurrentServerMenu(e.currentTarget); });
         document.getElementById('dmCallBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); startDmCall(); });
         document.getElementById('profilePanelToggleBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setDmProfilePanelHidden(false); });
         document.getElementById('membersPanelHideBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setDmProfilePanelHidden(true); });
         setupServerSearch();
+        setupDmHomeMenu();
         document.addEventListener('click', (e) => {
             const t = e.target;
             if (t && t.id === 'addServerBtn') {
@@ -8109,7 +9116,16 @@ async function initializeApp() {
         updateJumpBtn();
         setupAttachmentUi();
         // mobile drawers are closed by clicking overlay
-const servers = await api("/api/servers");
+        const shouldOpenHome = (() => {
+            try {
+                if (localStorage.getItem(APP_HOME_SEEN_KEY) === '1') return false;
+                localStorage.setItem(APP_HOME_SEEN_KEY, '1');
+                return true;
+            } catch (_) {
+                return false;
+            }
+        })();
+        const servers = await api("/api/servers");
         appLog('[APP] Servers loaded:', servers);
         
         const lastServerId = Number(sessionStorage.getItem("lastServerId"));
@@ -8131,7 +9147,9 @@ const servers = await api("/api/servers");
         }
         renderServers(servers);
         
-        if (serverId) {
+        if (shouldOpenHome) {
+            openUtilityPanel('home');
+        } else if (serverId) {
             const chats = await api(`/api/servers/${serverId}/chats`);
             appLog('[APP] Chats loaded:', chats);
             

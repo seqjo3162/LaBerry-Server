@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LaBerry</title>
-  <link rel="stylesheet" href="/static/css/main.css?v=56">
+  <link rel="stylesheet" href="/static/css/main.css?v=59">
 </head>
 <body>
   <div id="appRoot" class="app-root">
@@ -15,7 +15,10 @@
       <button class="icon-btn mobile-only" type="button" id="mobileServersBtn" title="Серверы">☰</button>
           </div>
 
-    <div class="brand brand-start-trigger" data-start-page-trigger>LaBerry</div>
+    <div class="topbar-center">
+      <div class="brand">LaBerry</div>
+      <button class="icon-btn download-page-btn" type="button" id="downloadsPageBtn" title="Скачать LaBerry">⬇</button>
+    </div>
 
     <div class="topbar-right">
       <button class="icon-btn mobile-only" type="button" id="mobileMembersBtn" title="Участники">👥</button>
@@ -88,6 +91,20 @@
         <button class="btn btn-ghost channel-server-menu-btn" type="button" id="addChannelBtn" style="display: none;" title="Меню сервера">⚙</button>
       </div>
 
+      <!-- DM HOME MENU -->
+      <div class="dm-home-menu" id="dmHomeMenu" hidden>
+        <button class="dm-find-btn" type="button" id="dmFindBtn">Найти или начать беседу</button>
+        <button class="dm-home-item active" type="button" data-dm-tab="friends"><span class="dm-home-ic">👥</span><span>Друзья</span></button>
+        <button class="dm-home-item" type="button" data-dm-tab="subscription"><span class="dm-home-ic">✦</span><span>Подписка</span></button>
+        <button class="dm-home-item" type="button" data-dm-tab="store"><span class="dm-home-ic">▦</span><span>Магазин</span></button>
+        <button class="dm-home-item" type="button" data-dm-tab="quests"><span class="dm-home-ic">◉</span><span>Задания</span></button>
+        <div class="dm-home-sep"></div>
+        <div class="dm-section-row">
+          <span>Личные сообщения</span>
+          <button class="icon-btn dm-create-group-btn" type="button" id="createGroupChatBtn" title="Создать групповой чат">＋</button>
+        </div>
+      </div>
+
       <!-- DM LIST -->
       <div class="list dm-list" id="dmList" hidden></div>
 
@@ -129,9 +146,7 @@
         <form class="composer" id="composer">
           <div class="composer-row">
             <button class="icon-btn attach-btn" id="attachBtn" type="button" title="Прикрепить файл">📎</button>
-            <button class="icon-btn md-attach-btn" id="mdAttachBtn" type="button" title="Markdown-файл">MD</button>
-            <button class="icon-btn composer-emoji-btn" id="composerEmojiBtn" type="button" title="Эмодзи">😊</button>
-            <button class="icon-btn gif-btn" id="gifBtn" type="button" title="GIF">GIF</button>
+            <button class="icon-btn composer-emoji-btn" id="composerEmojiBtn" type="button" title="Эмодзи и стикеры">😊</button>
             <input type="file" id="fileInput" class="file-input" multiple />
             <input type="file" id="mdFileInput" class="file-input" accept=".md,.markdown,text/markdown,text/plain" />
             <input type="file" id="gifFileInput" class="file-input" accept="image/gif,.gif" />
@@ -246,6 +261,9 @@
           </div>
         </div>
       </div>
+
+      <!-- UTILITY VIEW -->
+      <div id="utilityView" class="utility-view" hidden></div>
     </main>
 
     <!-- ===== MEMBERS ===== -->
@@ -376,6 +394,6 @@
   </div>
 
   <script src="/static/js/start-page-link.js?v=1"></script>
-  <script type="module" src="/static/js/app.js?v=51"></script>
+  <script type="module" src="/static/js/app.js?v=54"></script>
 </body>
 </html>

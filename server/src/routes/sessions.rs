@@ -53,8 +53,8 @@ async fn list_my(State(st): State<AppState>, me: AuthUser) -> impl IntoResponse 
             SessionView {
                 id: r.get("id"),
                 user_agent: r.try_get("user_agent").ok(),
-                created_at: r.get("created_at"),
-                last_seen_at: r.get("last_seen_at"),
+                created_at: r.try_get("created_at").unwrap_or_else(|_| String::new()),
+                last_seen_at: r.try_get("last_seen_at").unwrap_or_else(|_| String::new()),
                 is_current: token_hash == me.token_hash,
                 is_active: revoked_at.is_none(),
                 revoked_at,

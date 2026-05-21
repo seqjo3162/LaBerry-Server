@@ -182,6 +182,8 @@ export async function api(path, opts = {}) {
 
     if (!res.ok) {
       const text = await res.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (_) {}
       apiTrace('REQUEST_ERROR', { 
         url: path, 
         requestId, 
@@ -191,6 +193,7 @@ export async function api(path, opts = {}) {
       apiErr(`[API] Request failed ${res.status}: ${text.substring(0, 100)}`);
       const err = new Error(`API error ${res.status}: ${text.substring(0, 100)}`);
       err.status = res.status;
+      err.data = data;
       throw err;
     }
 

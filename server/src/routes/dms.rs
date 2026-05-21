@@ -1,3 +1,4 @@
+use regex::Regex;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -6,9 +7,8 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use regex::Regex;
-use sqlx::Row;
 use sqlx::QueryBuilder;
+use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 
 use crate::{auth, server::AppState};
@@ -22,9 +22,30 @@ pub struct DmChatView {
     pub chat_id: i64,
     pub other_user_id: i64,
     pub other_username: String,
+    pub other_avatar_file_id: Option<i64>,
+    pub title: String,
+    pub is_group: bool,
+    pub member_count: i64,
+    pub member_names: Vec<String>,
     pub last_message_id: Option<i64>,
     pub last_message_at: Option<String>,
     pub last_message_preview: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateGroupBody {
+    pub name: Option<String>,
+    pub user_ids: Vec<i64>,
+}
+
+#[derive(Serialize)]
+pub struct DmParticipantView {
+    pub id: i64,
+    pub username: String,
+    pub avatar_file_id: Option<i64>,
+    pub is_me: bool,
+    pub is_online: bool,
+    pub status: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -65,7 +86,9 @@ pub struct ReplyPreview {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_my))
+        .route("/groups", post(create_group))
         .route("/with/:user_id", post(get_or_create_with))
+        .route("/:chat_id/participants", get(list_participants))
         .route("/:chat_id/messages", get(list_messages).post(send_message))
 }
 
@@ -251,6 +274,151 @@ async fn get_or_create_with(
     (StatusCode::OK, Json(serde_json::json!({"chat_id": chat_id}))).into_response()
 }
 
+fn normalize_group_title(raw: Option<String>, fallback_names: &[String]) -> String {
+    let title = raw.unwrap_or_default().trim().to_string();
+    if !title.is_empty() {
+        return title.chars().take(80).collect::<String>();
+    }
+
+    let joined = fallback_names
+        .iter()
+        .take(4)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let fallback = if joined.is_empty() {
+        "Групповой чат".to_string()
+    } else {
+        joined
+    };
+    fallback.chars().take(80).collect::<String>()
+}
+
+async fn create_group(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Json(body): Json<CreateGroupBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let mut seen = HashSet::new();
+    let mut user_ids = Vec::new();
+    for id in body.user_ids {
+        if id == me.id || id <= 0 || !seen.insert(id) {
+            continue;
+        }
+        user_ids.push(id);
+    }
+
+    if user_ids.len() < 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"detail":"group_requires_at_least_two_other_users"})),
+        )
+            .into_response();
+    }
+
+    if user_ids.len() > 24 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"detail":"too_many_group_members","max_other_users":24})),
+        )
+            .into_response();
+    }
+
+    let mut users = Vec::<(i64, String)>::new();
+    for uid in user_ids {
+        let row = sqlx::query("SELECT username, is_banned FROM users WHERE id = ? LIMIT 1")
+            .bind(uid)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+
+        let Some(r) = row else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"detail":"unknown_group_member","user_id":uid})),
+            )
+                .into_response();
+        };
+
+        if r.get::<i64, _>("is_banned") != 0 {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"detail":"banned_group_member","user_id":uid})),
+            )
+                .into_response();
+        }
+
+        if is_blocked_pair(db, me.id, uid).await {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"detail":"blocked_group_member","user_id":uid})),
+            )
+                .into_response();
+        }
+
+        if !can_dm(db, me.id, uid).await {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"detail":"dm_restricted_group_member","user_id":uid})),
+            )
+                .into_response();
+        }
+
+        users.push((uid, r.get::<String, _>("username")));
+    }
+
+    users.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    let names = users.iter().map(|(_, name)| name.clone()).collect::<Vec<_>>();
+    let title = normalize_group_title(body.name, &names);
+    let created_at = auth::now_iso();
+
+    let res = sqlx::query(
+        "INSERT INTO chats(name, server_id, is_private, kind, created_at) VALUES(?, NULL, 1, 'text', ?)",
+    )
+    .bind(&title)
+    .bind(&created_at)
+    .execute(db)
+    .await;
+
+    let Ok(r) = res else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    let chat_id = r.last_insert_rowid();
+    let _ = sqlx::query("INSERT OR IGNORE INTO chat_participants(chat_id, user_id) VALUES(?, ?)")
+        .bind(chat_id)
+        .bind(me.id)
+        .execute(db)
+        .await;
+
+    for (uid, _) in &users {
+        let _ = sqlx::query("INSERT OR IGNORE INTO chat_participants(chat_id, user_id) VALUES(?, ?)")
+            .bind(chat_id)
+            .bind(uid)
+            .execute(db)
+            .await;
+    }
+
+    let mut member_names = Vec::with_capacity(users.len() + 1);
+    member_names.push(me.username.clone());
+    member_names.extend(users.iter().map(|(_, name)| name.clone()));
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "chat_id": chat_id,
+            "title": title,
+            "is_group": true,
+            "member_count": member_names.len(),
+            "member_names": member_names
+        })),
+    )
+        .into_response()
+}
+
 async fn list_my(
     State(st): State<AppState>,
     me: AuthUser,
@@ -259,78 +427,114 @@ async fn list_my(
     let db = &st.db;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
 
-    let mut rows = sqlx::query(
+    let rows = sqlx::query(
         r#"
-        SELECT d.chat_id,
-               CASE WHEN d.user_a = ? THEN d.user_b ELSE d.user_a END AS other_user_id,
-               u.username AS other_username,
-               lm.id AS last_message_id,
-               lm.timestamp AS last_message_at,
-               substr(lm.content, 1, 80) AS last_message_preview
-        FROM dm_chats d
-        JOIN users u ON u.id = (CASE WHEN d.user_a = ? THEN d.user_b ELSE d.user_a END)
-        LEFT JOIN messages lm
-          ON lm.id = (
-            SELECT m2.id FROM messages m2 WHERE m2.chat_id = d.chat_id ORDER BY m2.id DESC LIMIT 1
-          )
-        WHERE d.user_a = ? OR d.user_b = ?
-        ORDER BY COALESCE(lm.id, 0) DESC
-        LIMIT ?
-        "#,
-    )
-    .bind(me.id)
-    .bind(me.id)
-    .bind(me.id)
-    .bind(me.id)
-    .bind(limit)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
-
-    if rows.is_empty() {
-        rows = sqlx::query(
-            r#"
-
         SELECT c.id AS chat_id,
-               p2.user_id AS other_user_id,
-               u.username AS other_username,
+               COALESCE(c.name, '') AS chat_name,
+               (SELECT COUNT(1) FROM chat_participants cp WHERE cp.chat_id = c.id) AS member_count,
                lm.id AS last_message_id,
                lm.timestamp AS last_message_at,
                substr(lm.content, 1, 80) AS last_message_preview
         FROM chats c
-        JOIN chat_participants p1 ON p1.chat_id = c.id AND p1.user_id = ?
-        JOIN chat_participants p2 ON p2.chat_id = c.id AND p2.user_id <> ?
-        JOIN users u ON u.id = p2.user_id
+        JOIN chat_participants mep ON mep.chat_id = c.id AND mep.user_id = ?
         LEFT JOIN messages lm
           ON lm.id = (
             SELECT m2.id FROM messages m2 WHERE m2.chat_id = c.id ORDER BY m2.id DESC LIMIT 1
           )
         WHERE c.is_private = 1
           AND c.server_id IS NULL
-          AND (SELECT count(*) FROM chat_participants cp WHERE cp.chat_id = c.id) = 2
-        ORDER BY COALESCE(lm.id, 0) DESC
+        ORDER BY COALESCE(lm.id, 0) DESC, c.id DESC
         LIMIT ?
         "#,
+    )
+    .bind(me.id)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let mut out = Vec::with_capacity(rows.len());
+
+    for r in rows {
+        let chat_id: i64 = r.get("chat_id");
+        let member_count: i64 = r.get("member_count");
+        let chat_name: String = r.get("chat_name");
+
+        let members = sqlx::query(
+            r#"
+            SELECT u.id, u.username, up.avatar_file_id
+            FROM chat_participants cp
+            JOIN users u ON u.id = cp.user_id
+            LEFT JOIN user_profile up ON up.user_id = u.id
+            WHERE cp.chat_id = ?
+            ORDER BY lower(u.username)
+            "#,
         )
-        .bind(me.id)
-        .bind(me.id)
-        .bind(limit)
+        .bind(chat_id)
         .fetch_all(db)
         .await
         .unwrap_or_default();
-    }
 
-    let out = rows
-        .into_iter()
-        .map(|r| DmChatView {
-            chat_id: r.get("chat_id"),
-            other_user_id: r.get("other_user_id"),
-            other_username: r.get("other_username"),
+        let mut member_names = Vec::new();
+        let mut others = Vec::<(i64, String, Option<i64>)>::new();
+        for m in members {
+            let uid: i64 = m.get("id");
+            let username: String = m.get("username");
+            let avatar_file_id: Option<i64> = m.try_get("avatar_file_id").ok().flatten();
+            member_names.push(username.clone());
+            if uid != me.id {
+                others.push((uid, username, avatar_file_id));
+            }
+        }
+
+        let is_group = member_count > 2;
+        let title = if is_group {
+            let name = chat_name.trim();
+            if name.is_empty() {
+                let joined = others
+                    .iter()
+                    .take(4)
+                    .map(|(_, name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if joined.is_empty() {
+                    "Групповой чат".to_string()
+                } else {
+                    joined
+                }
+            } else {
+                name.to_string()
+            }
+        } else {
+            others
+                .first()
+                .map(|(_, name, _)| name.clone())
+                .unwrap_or_else(|| "Личный чат".to_string())
+        };
+
+        let (other_user_id, other_username, other_avatar_file_id) = if is_group {
+            (0, title.clone(), None)
+        } else {
+            others
+                .first()
+                .map(|(id, name, avatar_file_id)| (*id, name.clone(), *avatar_file_id))
+                .unwrap_or((0, title.clone(), None))
+        };
+
+        out.push(DmChatView {
+            chat_id,
+            other_user_id,
+            other_username,
+            other_avatar_file_id,
+            title,
+            is_group,
+            member_count,
+            member_names,
             last_message_id: r.try_get("last_message_id").ok(),
             last_message_at: r.try_get("last_message_at").ok(),
             last_message_preview: r.try_get("last_message_preview").ok(),
-        })
-        .collect::<Vec<_>>();
+        });
+    }
 
     (StatusCode::OK, Json(out)).into_response()
 }
@@ -346,6 +550,56 @@ async fn ensure_dm_participant(db: &sqlx::SqlitePool, chat_id: i64, user_id: i64
     .ok()
     .flatten()
     .is_some()
+}
+
+async fn list_participants(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(chat_id): Path<i64>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    if !ensure_dm_participant(db, chat_id, me.id).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT u.id,
+               u.username,
+               up.avatar_file_id,
+               COALESCE(p.is_online, 0) AS is_online,
+               COALESCE(p.status, 'offline') AS status
+        FROM chat_participants cp
+        JOIN users u ON u.id = cp.user_id
+        LEFT JOIN user_profile up ON up.user_id = u.id
+        LEFT JOIN user_presence p ON p.user_id = u.id
+        WHERE cp.chat_id = ?
+        ORDER BY CASE WHEN u.id = ? THEN 0 ELSE 1 END, lower(u.username)
+        "#,
+    )
+    .bind(chat_id)
+    .bind(me.id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let out = rows
+        .into_iter()
+        .map(|r| {
+            let id: i64 = r.get("id");
+            DmParticipantView {
+                id,
+                username: r.get("username"),
+                avatar_file_id: r.try_get("avatar_file_id").ok(),
+                is_me: id == me.id,
+                is_online: r.get::<i64, _>("is_online") != 0,
+                status: r.get("status"),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    (StatusCode::OK, Json(out)).into_response()
 }
 
 async fn list_messages(
@@ -561,26 +815,28 @@ async fn send_message(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let other_id = sqlx::query_scalar::<_, i64>(
-        "SELECT user_id FROM chat_participants WHERE chat_id = ? AND user_id != ? LIMIT 1",
+    let recipient_rows = sqlx::query(
+        "SELECT user_id FROM chat_participants WHERE chat_id = ? AND user_id != ?",
     )
     .bind(chat_id)
     .bind(me.id)
-    .fetch_optional(db)
+    .fetch_all(db)
     .await
-    .ok()
-    .flatten();
+    .unwrap_or_default();
 
-    let Some(other_id) = other_id else {
+    if recipient_rows.is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
-    };
+    }
 
-    if is_blocked_pair(db, me.id, other_id).await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"detail":"Blocked"})),
-        )
-            .into_response();
+    for row in recipient_rows {
+        let other_id: i64 = row.get("user_id");
+        if is_blocked_pair(db, me.id, other_id).await {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"detail":"Blocked"})),
+            )
+                .into_response();
+        }
     }
 
     let content_trimmed = body.content.trim();

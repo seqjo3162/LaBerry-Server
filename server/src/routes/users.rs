@@ -336,6 +336,17 @@ pub struct SuggestionResponse {
     pub id: i64,
 }
 
+#[derive(Serialize)]
+pub struct SuggestionTicketView {
+    pub id: i64,
+    pub title: String,
+    pub message: String,
+    pub status: String,
+    pub created_at: String,
+    pub reviewed_at: Option<String>,
+    pub admin_note: String,
+}
+
 fn sanitize_status(s: &str) -> String {
     match s.to_ascii_lowercase().as_str() {
         "online" => "online".to_string(),
@@ -357,7 +368,7 @@ pub fn router() -> Router<AppState> {
         .route("/me/blocks/:user_id", put(block_user).delete(unblock_user))
         .route("/me/status", get(my_status).put(set_my_status))
         .route("/me/settings", get(get_my_settings).put(update_my_settings))
-        .route("/me/suggestions", post(create_suggestion))
+        .route("/me/suggestions", get(list_my_suggestions).post(create_suggestion))
         .route("/me/password", put(change_password))
         .route("/me/username", put(change_username))
         .route("/", get(list_users))
@@ -1021,6 +1032,7 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
     }
 
     let debug = env_bool("LB_DEBUG_EMAIL_CODES");
+    let local_fallback_code = env_bool("LB_EMAIL_LOCAL_CODE_FALLBACK");
 
     let (mail_sent, delivery, delivery_error) = match send_email_code_by_command(&email, &code, &purpose) {
         Ok(()) => (true, "sent".to_string(), None),
@@ -1036,7 +1048,11 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
 
     let resp = RequestEmailCodeResp {
         ok: true,
-        debug_code: if debug { Some(code) } else { None },
+        debug_code: if debug || (local_fallback_code && delivery == "not_configured") {
+            Some(code)
+        } else {
+            None
+        },
         expires_in_sec: 10 * 60,
         mail_sent,
         delivery,
@@ -1475,6 +1491,40 @@ fn trim_chars(raw: &str, max_chars: usize) -> String {
     raw.trim().chars().take(max_chars).collect()
 }
 
+async fn list_my_suggestions(
+    State(st): State<AppState>,
+    me: AuthUser,
+) -> impl IntoResponse {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, title, message, status, created_at, reviewed_at, admin_note
+        FROM user_suggestions
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(me.id)
+    .fetch_all(&st.db)
+    .await
+    .unwrap_or_default();
+
+    let out = rows
+        .into_iter()
+        .map(|r| SuggestionTicketView {
+            id: r.get("id"),
+            title: r.try_get("title").unwrap_or_default(),
+            message: r.try_get("message").unwrap_or_default(),
+            status: r.try_get("status").unwrap_or_else(|_| "open".to_string()),
+            created_at: r.try_get("created_at").unwrap_or_default(),
+            reviewed_at: r.try_get("reviewed_at").ok(),
+            admin_note: r.try_get("admin_note").unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+
+    (StatusCode::OK, Json(out)).into_response()
+}
+
 async fn create_suggestion(
     State(st): State<AppState>,
     me: AuthUser,
@@ -1489,6 +1539,37 @@ async fn create_suggestion(
             Json(serde_json::json!({"detail":"Suggestion text is required"})),
         )
             .into_response();
+    }
+
+    const SUGGESTION_COOLDOWN_SEC: i64 = 5 * 60;
+    let last_age_sec = sqlx::query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT CAST(strftime('%s','now') AS INTEGER) - CAST(strftime('%s', created_at) AS INTEGER)
+        FROM user_suggestions
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(me.id)
+    .fetch_optional(&st.db)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
+    if let Some(age) = last_age_sec {
+        if age >= 0 && age < SUGGESTION_COOLDOWN_SEC {
+            let retry = SUGGESTION_COOLDOWN_SEC - age;
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "detail":"Suggestion slow mode",
+                    "retry_after_sec": retry
+                })),
+            )
+                .into_response();
+        }
     }
 
     let rl_key = format!("user_suggestion:{}", me.id);

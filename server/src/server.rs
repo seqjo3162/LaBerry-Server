@@ -263,6 +263,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/api/messages", crate::routes::messages::global_router())
         .nest("/api/files", crate::routes::files::router())
         .nest("/api/gifs", crate::routes::gifs::router())
+        .nest("/api/downloads", crate::routes::downloads::router())
         .nest("/api/profile-files", crate::routes::profile_files::router())
         .nest("/api/embeds", crate::routes::embeds::router())
         .nest("/api/rtc", crate::routes::rtc::router())
@@ -411,7 +412,7 @@ pub fn build_admin_router(state: AppState) -> Router {
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
         )
         .with_state(state)
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
         // Security headers
         .layer(SetResponseHeaderLayer::if_not_present(
             axum::http::header::HeaderName::from_static("x-content-type-options"),
@@ -458,7 +459,34 @@ pub fn build_admin_router(state: AppState) -> Router {
         .layer(CatchPanicLayer::new())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
 
+    fn test_state() -> AppState {
+        AppState {
+            db: SqlitePoolOptions::new()
+                .connect_lazy("sqlite::memory:")
+                .expect("in-memory sqlite pool"),
+            hub: Arc::new(Hub::new()),
+            connected_ws: Arc::new(AtomicUsize::new(0)),
+            friends: HashMap::new(),
+            voice_states: HashMap::new(),
+            admin_sessions: Arc::new(DashMap::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn public_router_builds_without_panicking() {
+        let _router = build_router(test_state());
+    }
+
+    #[tokio::test]
+    async fn admin_router_builds_without_panicking() {
+        let _router = build_admin_router(test_state());
+    }
+}
 
 async fn system_status() -> impl IntoResponse {
     let maintenance = std::env::var("LB_MAINTENANCE_MODE")
