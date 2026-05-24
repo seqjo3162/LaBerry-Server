@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>LaBerry — Login</title>
-  <link rel="stylesheet" href="/static/css/main.css?v=55">
+  <link rel="stylesheet" href="/static/css/main.css?v=62">
 </head>
 <body class="auth-page">
   <div class="auth-card">
@@ -28,6 +28,16 @@
         required
       />
 
+      <label class="auth-legal" id="termsRow" hidden>
+        <input type="checkbox" id="termsAccepted" />
+        <span>
+          Я принимаю
+          <a href="/license-agreement" target="_blank" rel="noopener">пользовательское соглашение и правила</a>
+          и
+          <a href="/cookie-agreement" target="_blank" rel="noopener">соглашение о cookies</a>.
+        </span>
+      </label>
+
       <button class="btn" id="submit-btn" type="submit">
         Войти
       </button>
@@ -49,6 +59,6 @@
   </div>
 
   <script src="/static/js/start-page-link.js?v=1"></script>
-  <script src="/static/js/auth.js?v=9"></script>
+  <script src="/static/js/auth.js?v=10"></script>
 </body>
 </html>

@@ -18,6 +18,22 @@ use crate::ws::RoomId;
 
 const MAX_MESSAGE_CHARS: usize = 65535;
 
+fn encrypted_or_file_reference(content: &str) -> bool {
+    content.starts_with("[[e2ee:v1|")
+        || content.contains("[[file:")
+        || content.contains("[[file=")
+}
+
+fn encrypted_message_required_response() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "detail": "encrypted_message_required"
+        })),
+    )
+        .into_response()
+}
+
 #[derive(Serialize)]
 pub struct MessageRow {
     pub id: i64,
@@ -834,6 +850,10 @@ pub async fn send(
 
     if chat_server_id != Some(server_id) || is_private != 0 {
         return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if kind == "text" && !encrypted_or_file_reference(&content) {
+        return encrypted_message_required_response();
     }
 
     if kind == "voice" {

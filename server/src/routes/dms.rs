@@ -17,6 +17,22 @@ use crate::ws::RoomId;
 
 const MAX_MESSAGE_CHARS: usize = 65535;
 
+fn encrypted_or_file_reference(content: &str) -> bool {
+    content.starts_with("[[e2ee:v1|")
+        || content.contains("[[file:")
+        || content.contains("[[file=")
+}
+
+fn encrypted_message_required_response() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "detail": "encrypted_message_required"
+        })),
+    )
+        .into_response()
+}
+
 #[derive(Serialize)]
 pub struct DmChatView {
     pub chat_id: i64,
@@ -855,6 +871,10 @@ async fn send_message(
             })),
         )
             .into_response();
+    }
+
+    if !encrypted_or_file_reference(content_trimmed) {
+        return encrypted_message_required_response();
     }
 
     if let Some(reply_to_id) = body.reply_to_id {

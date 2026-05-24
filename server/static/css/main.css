@@ -300,6 +300,10 @@ html.ui-scaled .app-root {
   .mobile-only {
     display: inline-flex;
   }
+
+  .mobile-only[hidden] {
+    display: none !important;
+  }
 }
 
 
@@ -1927,6 +1931,31 @@ body.auth-page {
   margin-top: var(--space-sm);
 }
 
+.auth-legal {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.auth-legal input {
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+
+.auth-legal a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.auth-legal a:hover {
+  text-decoration: underline;
+}
+
 .auth-error {
   color: #f85149;
   font-size: 14px;
@@ -2763,11 +2792,15 @@ body.auth-page {
 .emoji-btn {
   width: 100%;
   aspect-ratio: 1 / 1;
+  display: grid;
+  place-items: center;
   border-radius: 12px;
   border: 1px solid rgba(255,255,255,0.10);
   background: rgba(255,255,255,0.03);
   cursor: pointer;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", system-ui, sans-serif;
   font-size: 18px;
+  line-height: 1;
 }
 
 .emoji-btn:hover {
@@ -4386,6 +4419,11 @@ body.compact-mode .message .content .text {
 
   .panel.members.show-members {
     display: flex;
+  }
+
+  .panel.members[hidden],
+  .panel.members[hidden].show-members {
+    display: none !important;
   }
 
   /* compact messages on phone */
@@ -7650,6 +7688,15 @@ textarea#message.inp {
 .md-attach-btn:hover { background: rgba(176, 76, 255, 0.16); border-color: rgba(176, 76, 255, 0.38); }
 .composer-emoji-btn,
 .gif-btn { width: 40px; height: 40px; border: 1px solid var(--border); background: rgba(255, 255, 255, 0.025); color: var(--text); border-radius: var(--radius-md); font-weight: 900; font-size: 13px; }
+.composer-emoji-btn,
+.react-add,
+.dm-home-ic,
+.voice-ic,
+.voice-view-ic,
+.topbar .icon-btn.mobile-only {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", system-ui, sans-serif;
+  line-height: 1;
+}
 .composer-emoji-btn:hover,
 .gif-btn:hover { background: rgba(176, 76, 255, 0.13); border-color: rgba(176, 76, 255, 0.34); }
 .gif-btn { color: var(--accent); letter-spacing: .02em; }
@@ -9372,6 +9419,7 @@ body.drawer-open {
   margin-top: 4px;
   color: var(--text-muted);
   font-size: 11px;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
@@ -9518,6 +9566,7 @@ body.drawer-open {
 
 .dm-profile-panel .profile-card {
   padding: 11px;
+  min-width: 0;
 }
 
 .dm-profile-panel .profile-label {
@@ -9531,6 +9580,37 @@ body.drawer-open {
 
 .dm-profile-open {
   width: 100%;
+}
+
+.dm-profile-panel .profile-text,
+.dm-profile-panel .profile-connection-label,
+.dm-profile-panel .profile-connection-url {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 700px), (pointer: coarse) {
+  .dm-profile-panel {
+    padding: 12px 10px 20px;
+  }
+
+  .dm-profile-head {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .dm-profile-avatar {
+    width: 56px;
+    height: 56px;
+    flex-basis: 56px;
+    border-radius: 16px;
+    font-size: 22px;
+  }
+
+  .dm-profile-name {
+    font-size: 16px;
+  }
 }
 
 .session-list {

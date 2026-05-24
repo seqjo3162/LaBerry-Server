@@ -28,8 +28,6 @@ async fn try_add_column(
         .execute(db)
         .await;
 
-
-    // default AI user from env, if enabled
     let ai_enabled_env = std::env::var("LB_AI_ENABLED")
         .ok()
         .map(|v| {
@@ -88,6 +86,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
             two_factor_secret_code_hash TEXT,
             two_factor_code_sent_at TEXT,
             public_encryption_key TEXT,
+            terms_accepted_at TEXT,
+            terms_agreement_version TEXT,
             cookie_consent_status TEXT NOT NULL DEFAULT 'unknown',
             cookie_consent_at TEXT,
             trust_factor INTEGER NOT NULL DEFAULT 100,
@@ -105,6 +105,8 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
         .await?;
     try_add_column(db, "users", "email_pending TEXT", "email_pending").await?;
     try_add_column(db, "users", "public_encryption_key TEXT", "public_encryption_key").await?;
+    try_add_column(db, "users", "terms_accepted_at TEXT", "terms_accepted_at").await?;
+    try_add_column(db, "users", "terms_agreement_version TEXT", "terms_agreement_version").await?;
     try_add_column(db, "users", "cookie_consent_status TEXT NOT NULL DEFAULT 'unknown'", "cookie_consent_status").await?;
     try_add_column(db, "users", "cookie_consent_at TEXT", "cookie_consent_at").await?;
     try_add_column(db, "users", "trust_factor INTEGER NOT NULL DEFAULT 100", "trust_factor").await?;
@@ -112,7 +114,6 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     try_add_column(db, "users", "trust_review_reason TEXT", "trust_review_reason").await?;
     try_add_column(db, "users", "trust_review_at TEXT", "trust_review_at").await?;
 
-    // AI marker columns
     try_add_column(db, "users", "is_ai INTEGER NOT NULL DEFAULT 0", "is_ai").await?;
     try_add_column(db, "users", "ai_label TEXT", "ai_label").await?;
 
@@ -857,8 +858,6 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
         .execute(db)
         .await;
 
-
-    // default AI user from env, if enabled
     let ai_enabled_env = std::env::var("LB_AI_ENABLED")
         .ok()
         .map(|v| {

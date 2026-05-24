@@ -62,6 +62,7 @@ let settingsSnapshot = null;
 
 const E2EE_PREFIX = '[[e2ee:v1|';
 const E2EE_SUFFIX = ']]';
+const E2EE_TRUSTED_KEYS_PREFIX = 'lb:e2ee:trusted_public_keys:v1';
 let e2eeIdentityPromise = null;
 const e2eePublicKeyCache = new Map();
 let e2eeMissingKeyWarnedAt = 0;
@@ -73,6 +74,11 @@ function e2eeAvailable() {
 function e2eeStorageKey() {
     const uid = Number(currentUser?.id);
     return `lb:e2ee:identity:v1:${Number.isFinite(uid) && uid > 0 ? uid : 'anon'}`;
+}
+
+function e2eeTrustedKeysStorageKey() {
+    const uid = Number(currentUser?.id);
+    return `${E2EE_TRUSTED_KEYS_PREFIX}:${Number.isFinite(uid) && uid > 0 ? uid : 'anon'}`;
 }
 
 function e2eeIsEncryptedText(text) {
@@ -98,12 +104,76 @@ function e2eeB64uToBytes(value) {
 
 function e2eeParsePublicKey(value) {
     if (!value) return null;
-    if (typeof value === 'object') return value;
+    if (typeof value === 'object') {
+        if (value.ecdh && typeof value.ecdh === 'object') return value.ecdh;
+        if (value.publicJwk && typeof value.publicJwk === 'object') return value.publicJwk;
+        return value;
+    }
     try {
         const parsed = JSON.parse(String(value));
-        return parsed && typeof parsed === 'object' ? parsed : null;
+        if (!parsed || typeof parsed !== 'object') return null;
+        if (parsed.ecdh && typeof parsed.ecdh === 'object') return parsed.ecdh;
+        if (parsed.publicJwk && typeof parsed.publicJwk === 'object') return parsed.publicJwk;
+        return parsed;
     } catch (_) {
         return null;
+    }
+}
+
+function e2eeStableJson(value) {
+    if (Array.isArray(value)) {
+        return `[${value.map(e2eeStableJson).join(',')}]`;
+    }
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${e2eeStableJson(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+}
+
+async function e2eeFingerprintPublicKey(jwk) {
+    if (!e2eeAvailable() || !jwk) return null;
+    const bytes = new TextEncoder().encode(e2eeStableJson(jwk));
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return e2eeBytesToB64u(new Uint8Array(digest));
+}
+
+function e2eeLoadTrustedKeys() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(e2eeTrustedKeysStorageKey()) || '{}');
+        return raw && typeof raw === 'object' ? raw : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function e2eeSaveTrustedKeys(map) {
+    try {
+        localStorage.setItem(e2eeTrustedKeysStorageKey(), JSON.stringify(map || {}));
+    } catch (_) {}
+}
+
+async function e2eeTrustPublicKey(userId, username, jwk) {
+    const id = Number(userId);
+    if (!Number.isFinite(id) || id <= 0 || id === Number(currentUser?.id)) return;
+    const fingerprint = await e2eeFingerprintPublicKey(jwk);
+    if (!fingerprint) throw new Error('e2ee_key_fingerprint_failed');
+
+    const trusted = e2eeLoadTrustedKeys();
+    const prev = trusted[String(id)];
+    if (prev?.fingerprint && prev.fingerprint !== fingerprint) {
+        const err = new Error('e2ee_public_key_changed');
+        err.code = 'e2ee_public_key_changed';
+        err.username = username || `#${id}`;
+        throw err;
+    }
+
+    if (!prev) {
+        trusted[String(id)] = {
+            fingerprint,
+            username: username || '',
+            trusted_at: new Date().toISOString(),
+        };
+        e2eeSaveTrustedKeys(trusted);
     }
 }
 
@@ -197,9 +267,13 @@ async function e2eeGetUserPublicKey(userId) {
     try {
         const u = await api(`/api/users/${encodeURIComponent(id)}`);
         const jwk = e2eeParsePublicKey(u?.public_encryption_key);
-        if (jwk) e2eePublicKeyCache.set(id, jwk);
+        if (jwk) {
+            await e2eeTrustPublicKey(id, u?.username, jwk);
+            e2eePublicKeyCache.set(id, jwk);
+        }
         return jwk;
-    } catch (_) {
+    } catch (e) {
+        if (e?.code === 'e2ee_public_key_changed') throw e;
         return null;
     }
 }
@@ -240,6 +314,7 @@ async function e2eeCurrentChatRecipients() {
         }
     } catch (e) {
         console.warn('[E2EE] failed to load recipients', e);
+        throw new Error('e2ee_recipients_failed');
     }
 
     return [...out.values()];
@@ -257,9 +332,10 @@ function e2eeShouldEncryptOutgoing(content) {
 async function e2eeEncryptForCurrentChat(plaintext) {
     if (!e2eeShouldEncryptOutgoing(plaintext)) return plaintext;
     const identity = await e2eeEnsureIdentity(true);
-    if (!identity) return plaintext;
+    if (!identity) throw new Error('e2ee_identity_unavailable');
 
     const recipients = await e2eeCurrentChatRecipients();
+    if (!recipients.length) throw new Error('e2ee_no_recipients');
     const keys = {};
     const missing = [];
 
@@ -278,6 +354,7 @@ async function e2eeEncryptForCurrentChat(plaintext) {
             missing.push(recipient?.username || `#${id}`);
             continue;
         }
+        await e2eeTrustPublicKey(id, recipient?.username, jwk);
         const wrapKey = await e2eeDeriveWrapKey(jwk);
         if (!wrapKey) {
             missing.push(recipient?.username || `#${id}`);
@@ -294,7 +371,7 @@ async function e2eeEncryptForCurrentChat(plaintext) {
             e2eeMissingKeyWarnedAt = now;
             showToast(`E2EE не применено: нет ключей у ${missing.slice(0, 3).join(', ') || 'участников'}`);
         }
-        return plaintext;
+        throw new Error('e2ee_missing_recipient_keys');
     }
 
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -2529,13 +2606,17 @@ function toggleServersMenu() {
 
 function showMembersMenu() {
     const membersPanel = document.querySelector('.panel.members');
-    if (membersPanel) {
-        membersPanel.classList.add('show-members');
-        document.body.classList.add('members-open');
-        hideChannelsMenu();
-        hideServersMenu();
-        syncDrawerOverlayState();
+    if (!membersPanel) return;
+    if (!canShowMembersMenu()) {
+        hideMembersMenu();
+        return;
     }
+    membersPanel.hidden = false;
+    membersPanel.classList.add('show-members');
+    document.body.classList.add('members-open');
+    hideChannelsMenu();
+    hideServersMenu();
+    syncDrawerOverlayState();
 }
 
 function hideMembersMenu() {
@@ -2550,13 +2631,49 @@ function hideMembersMenu() {
 function toggleMembersMenu() {
     const membersPanel = document.querySelector('.panel.members');
     if (!membersPanel) return;
+    if (!canShowMembersMenu()) {
+        hideMembersMenu();
+        return;
+    }
     const isVisible = membersPanel.classList.contains('show-members');
     if (isVisible) hideMembersMenu();
     else showMembersMenu();
 }
 
+function isUtilityViewActive() {
+    const utilityView = document.getElementById('utilityView');
+    return !!utilityView && utilityView.hidden === false;
+}
+
+function isKnownDmChatId(chatId) {
+    const cid = Number(chatId || 0);
+    return Number.isFinite(cid) && cid > 0 && (dmMetaByChatId.has(cid) || hiddenDmMeta.has(cid));
+}
+
+function canShowMembersMenu() {
+    if (isUtilityViewActive()) return false;
+    if (!currentServerId && !isKnownDmChatId(currentChatId)) return false;
+    return true;
+}
+
+function syncMobileMembersButton() {
+    const btn = document.getElementById('mobileMembersBtn');
+    if (!btn) return;
+    btn.hidden = isUtilityViewActive() || (!currentServerId && !isKnownDmChatId(currentChatId));
+}
+
+function clearMembersPanelContent() {
+    const membersPanel = document.getElementById('membersPanel');
+    const membersList = document.getElementById('membersList');
+    const countEl = membersPanel?.querySelector('.count');
+    const titleEl = membersPanel?.querySelector('.panelHeader h3');
+    if (membersList) membersList.innerHTML = '';
+    if (countEl) countEl.textContent = '';
+    if (titleEl) titleEl.textContent = 'Участники';
+}
+
 function isDmModeActive() {
-    return !currentServerId && Number(currentChatId || 0) > 0;
+    return !currentServerId && isKnownDmChatId(currentChatId);
 }
 
 function applyDmProfilePanelVisibility() {
@@ -4018,6 +4135,7 @@ function setUiModeServer() {
     if (membersPanel) membersPanel.hidden = false;
     document.body.classList.remove('dm-profile-panel-hidden');
     syncDmProfilePanelButtons();
+    syncMobileMembersButton();
 
     try { updateChannelAdminUi(); } catch (_) {}
 }
@@ -4036,12 +4154,16 @@ function setUiModeDm() {
     if (channelsList) channelsList.hidden = true;
     if (dmHomeMenu) dmHomeMenu.hidden = false;
     if (dmList) dmList.hidden = false;
+    const hasDmChat = isKnownDmChatId(currentChatId);
     // On desktop keep the DM profile visible unless the user collapsed it.
-    if (membersPanel) membersPanel.hidden = isTouchUi();
-    if (currentChatId) {
+    if (membersPanel) membersPanel.hidden = isTouchUi() || !hasDmChat;
+    if (hasDmChat) {
         try { renderDmProfile(currentChatId).catch(() => {}); } catch (_) {}
+    } else {
+        clearMembersPanelContent();
     }
     applyDmProfilePanelVisibility();
+    syncMobileMembersButton();
 
     try { updateChannelAdminUi(); } catch (_) {}
 }
@@ -4264,8 +4386,11 @@ function openUtilityPanel(tab, opts = {}) {
 
     if (chatView) chatView.hidden = true;
     if (friendsView) friendsView.hidden = true;
+    hideMembersMenu();
     if (membersPanel) membersPanel.hidden = true;
+    clearMembersPanelContent();
     utilityView.hidden = false;
+    syncMobileMembersButton();
 
     if (tab === 'home') {
         window.location.href = '/start';
@@ -4905,7 +5030,12 @@ function renderDmMembers(chatId) {
     if (!membersPanel || !membersList) return;
 
     const cid = Number(chatId);
-    const meta = dmMetaByChatId.get(cid) || {};
+    if (!isKnownDmChatId(cid)) {
+        clearMembersPanelContent();
+        membersPanel.hidden = true;
+        return;
+    }
+    const meta = dmMetaByChatId.get(cid) || hiddenDmMeta.get(cid) || {};
     const otherName = (meta.otherName || chatNameById.get(cid) || 'Собеседник').toString();
     const otherId = Number(meta.otherId || 0);
     const meName = (currentUser?.username || 'Вы').toString();
@@ -5092,7 +5222,12 @@ async function renderDmProfile(chatId) {
     if (!membersPanel || !membersList) return;
 
     const cid = Number(chatId);
-    const meta = dmMetaByChatId.get(cid) || {};
+    if (!isKnownDmChatId(cid)) {
+        clearMembersPanelContent();
+        membersPanel.hidden = true;
+        return;
+    }
+    const meta = dmMetaByChatId.get(cid) || hiddenDmMeta.get(cid) || {};
     const otherName = (meta.otherName || chatNameById.get(cid) || 'Собеседник').toString();
     const otherId = Number(meta.otherId || 0);
 
@@ -5125,6 +5260,7 @@ async function renderDmProfile(chatId) {
     const statusText = (profile?.status_text || '').toString().trim();
     const about = (profile?.about || '').toString().trim();
     const joinedAt = formatProfileDate(profile?.created_at);
+    const joinedText = joinedAt === 'Дата регистрации неизвестна' ? joinedAt : `С нами с ${joinedAt}`;
 
     membersList.innerHTML = `
       <div class="dm-profile-panel">
@@ -5134,7 +5270,7 @@ async function renderDmProfile(chatId) {
             <div class="dm-profile-name">${escapeHtml(display)}</div>
             <div class="dm-profile-username">@${escapeHtml(username)}</div>
             <div class="profile-presence status-${escapeHtml(statusClass)}">${escapeHtml(statusToLabel(statusClass))}</div>
-            <div class="profile-joined">С нами с ${escapeHtml(joinedAt)}</div>
+            <div class="profile-joined">${escapeHtml(joinedText)}</div>
           </div>
         </div>
 
@@ -5249,6 +5385,7 @@ async function openChat(chatId, title) {
         dmCallBtn.hidden = !isDm || !!dmMeta.isGroup;
     }
     syncDmProfilePanelButtons();
+    syncMobileMembersButton();
     refreshDmCallFloat();
     
     document.querySelectorAll('.item.channel').forEach(item => {
@@ -6073,8 +6210,12 @@ function setupMessageComposer() {
             outgoingContent = await e2eeEncryptForCurrentChat(c);
         } catch (e) {
             console.warn('[E2EE] outgoing encryption failed', e);
-            showToast('Не удалось зашифровать сообщение, отправляю обычным текстом');
-            outgoingContent = c;
+            const who = e?.username ? ` (${e.username})` : '';
+            const text = e?.code === 'e2ee_public_key_changed'
+                ? `Сообщение не отправлено: изменился ключ E2EE${who}. Проверьте собеседника.`
+                : 'Сообщение не отправлено: E2EE не готово для всех участников.';
+            showToast(text);
+            return null;
         }
         const payload = await api(url, {
             method: 'POST',

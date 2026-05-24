@@ -33,6 +33,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   const toRegister = document.getElementById("to-register");
   const toLogin = document.getElementById("to-login");
   const switchText = document.getElementById("switch-text");
+  const termsRow = document.getElementById("termsRow");
+  const termsAccepted = document.getElementById("termsAccepted");
+  const TERMS_AGREEMENT_VERSION = "license-rules-2026-05-24";
 
   if (!form || !errorBox || !submitBtn) {
     console.error("auth elements not found");
@@ -77,6 +80,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       user_exists: "Пользователь уже существует",
       weak_password: "Пароль слишком короткий",
       bad_request: "Неверные данные",
+      "Terms agreement required": "Нужно принять пользовательское соглашение и правила LaBerry",
     };
     return m[code] || "Ошибка авторизации";
   }
@@ -126,6 +130,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
+    if (mode === "register" && !termsAccepted?.checked) {
+      showError("Нужно принять пользовательское соглашение и правила LaBerry");
+      return;
+    }
+
     let res, data;
     try {
       if (mode === "login") {
@@ -144,7 +153,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         res = await fetch("/api/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, password }),
+          body: JSON.stringify({
+            username,
+            password,
+            accepted_terms: true,
+            agreement_version: TERMS_AGREEMENT_VERSION,
+          }),
         });
       }
 
@@ -155,7 +169,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (!res.ok) {
-      showError(mapError(data.error));
+      showError(mapError(data?.error || data?.detail));
       return;
     }
 
@@ -187,6 +201,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       submitBtn.textContent = "Зарегистрироваться";
       if (toRegister) toRegister.hidden = true;
       if (toLogin) toLogin.hidden = false;
+      if (termsRow) termsRow.hidden = false;
       if (switchText) switchText.textContent = "Уже есть аккаунт?";
       if (title) title.textContent = "Регистрация";
       form.username.placeholder = "Username";
@@ -195,6 +210,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       submitBtn.textContent = "Войти";
       if (toRegister) toRegister.hidden = false;
       if (toLogin) toLogin.hidden = true;
+      if (termsRow) termsRow.hidden = true;
+      if (termsAccepted) termsAccepted.checked = false;
       if (switchText) switchText.textContent = "Нет аккаунта?";
       if (title) title.textContent = "LaBerry";
       form.username.placeholder = "Username";

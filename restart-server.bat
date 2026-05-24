@@ -29,7 +29,6 @@ taskkill /F /T /IM laberry.exe >nul 2>nul
 timeout /t 2 /nobreak >nul
 
 
-rem === LaBerry AI / LM Studio ===
 set "LB_AI_ENABLED=true"
 set "LB_AI_BASE_URL=http://127.0.0.1:1234/v1"
 set "LB_AI_MODEL=qwen_qwen3-4b-instruct-2507"

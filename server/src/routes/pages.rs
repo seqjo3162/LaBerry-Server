@@ -22,6 +22,10 @@ pub async fn cookie_agreement() -> Html<String> {
     Html(std::fs::read_to_string(static_path("cookie-agreement.html")).unwrap_or_default())
 }
 
+pub async fn license_agreement() -> Html<String> {
+    Html(std::fs::read_to_string(static_path("license-agreement.html")).unwrap_or_default())
+}
+
 
 pub async fn admin_hint() -> Html<String> {
     let host = std::env::var("LB_ADMIN_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());

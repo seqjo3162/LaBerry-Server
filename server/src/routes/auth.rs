@@ -39,6 +39,8 @@ pub struct RegisterBody {
     pub username: String,
     pub password: String,
     pub email: Option<String>,
+    pub accepted_terms: Option<bool>,
+    pub agreement_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +96,10 @@ async fn register(
     let username = auth::normalize_username(&body.username)
         .ok_or(ApiError::BadRequest("Invalid username"))?;
 
+    if body.accepted_terms != Some(true) {
+        return Err(ApiError::BadRequest("Terms agreement required"));
+    }
+
     // Проверка username
     let username_exists = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM users WHERE username = ? LIMIT 1",
@@ -127,18 +133,27 @@ async fn register(
     let password_hash =
         auth::hash_password(&body.password).map_err(|_| ApiError::Internal("Hash error"))?;
     let created_at = auth::now_iso();
+    let agreement_version = body
+        .agreement_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("license-rules-2026-05-24");
 
     let result = sqlx::query(
         r#"
         INSERT INTO users
-        (username, email, password_hash, is_banned, created_at, token_version, is_2fa_enabled)
-        VALUES (?, ?, ?, 0, ?, 1, 0)
+        (username, email, password_hash, is_banned, created_at, token_version, is_2fa_enabled,
+         terms_accepted_at, terms_agreement_version)
+        VALUES (?, ?, ?, 0, ?, 1, 0, ?, ?)
         "#,
     )
     .bind(&username)
     .bind(&body.email)
     .bind(&password_hash)
     .bind(&created_at)
+    .bind(&created_at)
+    .bind(agreement_version)
     .execute(db)
     .await
     .map_err(|_| ApiError::Internal("Database error"))?;

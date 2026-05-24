@@ -247,6 +247,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/app", get(crate::routes::pages::app))
         .route("/start", get(crate::routes::pages::start))
         .route("/cookie-agreement", get(crate::routes::pages::cookie_agreement))
+        .route("/license-agreement", get(crate::routes::pages::license_agreement))
         .route("/admin", get(crate::routes::pages::admin_hint))
         .route("/admin/", get(crate::routes::pages::admin_hint))
         .route("/health", get(|| async { "OK" }))
@@ -287,6 +288,7 @@ pub fn build_router(state: AppState) -> Router {
     // It is served by a dedicated local-only listener (see run_server).
 
     let router = router.with_state(state)
+        .layer(axum::middleware::from_fn(crate::middleware::host_guard::host_guard))
         .layer(axum::middleware::from_fn(crate::middleware::geo_guard::geo_guard))
         // Protect server from huge request bodies (uploads, etc.)
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
@@ -319,7 +321,7 @@ pub fn build_router(state: AppState) -> Router {
 .layer(SetResponseHeaderLayer::if_not_present(
     axum::http::header::HeaderName::from_static("content-security-policy"),
     HeaderValue::from_str(
-        &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'".to_string())
+        &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
     ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
 ))
 

@@ -29,3 +29,6 @@ TODO.md
 *.zip
 .cargo/config.toml
 *.7z
+*.crt
+*.crt
+server/messenger.crt

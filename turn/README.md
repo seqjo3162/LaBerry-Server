@@ -6,7 +6,7 @@
    docker compose up -d
 
 3) В сервер LaBerry добавь env:
-   LB_TURN_URLS=turn:YOUR_PUBLIC_DOMAIN_OR_IP:3478?transport=udp,turn:YOUR_PUBLIC_DOMAIN_OR_IP:3478?transport=tcp
+   LB_TURN_URLS=turn:YOUR_PUBLIC_DOMAIN:3478?transport=udp,turn:YOUR_PUBLIC_DOMAIN:3478?transport=tcp
    LB_TURN_SECRET=ТВОЙ_static-auth-secret
    LB_TURN_TTL_SEC=3600
 
