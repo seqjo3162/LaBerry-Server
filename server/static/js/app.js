@@ -21,7 +21,7 @@ import { initFriends } from "./friends.js?v=10";
 import { wsManager } from "./websocket-manager.js?v=12";
 import { createSettingsUI } from "./settings.js?v=16";
 import { showUserMenu } from "./user-menu.js?v=10";
-import { initVoice } from "./voice.js?v=26";
+import { initVoice } from "./voice.js?v=30";
 import { initProfileModal } from "./profile-modal.js?v=13";
 
 appLog('[APP] All imports loaded successfully');
@@ -50,7 +50,6 @@ const chatServerById = new Map(); // chat_id -> server_id
 const SERVER_MUTED_KEY = 'lb:muted_servers:v1';
 const DM_PROFILE_PANEL_HIDDEN_KEY = 'lb:dm_profile_panel_hidden:v1';
 const DM_CALL_FLOAT_CORNER_KEY = 'lb:dm_call_float_corner:v1';
-const APP_HOME_SEEN_KEY = 'lb:home_seen:v1';
 let mutedServerIds = new Set();
 let dmProfilePanelHidden = false;
 let activeDmCall = null;
@@ -60,6 +59,310 @@ let lastServersSnapshot = [];
 let serverSearchQuery = '';
 
 let settingsSnapshot = null;
+
+const E2EE_PREFIX = '[[e2ee:v1|';
+const E2EE_SUFFIX = ']]';
+let e2eeIdentityPromise = null;
+const e2eePublicKeyCache = new Map();
+let e2eeMissingKeyWarnedAt = 0;
+
+function e2eeAvailable() {
+    return !!(window.crypto?.subtle && window.crypto?.getRandomValues && window.TextEncoder && window.TextDecoder);
+}
+
+function e2eeStorageKey() {
+    const uid = Number(currentUser?.id);
+    return `lb:e2ee:identity:v1:${Number.isFinite(uid) && uid > 0 ? uid : 'anon'}`;
+}
+
+function e2eeIsEncryptedText(text) {
+    const raw = (text || '').toString().trim();
+    return raw.startsWith(E2EE_PREFIX) && raw.endsWith(E2EE_SUFFIX);
+}
+
+function e2eeBytesToB64u(bytes) {
+    let bin = '';
+    const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    for (let i = 0; i < arr.length; i += 1) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function e2eeB64uToBytes(value) {
+    const s = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+    const padded = s + '='.repeat((4 - (s.length % 4)) % 4);
+    const bin = atob(padded);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+    return out;
+}
+
+function e2eeParsePublicKey(value) {
+    if (!value) return null;
+    if (typeof value === 'object') return value;
+    try {
+        const parsed = JSON.parse(String(value));
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function e2eeParseEnvelope(text) {
+    const raw = (text || '').toString().trim();
+    if (!e2eeIsEncryptedText(raw)) return null;
+    try {
+        const packed = raw.slice(E2EE_PREFIX.length, -E2EE_SUFFIX.length);
+        const json = new TextDecoder().decode(e2eeB64uToBytes(packed));
+        const env = JSON.parse(json);
+        return env && env.alg === 'LB-E2EE-v1' ? env : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+async function e2eeImportPublicKey(jwk) {
+    if (!jwk) return null;
+    return crypto.subtle.importKey(
+        'jwk',
+        jwk,
+        { name: 'ECDH', namedCurve: 'P-256' },
+        false,
+        []
+    );
+}
+
+async function e2eeEnsureIdentity(upload = false) {
+    if (!e2eeAvailable()) return null;
+    if (e2eeIdentityPromise) return e2eeIdentityPromise;
+
+    e2eeIdentityPromise = (async () => {
+        let saved = null;
+        try { saved = JSON.parse(localStorage.getItem(e2eeStorageKey()) || 'null'); } catch (_) { saved = null; }
+
+        let privateJwk = saved?.privateJwk || null;
+        let publicJwk = saved?.publicJwk || null;
+
+        if (!privateJwk || !publicJwk) {
+            const pair = await crypto.subtle.generateKey(
+                { name: 'ECDH', namedCurve: 'P-256' },
+                true,
+                ['deriveKey']
+            );
+            privateJwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
+            publicJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
+            try { localStorage.setItem(e2eeStorageKey(), JSON.stringify({ privateJwk, publicJwk })); } catch (_) {}
+        }
+
+        const privateKey = await crypto.subtle.importKey(
+            'jwk',
+            privateJwk,
+            { name: 'ECDH', namedCurve: 'P-256' },
+            false,
+            ['deriveKey']
+        );
+
+        const publicText = JSON.stringify(publicJwk);
+        if (upload && currentUser && currentUser.public_encryption_key !== publicText) {
+            try {
+                const updated = await api('/api/users/me', {
+                    method: 'PUT',
+                    body: JSON.stringify({ public_encryption_key: publicText })
+                });
+                currentUser = { ...currentUser, ...(updated || {}), public_encryption_key: publicText };
+            } catch (e) {
+                console.warn('[E2EE] failed to publish public key', e);
+            }
+        }
+
+        if (currentUser?.id) {
+            e2eePublicKeyCache.set(Number(currentUser.id), publicJwk);
+        }
+
+        return { privateKey, publicJwk, publicText };
+    })();
+
+    return e2eeIdentityPromise;
+}
+
+async function e2eeGetUserPublicKey(userId) {
+    const id = Number(userId);
+    if (!Number.isFinite(id) || id <= 0) return null;
+    if (e2eePublicKeyCache.has(id)) return e2eePublicKeyCache.get(id);
+
+    if (id === Number(currentUser?.id)) {
+        const own = await e2eeEnsureIdentity(false);
+        if (own?.publicJwk) return own.publicJwk;
+    }
+
+    try {
+        const u = await api(`/api/users/${encodeURIComponent(id)}`);
+        const jwk = e2eeParsePublicKey(u?.public_encryption_key);
+        if (jwk) e2eePublicKeyCache.set(id, jwk);
+        return jwk;
+    } catch (_) {
+        return null;
+    }
+}
+
+async function e2eeDeriveWrapKey(publicJwk) {
+    const identity = await e2eeEnsureIdentity(false);
+    if (!identity || !publicJwk) return null;
+    const publicKey = await e2eeImportPublicKey(publicJwk);
+    if (!publicKey) return null;
+    return crypto.subtle.deriveKey(
+        { name: 'ECDH', public: publicKey },
+        identity.privateKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+    );
+}
+
+async function e2eeCurrentChatRecipients() {
+    const out = new Map();
+    if (currentUser?.id) {
+        const own = await e2eeEnsureIdentity(false);
+        out.set(Number(currentUser.id), {
+            id: Number(currentUser.id),
+            username: currentUser.username || 'Вы',
+            public_encryption_key: own?.publicText || currentUser.public_encryption_key || null,
+        });
+    }
+
+    try {
+        const rows = currentServerId
+            ? await api(`/api/servers/${encodeURIComponent(currentServerId)}/members`)
+            : await api(`/api/dms/${encodeURIComponent(currentChatId)}/participants`);
+        for (const row of Array.isArray(rows) ? rows : []) {
+            const id = Number(row?.id);
+            if (!Number.isFinite(id) || id <= 0) continue;
+            out.set(id, row);
+        }
+    } catch (e) {
+        console.warn('[E2EE] failed to load recipients', e);
+    }
+
+    return [...out.values()];
+}
+
+function e2eeShouldEncryptOutgoing(content) {
+    const raw = (content || '').toString();
+    if (!raw.trim()) return false;
+    if (e2eeIsEncryptedText(raw)) return false;
+    if (raw.includes('[[file:') || raw.includes('[[file=')) return false;
+    if (!currentChatId) return false;
+    return e2eeAvailable();
+}
+
+async function e2eeEncryptForCurrentChat(plaintext) {
+    if (!e2eeShouldEncryptOutgoing(plaintext)) return plaintext;
+    const identity = await e2eeEnsureIdentity(true);
+    if (!identity) return plaintext;
+
+    const recipients = await e2eeCurrentChatRecipients();
+    const keys = {};
+    const missing = [];
+
+    const messageKey = await crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 },
+        true,
+        ['encrypt', 'decrypt']
+    );
+    const messageKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', messageKey));
+
+    for (const recipient of recipients) {
+        const id = Number(recipient?.id);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        const jwk = e2eeParsePublicKey(recipient?.public_encryption_key) || await e2eeGetUserPublicKey(id);
+        if (!jwk) {
+            missing.push(recipient?.username || `#${id}`);
+            continue;
+        }
+        const wrapKey = await e2eeDeriveWrapKey(jwk);
+        if (!wrapKey) {
+            missing.push(recipient?.username || `#${id}`);
+            continue;
+        }
+        const keyIv = crypto.getRandomValues(new Uint8Array(12));
+        const keyCt = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: keyIv }, wrapKey, messageKeyRaw));
+        keys[String(id)] = { iv: e2eeBytesToB64u(keyIv), ct: e2eeBytesToB64u(keyCt) };
+    }
+
+    if (!keys[String(currentUser?.id)] || missing.length) {
+        const now = Date.now();
+        if (now - e2eeMissingKeyWarnedAt > 8000) {
+            e2eeMissingKeyWarnedAt = now;
+            showToast(`E2EE не применено: нет ключей у ${missing.slice(0, 3).join(', ') || 'участников'}`);
+        }
+        return plaintext;
+    }
+
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        messageKey,
+        new TextEncoder().encode(String(plaintext))
+    ));
+
+    const envelope = {
+        alg: 'LB-E2EE-v1',
+        sender: Number(currentUser?.id) || 0,
+        sender_key: identity.publicJwk,
+        iv: e2eeBytesToB64u(iv),
+        ct: e2eeBytesToB64u(ct),
+        keys,
+    };
+
+    const packed = e2eeBytesToB64u(new TextEncoder().encode(JSON.stringify(envelope)));
+    return `${E2EE_PREFIX}${packed}${E2EE_SUFFIX}`;
+}
+
+async function e2eeDecryptText(content) {
+    const raw = (content || '').toString();
+    const env = e2eeParseEnvelope(raw);
+    if (!env) return raw;
+    if (!e2eeAvailable()) return '🔒 Сообщение зашифровано. Нужен HTTPS и современный браузер.';
+
+    try {
+        const identity = await e2eeEnsureIdentity(false);
+        if (!identity || !currentUser?.id) return '🔒 Не удалось открыть ключ шифрования.';
+        const wrapped = env.keys?.[String(currentUser.id)];
+        if (!wrapped) return '🔒 Сообщение зашифровано не для этого аккаунта или устройства.';
+
+        const senderKey = e2eeParsePublicKey(env.sender_key) || await e2eeGetUserPublicKey(env.sender);
+        const wrapKey = await e2eeDeriveWrapKey(senderKey);
+        if (!wrapKey) return '🔒 Не удалось получить ключ отправителя.';
+
+        const messageKeyRaw = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: e2eeB64uToBytes(wrapped.iv) },
+            wrapKey,
+            e2eeB64uToBytes(wrapped.ct)
+        );
+        const messageKey = await crypto.subtle.importKey('raw', messageKeyRaw, { name: 'AES-GCM' }, false, ['decrypt']);
+        const plain = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: e2eeB64uToBytes(env.iv) },
+            messageKey,
+            e2eeB64uToBytes(env.ct)
+        );
+        return new TextDecoder().decode(plain);
+    } catch (e) {
+        console.warn('[E2EE] decrypt failed', e);
+        return '🔒 Не удалось расшифровать сообщение на этом устройстве.';
+    }
+}
+
+async function prepareMessageForDisplay(msg) {
+    if (!msg || typeof msg !== 'object') return msg;
+    const out = { ...msg };
+    out.content = await e2eeDecryptText(out.content);
+    if (out.reply_preview && typeof out.reply_preview === 'object') {
+        out.reply_preview = {
+            ...out.reply_preview,
+            content: await e2eeDecryptText(out.reply_preview.content),
+        };
+    }
+    return out;
+}
 
 function loadMutedServers() {
     try {
@@ -2034,6 +2337,79 @@ async function createServerFlow() {
     openServerHubModal('create');
 }
 
+const COOKIE_AGREEMENT_VERSION = 'cookies-geo-v1';
+
+function needsCookieConsentPrompt() {
+    const status = (currentUser?.cookie_consent_status || 'unknown').toString().toLowerCase();
+    return status !== 'accepted' && status !== 'declined';
+}
+
+function removeCookieConsentModal() {
+    document.getElementById('cookieConsentOverlay')?.remove();
+}
+
+function showCookieConsentModal() {
+    removeCookieConsentModal();
+
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.id = 'cookieConsentOverlay';
+        overlay.className = 'cookie-consent-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.innerHTML = `
+            <div class="cookie-consent-card">
+                <div class="cookie-consent-kicker">Безопасность LaBerry</div>
+                <h2>Нужны cookies и проверочные данные</h2>
+                <p>LaBerry использует необходимые cookies/storage для входа, сессии, настроек, E2EE-ключей в браузере и проверки правил доступа по локации.</p>
+                <p>Сайт не может видеть список VPN-расширений браузера напрямую. Проверка VPN/proxy выполняется сервером по IP, CDN/proxy-заголовкам и другим сетевым сигналам.</p>
+                <a class="cookie-consent-link" href="/cookie-agreement" target="_blank" rel="noopener">Открыть соглашение о cookies и проверке безопасности</a>
+                <div class="cookie-consent-warning">Если отказаться, аккаунт получит низкий фактор доверия и попадёт в админ-панель на ручную проверку.</div>
+                <div class="cookie-consent-actions">
+                    <button class="btn btn-ghost" type="button" data-cookie-consent="decline">Отказаться</button>
+                    <button class="btn btn-primary" type="button" data-cookie-consent="accept">Принять</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        overlay.querySelectorAll('[data-cookie-consent]').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const accepted = btn.getAttribute('data-cookie-consent') === 'accept';
+                overlay.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+                try {
+                    const res = await api('/api/users/me/cookie-consent', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            accepted,
+                            agreement_version: COOKIE_AGREEMENT_VERSION
+                        })
+                    });
+                    currentUser = {
+                        ...currentUser,
+                        cookie_consent_status: res?.cookie_consent_status || (accepted ? 'accepted' : 'declined'),
+                        trust_factor: Number(res?.trust_factor ?? (accepted ? 100 : 35)),
+                        trust_review_status: res?.trust_review_status || (accepted ? 'clear' : 'review'),
+                        trust_review_reason: res?.trust_review_reason || null
+                    };
+                    removeCookieConsentModal();
+                    showToast(accepted ? 'Согласие сохранено' : 'Аккаунт отправлен на проверку доверия');
+                    resolve(currentUser);
+                } catch (e) {
+                    console.warn('[COOKIE] consent save failed', e);
+                    overlay.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+                    showToast('Не удалось сохранить выбор. Попробуйте ещё раз.');
+                }
+            });
+        });
+    });
+}
+
+async function ensureCookieConsentFlow() {
+    if (!currentUser || !needsCookieConsentPrompt()) return;
+    await showCookieConsentModal();
+}
+
 async function loadMe() {
     try {
         appLog("[UI] Loading current user...");
@@ -3515,6 +3891,7 @@ async function openVoiceView(channelId, channelName) {
 
   voiceView.hidden = false;
   document.body.classList.add('voice-view-open');
+  try { window.lbVoice?.syncDockVisibility?.(); } catch (_) {}
   document.body.classList.add('voice-split-open');  // Open voice text only if we are actually connected to this voice channel.
   try {
     const stv = window.lbVoice?.getState?.();
@@ -3551,6 +3928,7 @@ function closeVoiceView() {
   if (voiceView) voiceView.hidden = true;
   document.body.classList.remove('voice-view-open');
   document.body.classList.remove('voice-split-open');
+  try { window.lbVoice?.syncDockVisibility?.(); } catch (_) {}
   try { setVoiceDiscordLayout(false); } catch (_) {}
   // restore members panel in server mode
   try {
@@ -3678,25 +4056,6 @@ function setDmHomeActive(tab) {
 function hideUtilityView() {
     const utilityView = document.getElementById('utilityView');
     if (utilityView) utilityView.hidden = true;
-}
-
-function renderHomeUtility() {
-    return `
-      <section class="utility-shell home-shell">
-        <div class="utility-hero">
-          <div>
-            <div class="utility-kicker">LaBerry</div>
-            <h2>Начальная страница</h2>
-            <p>Быстрый вход в основные разделы: личные сообщения, предложения, загрузки клиента, магазин и задания.</p>
-          </div>
-        </div>
-        <div class="utility-grid">
-          <button class="utility-card utility-action-card" type="button" data-home-action="friends"><div class="utility-card-ic">👥</div><h3>Друзья</h3><p>Открыть список друзей и личные сообщения.</p></button>
-          <button class="utility-card utility-action-card" type="button" data-home-action="downloads"><div class="utility-card-ic">⬇</div><h3>Скачать клиент</h3><p>Мобильная версия и ПК клиент загружаются прямо с сервера.</p></button>
-          <button class="utility-card utility-action-card" type="button" data-home-action="suggestions"><div class="utility-card-ic">✎</div><h3>Предложения</h3><p>Тикеты с идеями и ответы разработчика находятся в настройках.</p></button>
-        </div>
-      </section>
-    `;
 }
 
 function utilityPlanCard(name, price, tone, lines) {
@@ -3909,15 +4268,8 @@ function openUtilityPanel(tab, opts = {}) {
     utilityView.hidden = false;
 
     if (tab === 'home') {
-        utilityView.innerHTML = renderHomeUtility();
-        utilityView.querySelectorAll('[data-home-action]').forEach((btn) => {
-            btn.addEventListener('click', () => {
-                const action = btn.dataset.homeAction || '';
-                if (action === 'friends') openDmHomeTab('friends');
-                if (action === 'downloads') openUtilityPanel('downloads');
-                if (action === 'suggestions') openSettings('advanced');
-            });
-        });
+        window.location.href = '/start';
+        return;
     } else if (tab === 'downloads') {
         utilityView.innerHTML = renderDownloadsUtility(null);
         loadDownloadsUtility(utilityView).catch(() => {});
@@ -4223,6 +4575,7 @@ function extractAllFileNamesFromMessageContent(text) {
 function previewTextFromMessageContent(text) {
     const raw = (text || '').toString().trim();
     if (!raw) return '';
+    if (e2eeIsEncryptedText(raw)) return '🔒 Зашифрованное сообщение';
     const fn = extractFileNameFromMessageContent(raw);
     if (fn) return `📎 ${fn}`;
 
@@ -4249,6 +4602,7 @@ function previewTextFromMessageContent(text) {
 function dmPreviewFrom(dm) {
     const raw = (dm?.last_message_preview || '').toString().trim();
     if (raw) {
+        if (e2eeIsEncryptedText(raw)) return '🔒 Зашифрованное сообщение';
         // prevent leaking internal ids: show file name instead of [[file:id|...]]
         const fn = extractFileNameFromMessageContent(raw);
         if (fn) return fn;
@@ -4926,7 +5280,10 @@ async function openChat(chatId, title) {
             ? `/api/servers/${currentServerId}/chats/${chatId}/messages?limit=${MESSAGES_PAGE_SIZE}`
             : `/api/dms/${chatId}/messages?limit=${MESSAGES_PAGE_SIZE}`;
 
-        const msgs = await api(msgsUrl);
+        const rawMsgs = await api(msgsUrl);
+        const msgs = Array.isArray(rawMsgs)
+            ? await Promise.all(rawMsgs.map((m) => prepareMessageForDisplay(m)))
+            : rawMsgs;
 
         if (seq !== openChatSeq) {
             appLog(`[UI] openChat(${chatId}) stale response ignored (seq=${seq}, current=${openChatSeq})`);
@@ -5040,7 +5397,10 @@ async function loadOlderMessages() {
         ? `/api/servers/${currentServerId}/chats/${currentChatId}/messages?limit=${MESSAGES_PAGE_SIZE}&before_id=${beforeId}`
         : `/api/dms/${currentChatId}/messages?limit=${MESSAGES_PAGE_SIZE}&before_id=${beforeId}`;
 
-    const msgs = await api(url);
+    const rawMsgs = await api(url);
+    const msgs = Array.isArray(rawMsgs)
+        ? await Promise.all(rawMsgs.map((m) => prepareMessageForDisplay(m)))
+        : rawMsgs;
     if (!Array.isArray(msgs) || msgs.length === 0) {
         chatPaging.hasMore = false;
         chatPaging.loading = false;
@@ -5062,7 +5422,7 @@ async function loadOlderMessages() {
 }
 
 function setupWebSocketHandlers() {
-    window.onChatMessage = (data) => {
+    window.onChatMessage = async (data) => {
         appLog('[APP] WebSocket message received:', data);
         if (!data) return;
 
@@ -5104,13 +5464,14 @@ function setupWebSocketHandlers() {
         const roomId = typeof data.room_id === 'string' ? parseInt(data.room_id, 10) : data.room_id;
         if (!Number.isFinite(roomId)) return;
 
-        const sender = (data.sender_username || data.sender_id || 'Unknown').toString();
-        const content = (data.content || '').toString();
-        const msgId = parseMaybeNumber(data.id) || 0;
-        const replyToId = parseMaybeNumber(data.reply_to_id);
-        const replyPreview = (data.reply_preview && typeof data.reply_preview === 'object') ? data.reply_preview : null;
-        const senderAvatar = parseMaybeNumber(data.sender_avatar_file_id);
-        const reactions = Array.isArray(data.reactions) ? data.reactions : null;
+        const messageData = await prepareMessageForDisplay(data);
+        const sender = (messageData.sender_username || messageData.sender_id || 'Unknown').toString();
+        const content = (messageData.content || '').toString();
+        const msgId = parseMaybeNumber(messageData.id) || 0;
+        const replyToId = parseMaybeNumber(messageData.reply_to_id);
+        const replyPreview = (messageData.reply_preview && typeof messageData.reply_preview === 'object') ? messageData.reply_preview : null;
+        const senderAvatar = parseMaybeNumber(messageData.sender_avatar_file_id);
+        const reactions = Array.isArray(messageData.reactions) ? messageData.reactions : null;
 
         // ignore echo from yourself
         const myName = (currentUser?.username || currentUser?.nickname || '').toString();
@@ -5118,13 +5479,13 @@ function setupWebSocketHandlers() {
             // still append if it's current chat and missing
             if (roomId === currentChatId) {
                 addMessage({
-                    id: data.id,
+                    id: messageData.id,
                     chat_id: roomId,
-                    sender_id: data.sender_id,
+                    sender_id: messageData.sender_id,
                     sender_username: sender,
                     sender_avatar_file_id: senderAvatar,
                     content,
-                    timestamp: data.timestamp,
+                    timestamp: messageData.timestamp,
                     reply_to_id: replyToId,
                     reply_preview: replyPreview,
                     reactions: reactions || undefined,
@@ -5163,13 +5524,13 @@ function setupWebSocketHandlers() {
         // append to current chat
         if (roomId === currentChatId) {
             addMessage({
-                id: data.id,
+                id: messageData.id,
                 chat_id: roomId,
-                sender_id: data.sender_id,
+                sender_id: messageData.sender_id,
                 sender_username: sender,
                 sender_avatar_file_id: senderAvatar,
                 content,
-                timestamp: data.timestamp,
+                timestamp: messageData.timestamp,
                 reply_to_id: replyToId,
                 reply_preview: replyPreview,
                 reactions: reactions || undefined,
@@ -5707,9 +6068,17 @@ function setupMessageComposer() {
             : `/api/dms/${currentChatId}/messages`;
 
         const replyId = (opts && opts.replyId !== undefined) ? opts.replyId : replyToMessageId;
+        let outgoingContent = c;
+        try {
+            outgoingContent = await e2eeEncryptForCurrentChat(c);
+        } catch (e) {
+            console.warn('[E2EE] outgoing encryption failed', e);
+            showToast('Не удалось зашифровать сообщение, отправляю обычным текстом');
+            outgoingContent = c;
+        }
         const payload = await api(url, {
             method: 'POST',
-            body: JSON.stringify({ content: c, reply_to_id: replyId || null })
+            body: JSON.stringify({ content: outgoingContent, reply_to_id: replyId || null })
         });
 
         const msg = {
@@ -8515,6 +8884,9 @@ function shouldRenderLinkEmbedsForMessage(rawText) {
 
 function renderMessageContent(content) {
     const raw = (content ?? '').toString();
+    if (e2eeIsEncryptedText(raw)) {
+        return `<span class="encrypted-message">🔒 Зашифрованное сообщение</span>`;
+    }
 
     // Support both canonical and broken legacy markers.
     // canonical: [[file:ID|NAME|MIME|SIZE]]
@@ -9025,6 +9397,12 @@ async function initializeApp() {
         applyTheme(localStorage.getItem('theme') || 'dark');
         registerNotificationWorker();
         await loadMe();
+        await ensureCookieConsentFlow();
+        try {
+            await e2eeEnsureIdentity(true);
+        } catch (e) {
+            console.warn('[E2EE] identity setup failed', e);
+        }
         try { window.lbMe = currentUser; } catch (_) {}
         try { initVoice({ wsManager, api, getMe: () => currentUser }); } catch (e) { console.warn('[VOICE] initVoice failed', e); }
 
@@ -9049,11 +9427,6 @@ async function initializeApp() {
 
         // global buttons
         document.getElementById('settingsBtn')?.addEventListener('click', openSettings);
-        document.getElementById('downloadsPageBtn')?.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            openUtilityPanel('downloads');
-        });
         document.getElementById('pinsBtn')?.addEventListener('click', () => openPinsModal());
         document.getElementById('addChannelBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openCurrentServerMenu(e.currentTarget); });
         document.getElementById('dmCallBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); startDmCall(); });
@@ -9116,15 +9489,6 @@ async function initializeApp() {
         updateJumpBtn();
         setupAttachmentUi();
         // mobile drawers are closed by clicking overlay
-        const shouldOpenHome = (() => {
-            try {
-                if (localStorage.getItem(APP_HOME_SEEN_KEY) === '1') return false;
-                localStorage.setItem(APP_HOME_SEEN_KEY, '1');
-                return true;
-            } catch (_) {
-                return false;
-            }
-        })();
         const servers = await api("/api/servers");
         appLog('[APP] Servers loaded:', servers);
         
@@ -9147,9 +9511,7 @@ async function initializeApp() {
         }
         renderServers(servers);
         
-        if (shouldOpenHome) {
-            openUtilityPanel('home');
-        } else if (serverId) {
+        if (serverId) {
             const chats = await api(`/api/servers/${serverId}/chats`);
             appLog('[APP] Chats loaded:', chats);
             

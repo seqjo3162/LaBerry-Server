@@ -243,8 +243,10 @@ pub fn build_router(state: AppState) -> Router {
 
     let router = Router::new()
         .route("/", get(crate::routes::pages::index))
+        .route("/login", get(crate::routes::pages::login))
         .route("/app", get(crate::routes::pages::app))
         .route("/start", get(crate::routes::pages::start))
+        .route("/cookie-agreement", get(crate::routes::pages::cookie_agreement))
         .route("/admin", get(crate::routes::pages::admin_hint))
         .route("/admin/", get(crate::routes::pages::admin_hint))
         .route("/health", get(|| async { "OK" }))
@@ -285,6 +287,7 @@ pub fn build_router(state: AppState) -> Router {
     // It is served by a dedicated local-only listener (see run_server).
 
     let router = router.with_state(state)
+        .layer(axum::middleware::from_fn(crate::middleware::geo_guard::geo_guard))
         // Protect server from huge request bodies (uploads, etc.)
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
 

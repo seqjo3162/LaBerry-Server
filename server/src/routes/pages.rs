@@ -3,6 +3,10 @@ use axum::response::Html;
 
 /// Простой SPA-роутер — возвращает index.html для "/" и "/app"
 pub async fn index() -> Html<String> {
+    Html(std::fs::read_to_string(static_path("start.html")).unwrap_or_default())
+}
+
+pub async fn login() -> Html<String> {
     Html(std::fs::read_to_string(static_path("index.html")).unwrap_or_default())
 }
 
@@ -12,6 +16,10 @@ pub async fn app() -> Html<String> {
 
 pub async fn start() -> Html<String> {
     Html(std::fs::read_to_string(static_path("start.html")).unwrap_or_default())
+}
+
+pub async fn cookie_agreement() -> Html<String> {
+    Html(std::fs::read_to_string(static_path("cookie-agreement.html")).unwrap_or_default())
 }
 
 

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LaBerry</title>
-  <link rel="stylesheet" href="/static/css/main.css?v=59">
+  <link rel="stylesheet" href="/static/css/main.css?v=62">
 </head>
 <body>
   <div id="appRoot" class="app-root">
@@ -17,7 +17,6 @@
 
     <div class="topbar-center">
       <div class="brand">LaBerry</div>
-      <button class="icon-btn download-page-btn" type="button" id="downloadsPageBtn" title="Скачать LaBerry">⬇</button>
     </div>
 
     <div class="topbar-right">
@@ -347,13 +346,13 @@
           <div class="ss-card">
             <div class="ss-card-title">Качество</div>
             <div class="ss-quality">
-              <label class="ss-radio"><input type="radio" name="ssRes" value="480" /> <span>480p</span></label>
-              <label class="ss-radio"><input type="radio" name="ssRes" value="720" checked /> <span>720p</span></label>
-              <label class="ss-radio"><input type="radio" name="ssRes" value="1080" /> <span>1080p</span></label>
+              <label class="ss-radio"><input type="radio" name="ssRes" value="480" /> <span title="480p">LQ</span></label>
+              <label class="ss-radio"><input type="radio" name="ssRes" value="720" checked /> <span title="720p">HD</span></label>
+              <label class="ss-radio"><input type="radio" name="ssRes" value="1080" /> <span title="1080p">FHD</span></label>
             </div>
             <div class="ss-quality" style="margin-top:10px;">
-              <label class="ss-radio"><input type="radio" name="ssFps" value="15" /> <span>15 FPS</span></label>
-              <label class="ss-radio"><input type="radio" name="ssFps" value="30" checked /> <span>30 FPS</span></label>
+              <label class="ss-radio"><input type="radio" name="ssFps" value="15" checked /> <span>15 FPS</span></label>
+              <label class="ss-radio"><input type="radio" name="ssFps" value="30" /> <span>30 FPS</span></label>
               <label class="ss-radio"><input type="radio" name="ssFps" value="60" /> <span>60 FPS</span></label>
             </div>
             <div class="ss-toggles">
@@ -394,6 +393,6 @@
   </div>
 
   <script src="/static/js/start-page-link.js?v=1"></script>
-  <script type="module" src="/static/js/app.js?v=54"></script>
+  <script type="module" src="/static/js/app.js?v=60"></script>
 </body>
 </html>

@@ -5,82 +5,52 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
   <title>LaBerry — стартовая страница</title>
-  <link rel="stylesheet" href="/static/css/start.css?v=3" />
+  <style>
+    .hero-status-row{position:fixed;right:18px;bottom:18px;z-index:4}
+    @media (max-width:720px){.hero-status-row{right:12px;bottom:12px}}
+  </style>
+  <link rel="stylesheet" href="/static/css/start.css?v=7" />
 </head>
 <body>
+  <div class="hero-status-row" aria-label="Статус LaBerry">
+    <div class="online-card" aria-live="polite">
+      <span class="online-pulse" aria-hidden="true"></span>
+      <strong>✦ <span data-online-count>...</span> в сети</strong>
+    </div>
+  </div>
+
+  <div class="start-transition" id="startTransition" aria-hidden="true">
+    <div class="transition-mark">
+      <span>LaBerry</span>
+    </div>
+  </div>
+
   <div class="page-shell">
     <main class="hero-page" id="top">
       <section class="hero section-grid">
         <div class="hero-copy" data-reveal>
           <p class="eyebrow">Веб-мессенджер LaBerry</p>
-          <h1>Чаты, серверы и звонки — в одном месте.</h1>
+          <h1>Чаты, каналы и звонки — в одном месте.</h1>
           <p class="lead">
-            Открываешь браузер, входишь в аккаунт и общаешься на своём сервере. Сейчас LaBerry работает как веб-версия. Отдельное приложение будет позже.
+            Открываешь браузер, входишь в аккаунт и общаешься в личных чатах, каналах и звонках. Веб-версия уже доступна, а клиентские сборки можно скачать отсюда, когда они загружены.
           </p>
 
           <div class="hero-actions">
-            <a class="btn btn-primary" href="/">Открыть LaBerry</a>
+            <a class="btn btn-primary" href="/login" data-launch-link>Открыть LaBerry</a>
+            <a class="btn btn-download is-loading" href="#" data-download-link="android" aria-disabled="true">
+              <span>Android</span>
+              <small data-download-meta="android">Проверяем сборку...</small>
+            </a>
+            <a class="btn btn-download is-loading" href="#" data-download-link="pc" aria-disabled="true">
+              <span>ПК клиент</span>
+              <small data-download-meta="pc">Проверяем сборку...</small>
+            </a>
           </div>
-
-          <div class="hero-pills" aria-label="Особенности">
-            <span>Работает в браузере</span>
-            <span>Свои серверы</span>
-            <span>Личные сообщения</span>
-          </div>
-        </div>
-
-        <div class="hero-stage" data-reveal>
-          <article class="app-preview" aria-label="Превью интерфейса LaBerry">
-            <aside class="preview-sidebar" aria-label="Серверы">
-              <div class="server-dot active">L</div>
-              <div class="server-dot">R</div>
-              <div class="server-dot add">+</div>
-            </aside>
-
-            <div class="preview-panel">
-              <div class="preview-header">
-                <div>
-                  <strong>LaBerry</strong>
-                  <span># общий</span>
-                </div>
-                <span class="status-dot">4 онлайн</span>
-              </div>
-
-              <div class="preview-chat">
-                <div class="message">
-                  <span class="avatar berry">И</span>
-                  <div>
-                    <b>Илья</b>
-                    <p>Я закинул файл в общий чат. Посмотрите, всё ли открывается.</p>
-                  </div>
-                </div>
-                <div class="message own">
-                  <span class="avatar dark">М</span>
-                  <div>
-                    <b>Мира</b>
-                    <p>Да, всё нормально. Чуть позже напишу правки сюда же.</p>
-                  </div>
-                </div>
-                <div class="message small">
-                  <span class="avatar soft">А</span>
-                  <div>
-                    <b>Артём</b>
-                    <p>Я буду в голосовой через десять минут, если нужно — подключайтесь.</p>
-                  </div>
-                </div>
-              </div>
-
-              <div class="preview-input">
-                <span>Сообщение в #общий</span>
-                <button type="button" aria-label="Отправить">↵</button>
-              </div>
-            </div>
-          </article>
         </div>
       </section>
     </main>
   </div>
 
-  <script src="/static/js/start.js?v=3"></script>
+  <script src="/static/js/start.js?v=5"></script>
 </body>
 </html>

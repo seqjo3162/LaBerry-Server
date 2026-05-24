@@ -152,12 +152,21 @@
             'X-Requested-With': 'fetch',
             'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
           },
-          redirect: 'follow',
+          redirect: 'manual',
         });
-        if (!res.ok) throw new Error(await readErrorText(res));
+        const isRedirect = res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
+        if (!res.ok && !isRedirect) throw new Error(await readErrorText(res));
         notify('Готово', 'ok');
         const active = getActiveRow();
-        if (active) await loadUserCard(active, false);
+        if (active) {
+          try {
+            await loadUserCard(active, false);
+          } catch (_) {
+            active.remove();
+            const pane = getDetailPane();
+            if (pane) pane.innerHTML = '<div class="admin-user-emptyline">Действие выполнено. Карточка больше недоступна.</div>';
+          }
+        }
       } catch (e) {
         notify(`Действие не выполнено: ${e.message || e}`);
       }

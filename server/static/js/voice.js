@@ -84,13 +84,21 @@ function ensureVoiceMembersSection() {
   voiceMembersCount = document.getElementById('voiceMembersCount');
 }
 
+function setVoiceMemberGridActive(active) {
+  try {
+    voiceStage?.classList?.toggle('has-member-grid', !!active);
+  } catch (_) {}
+}
+
 
   // --- state ---
   const pcs = new Map();          // peerId -> RTCPeerConnection
   const remoteStreams = new Map(); // peerId -> MediaStream
   const audioEls = new Map();     // peerId -> HTMLAudioElement
+  const micSenders = new Map();   // peerId -> RTCRtpSender
   const remoteVideoStreams = new Map(); // peerId -> MediaStream
   const pendingIceCandidates = new Map(); // peerId -> RTCIceCandidateInit[]
+  const iceRestartTimers = new Map(); // peerId -> timeout id
   const videoEls = new Map();     // peerId -> HTMLVideoElement (optional sink)
   const nameCache = new Map();    // userId -> username
 
@@ -98,6 +106,7 @@ function ensureVoiceMembersSection() {
   let meName = null;
 
   let iceConfig = null;
+  let iceHasTurn = false;
   let localStream = null;
   let localStreamError = null;
   let activeInputDeviceId = '';
@@ -113,7 +122,7 @@ function ensureVoiceMembersSection() {
   let isSharingScreen = false;
   let ssSelectedSurface = 'monitor';
   let ssSelectedRes = 720;
-  let ssSelectedFps = 30;
+  let ssSelectedFps = 15;
   let ssIncludeAudio = false;
   
   let audioCtx = null;
@@ -155,9 +164,14 @@ function ensureVoiceMembersSection() {
 
   function setBarVisible(v) {
     if (!elVoiceBar) return;
-    elVoiceBar.hidden = !v;
+    elVoiceBar.hidden = !v || isVoiceViewOpen() || document.body.classList.contains('voice-view-open');
     document.body.classList.toggle('voice-muted', !!muted && v);
     document.body.classList.toggle('voice-deafened', !!deafened && v);
+  }
+
+  function syncVoiceDockVisibility() {
+    if (!elVoiceBar) return;
+    elVoiceBar.hidden = !inChannelId || isVoiceViewOpen() || document.body.classList.contains('voice-view-open');
   }
 
   function isVoiceViewOpen() {
@@ -326,6 +340,17 @@ function ensureVoiceMembersSection() {
     } catch (_) {
       iceConfig = { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] };
     }
+    try {
+      iceHasTurn = (iceConfig.iceServers || []).some((srv) => {
+        const urls = Array.isArray(srv?.urls) ? srv.urls : [srv?.urls];
+        return urls.some((url) => String(url || '').toLowerCase().startsWith('turn:'));
+      });
+      if (!iceHasTurn) {
+        console.warn('[VOICE] TURN is not configured; poor NAT/mobile networks may not pass audio reliably.');
+      }
+    } catch (_) {
+      iceHasTurn = false;
+    }
     return iceConfig;
   }
 
@@ -368,7 +393,6 @@ function ensureVoiceMembersSection() {
 
   async function getLocalStreamOptional() {
   if (localStream) return localStream;
-  if (localStreamError) return null;
 
   // Microphone access requires a secure context (HTTPS or localhost)
   if (!window.isSecureContext) {
@@ -393,6 +417,7 @@ function ensureVoiceMembersSection() {
 
     attachLocalAudioAnalyzer(localStream);
     localStreamError = null;
+    setMuted(muted);
     return localStream;
   } catch (err) {
     localStreamError = err;
@@ -421,26 +446,44 @@ function ensureVoiceMembersSection() {
   }
 
   async function restartLocalAudioForCurrentCall() {
-    if (!inChannelId || !localStream) return;
+    if (!inChannelId) return;
     const preferred = getPreferredAudioDeviceId() || 'default';
-    if (preferred === activeInputDeviceId) return;
+    if (localStream && preferred === activeInputDeviceId) return;
 
-    stopLocalStream();
+    if (localStream) stopLocalStream();
     const nextStream = await getLocalStreamOptional();
     if (!nextStream) return;
 
     const nextTrack = nextStream.getAudioTracks()[0] || null;
     if (!nextTrack) return;
 
-    for (const pc of pcs.values()) {
+    const renegotiate = [];
+    for (const [peerId, pc] of pcs.entries()) {
       try {
-        const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
-        if (sender) await sender.replaceTrack(nextTrack);
-        else pc.addTrack(nextTrack, nextStream);
+        let sender = micSenders.get(peerId);
+        if (!sender || !pc.getSenders().includes(sender)) {
+          sender = pc.getTransceivers?.()
+            ?.find((t) => t?.receiver?.track?.kind === 'audio' && t?.sender)
+            ?.sender || pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+        }
+        if (sender) {
+          await sender.replaceTrack(nextTrack);
+          micSenders.set(peerId, sender);
+        }
+        else {
+          micSenders.set(peerId, pc.addTrack(nextTrack, nextStream));
+          renegotiate.push(peerId);
+        }
       } catch (_) {}
     }
 
     setMuted(muted);
+
+    for (const peerId of renegotiate) {
+      setTimeout(() => {
+        sendOffer(peerId).catch((e) => console.warn('[VOICE] audio renegotiation failed', e));
+      }, 40);
+    }
   }
 
   function closePeer(peerId) {
@@ -450,10 +493,15 @@ function ensureVoiceMembersSection() {
       try { pc.onicecandidate = null; } catch (_) {}
       try { pc.ontrack = null; } catch (_) {}
       try { pc.onconnectionstatechange = null; } catch (_) {}
+      try { pc.oniceconnectionstatechange = null; } catch (_) {}
       try { pc.close(); } catch (_) {}
     }
     pcs.delete(id);
     pendingIceCandidates.delete(id);
+    micSenders.delete(id);
+    const restartTimer = iceRestartTimers.get(id);
+    if (restartTimer) clearTimeout(restartTimer);
+    iceRestartTimers.delete(id);
 
     const s = remoteStreams.get(id);
     if (s) {
@@ -526,6 +574,7 @@ function renderVoiceMembersTiles(ids) {
   if (!inChannelId || !arr.length) {
     voiceMembersGrid.innerHTML = '';
     voiceMembersDock.hidden = true;
+    setVoiceMemberGridActive(false);
     if (voiceMembersCount) voiceMembersCount.textContent = '(0)';
     return;
   }
@@ -534,11 +583,13 @@ function renderVoiceMembersTiles(ids) {
   if (arr.length <= 1) {
     voiceMembersGrid.innerHTML = '';
     voiceMembersDock.hidden = true;
+    setVoiceMemberGridActive(false);
     if (voiceMembersCount) voiceMembersCount.textContent = `(${arr.length})`;
     return;
   }
 
   voiceMembersDock.hidden = false;
+  setVoiceMemberGridActive(true);
   voiceMembersCount.textContent = `(${arr.length})`;
 
   const frag = document.createDocumentFragment();
@@ -600,8 +651,13 @@ function renderVoiceMembersTiles(ids) {
       e.preventDefault();
       e.stopPropagation();
 
-      if (focusedUserId === id) focusedUserId = null;
-      else focusedUserId = id;
+      if (focusedUserId === id) {
+        focusedUserId = null;
+        applyStagePriorityMode('grid');
+      } else {
+        focusedUserId = id;
+        applyStagePriorityMode('user');
+      }
 
       renderVoiceMembersTiles(arr);
       applyVoiceFocusToStage();
@@ -1014,7 +1070,7 @@ function applyVoiceFocusToStage() {
     } catch (_) {}
 
     try {
-      const fps = Number(ssOverlay?.querySelector?.('input[name="ssFps"]:checked')?.value || 30);
+      const fps = Number(ssOverlay?.querySelector?.('input[name="ssFps"]:checked')?.value || 15);
       if (Number.isFinite(fps)) ssSelectedFps = fps;
     } catch (_) {}
 
@@ -1033,11 +1089,10 @@ function applyVoiceFocusToStage() {
 
 function ssMaxBitrateKbps(res, fps) {
   const r = Number(res) || 720;
-  const f = Math.max(1, Math.min(60, Number(fps) || 30));
-  // User requirement: cap 1080p at 6000 kbps.
-  if (r >= 1080) return 6000;
-  if (r >= 720) return (f >= 60 ? 4500 : 3000);
-  return (f >= 60 ? 2500 : 1500);
+  const f = Math.max(1, Math.min(60, Number(fps) || 15));
+  if (r >= 1080) return (f >= 60 ? 4500 : (f >= 30 ? 3200 : 2400));
+  if (r >= 720) return (f >= 60 ? 2800 : (f >= 30 ? 1800 : 1100));
+  return (f >= 60 ? 1600 : (f >= 30 ? 1100 : 700));
 }
 
 async function ssApplySenderBitrate(sender, res, fps) {
@@ -1052,10 +1107,10 @@ async function ssApplySenderBitrate(sender, res, fps) {
 
     // Per spec/browser behavior: encodings[0].maxBitrate is bps.
     p.encodings[0].maxBitrate = maxBps;
-    p.encodings[0].maxFramerate = Math.max(1, Math.min(60, Number(fps) || 30));
+    p.encodings[0].maxFramerate = Math.max(1, Math.min(60, Number(fps) || 15));
 
-    // Prefer keeping resolution for screen share.
-    if (!p.degradationPreference) p.degradationPreference = 'maintain-resolution';
+    // Balanced degradation is less likely to lock weak clients into slideshow-level latency.
+    if (!p.degradationPreference) p.degradationPreference = 'balanced';
 
     await sender.setParameters(p);
   } catch (e) {
@@ -1077,12 +1132,33 @@ async function ssApplyBitrateToAllPeers() {
   }
 }
 
+  function ssIsMobileCaptureDevice() {
+    try {
+      const ua = navigator.userAgent || '';
+      return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (window.matchMedia?.('(pointer: coarse)')?.matches && window.innerWidth <= 900);
+    } catch (_) {
+      return false;
+    }
+  }
+
   function ssBuildDisplayConstraints() {
     ssReadUiSelections();
     const dims = ssResToDims(ssSelectedRes);
-    const fps = Math.max(1, Math.min(60, Number(ssSelectedFps) || 30));
+    const fps = Math.max(1, Math.min(60, Number(ssSelectedFps) || 15));
     const surface = (ssSelectedSurface || 'monitor').toString();
     const includeAudio = !!ssIncludeAudio;
+
+    if (ssIsMobileCaptureDevice()) {
+      // Mobile browsers reject several desktop-only Screen Capture constraints.
+      // Keep the initial request minimal and apply resolution/FPS limits after
+      // the user grants capture.
+      return {
+        video: {
+          frameRate: { ideal: fps, max: fps },
+        },
+        audio: false,
+      };
+    }
 
     // Chrome supports privacy controls (ignored by other browsers).
     // https://developer.chrome.com/docs/web-platform/screen-sharing-controls
@@ -1106,6 +1182,26 @@ async function ssApplyBitrateToAllPeers() {
     }
 
     return constraints;
+  }
+
+  async function ssApplyCaptureConstraints(track) {
+    if (!track || typeof track.applyConstraints !== 'function') return;
+    const dims = ssResToDims(ssSelectedRes);
+    const fps = Math.max(1, Math.min(60, Number(ssSelectedFps) || 15));
+
+    try {
+      track.contentHint = 'detail';
+    } catch (_) {}
+
+    try {
+      await track.applyConstraints({
+        width: { ideal: dims.width, max: dims.width },
+        height: { ideal: dims.height, max: dims.height },
+        frameRate: { ideal: fps, max: fps },
+      });
+    } catch (e) {
+      console.warn('[SS] apply capture constraints failed', e);
+    }
   }
 
   function ssSetPreview(stream) {
@@ -1223,7 +1319,11 @@ async function ssApplyBitrateToAllPeers() {
       return;
     }
     if (!navigator.mediaDevices?.getDisplayMedia) {
-      setStatus('getDisplayMedia не поддерживается браузером');
+      const msg = ssIsMobileCaptureDevice()
+        ? 'Мобильный браузер не поддерживает демонстрацию экрана. Нужен Android Chrome с HTTPS или ПК/клиент.'
+        : 'getDisplayMedia не поддерживается браузером';
+      setStatus(msg);
+      if (ssPreviewHint) ssPreviewHint.textContent = msg;
       return;
     }
 
@@ -1246,6 +1346,8 @@ async function ssApplyBitrateToAllPeers() {
       setStatus('Нет видео-трека (отказано?)');
       return;
     }
+
+    await ssApplyCaptureConstraints(screenVideoTrack);
 
     // Preview in modal (and keep it for “Stop” menu)
     ssSetPreview(screenStream);
@@ -1343,12 +1445,12 @@ async function ssApplyBitrateToAllPeers() {
     if (!isSharingScreen || !screenVideoTrack) return;
     ssReadUiSelections();
     const dims = ssResToDims(ssSelectedRes);
-    const fps = Math.max(1, Math.min(60, Number(ssSelectedFps) || 30));
+    const fps = Math.max(1, Math.min(60, Number(ssSelectedFps) || 15));
 
     try {
       await screenVideoTrack.applyConstraints({
-        width: { ideal: dims.width },
-        height: { ideal: dims.height },
+        width: { ideal: dims.width, max: dims.width },
+        height: { ideal: dims.height, max: dims.height },
         frameRate: { ideal: fps, max: fps },
       });
     } catch (e) {
@@ -1422,6 +1524,20 @@ async function ssApplyBitrateToAllPeers() {
     pendingIceCandidates.set(id, list);
   }
 
+  function scheduleIceRestart(peerId) {
+    const id = Number(peerId);
+    if (!Number.isFinite(id) || id <= 0 || !shouldInitiate(id)) return;
+    const prev = iceRestartTimers.get(id);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      iceRestartTimers.delete(id);
+      const pc = pcs.get(id);
+      if (!pc || pc.signalingState !== 'stable') return;
+      sendOffer(id, { iceRestart: true }).catch((e) => console.warn('[VOICE] ICE restart failed', e));
+    }, 600);
+    iceRestartTimers.set(id, timer);
+  }
+
   async function flushIceCandidates(peerId) {
     const id = Number(peerId);
     if (!Number.isFinite(id) || id <= 0) return;
@@ -1457,6 +1573,14 @@ async function ssApplyBitrateToAllPeers() {
       pc.addTransceiver('video', { direction: 'recvonly' });
     } catch (_) {}
 
+    // Keep an explicit bidirectional audio m-line even if microphone access is
+    // delayed. A later device retry can then start sending without rebuilding
+    // the whole peer connection.
+    try {
+      const tx = pc.addTransceiver('audio', { direction: 'sendrecv' });
+      if (tx?.sender) micSenders.set(id, tx.sender);
+    } catch (_) {}
+
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) return;
       if (!inChannelId) return;
@@ -1472,7 +1596,7 @@ async function ssApplyBitrateToAllPeers() {
     };
 
     pc.ontrack = (ev) => {
-      const stream = ev.streams && ev.streams[0] ? ev.streams[0] : null;
+      const stream = ev.streams && ev.streams[0] ? ev.streams[0] : (ev.track ? new MediaStream([ev.track]) : null);
       if (!stream) return;
 
       const kind = ev.track && ev.track.kind ? String(ev.track.kind) : '';
@@ -1507,18 +1631,46 @@ async function ssApplyBitrateToAllPeers() {
         else document.body.appendChild(a);
       }
       a.srcObject = stream;
+      try { a.play?.().catch(() => {}); } catch (_) {}
 
       updateVoiceUiPeers();
     };
 
     pc.onconnectionstatechange = () => {
       // keep status readable
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        if (!iceHasTurn) console.warn('[VOICE] peer connection degraded without TURN relay', { peerId: id, state: pc.connectionState });
+        scheduleIceRestart(id);
+      }
+      updateVoiceUiPeers();
+    };
+    pc.oniceconnectionstatechange = () => {
+      const state = pc.iceConnectionState;
+      if (state === 'failed' || state === 'disconnected') {
+        if (!iceHasTurn) console.warn('[VOICE] ICE degraded without TURN relay', { peerId: id, state });
+        scheduleIceRestart(id);
+      }
       updateVoiceUiPeers();
     };
     // add local tracks (optional)
     const ls = await getLocalStreamOptional();
     if (ls) {
+      const audioTrack = ls.getAudioTracks()[0] || null;
+      if (audioTrack) {
+        let sender = micSenders.get(id);
+        if (sender) {
+          try {
+            await sender.replaceTrack(audioTrack);
+          } catch (_) {
+            sender = pc.addTrack(audioTrack, ls);
+            micSenders.set(id, sender);
+          }
+        } else {
+          micSenders.set(id, pc.addTrack(audioTrack, ls));
+        }
+      }
       for (const track of ls.getTracks()) {
+        if (track.kind === 'audio') continue;
         pc.addTrack(track, ls);
       }
     }
@@ -1535,7 +1687,7 @@ async function ssApplyBitrateToAllPeers() {
     return pc;
   }
 
-  async function sendOffer(peerId) {
+  async function sendOffer(peerId, opts = {}) {
     const pc = await ensurePeerConnection(peerId);
     if (!pc || !inChannelId) return;
 
@@ -1544,7 +1696,8 @@ async function ssApplyBitrateToAllPeers() {
 
     const offer = await pc.createOffer({
       offerToReceiveAudio: true,
-      offerToReceiveVideo: true
+      offerToReceiveVideo: true,
+      iceRestart: !!opts.iceRestart
     });
 
     await pc.setLocalDescription(offer);
@@ -2195,6 +2348,8 @@ async function join(channelId, channelName) {
   // --- Screen share UI wiring ---
   function openScreenShareModal() {
     if (!ssOverlay) return;
+    const mobileCapture = ssIsMobileCaptureDevice();
+    ssOverlay.classList.toggle('ss-mobile-capture', mobileCapture);
 
     // reflect current state
     if (isSharingScreen) {
@@ -2207,7 +2362,11 @@ async function join(channelId, channelName) {
     } else {
       if (ssStartBtn) ssStartBtn.textContent = 'Начать';
       if (ssCancelBtn) ssCancelBtn.textContent = 'Отмена';
-      if (ssPreviewHint) ssPreviewHint.textContent = 'Нажми «Начать», затем выбери экран/окно/вкладку.';
+      if (ssPreviewHint) {
+        ssPreviewHint.textContent = mobileCapture
+          ? 'Нажми «Начать». Если браузер поддерживает Screen Capture, откроется системный выбор экрана.'
+          : 'Нажми «Начать», затем выбери экран/окно/вкладку.';
+      }
       ssClearPreview();
     }
 
@@ -2343,7 +2502,8 @@ async function join(channelId, channelName) {
       muted,
       deafened,
       peers: [...pcs.keys()]
-    })
+    }),
+    syncDockVisibility: syncVoiceDockVisibility
   };
 
   // initial state hidden

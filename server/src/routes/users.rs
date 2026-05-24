@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
@@ -232,6 +232,11 @@ pub struct UserMeResponse {
     pub email_verified: bool,
     pub email_pending: Option<String>,
     pub public_encryption_key: Option<String>,
+    pub cookie_consent_status: String,
+    pub cookie_consent_at: Option<String>,
+    pub trust_factor: i64,
+    pub trust_review_status: String,
+    pub trust_review_reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -309,6 +314,21 @@ pub struct SetStatusBody {
     pub status: String,
 }
 
+#[derive(Deserialize, Default)]
+pub struct CookieConsentBody {
+    pub accepted: bool,
+    pub agreement_version: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CookieConsentResponse {
+    pub ok: bool,
+    pub cookie_consent_status: String,
+    pub trust_factor: i64,
+    pub trust_review_status: String,
+    pub trust_review_reason: Option<String>,
+}
+
 
 #[derive(Deserialize, Default)]
 pub struct ReportUserBody {
@@ -367,6 +387,7 @@ pub fn router() -> Router<AppState> {
         .route("/me/blocks", get(list_blocks))
         .route("/me/blocks/:user_id", put(block_user).delete(unblock_user))
         .route("/me/status", get(my_status).put(set_my_status))
+        .route("/me/cookie-consent", post(set_cookie_consent))
         .route("/me/settings", get(get_my_settings).put(update_my_settings))
         .route("/me/suggestions", get(list_my_suggestions).post(create_suggestion))
         .route("/me/password", put(change_password))
@@ -726,7 +747,17 @@ async fn me(
     let db = &st.db;
 
     let row = sqlx::query(
-        r#"SELECT id, username, email, email_verified, email_pending, public_encryption_key
+        r#"SELECT id,
+                  username,
+                  email,
+                  email_verified,
+                  email_pending,
+                  public_encryption_key,
+                  COALESCE(cookie_consent_status, 'unknown') AS cookie_consent_status,
+                  cookie_consent_at,
+                  COALESCE(trust_factor, 100) AS trust_factor,
+                  COALESCE(trust_review_status, 'clear') AS trust_review_status,
+                  trust_review_reason
            FROM users WHERE id = ? LIMIT 1"#,
     )
     .bind(me.id)
@@ -746,6 +777,11 @@ async fn me(
         email_verified: r.get::<i64, _>("email_verified") != 0,
         email_pending: r.get("email_pending"),
         public_encryption_key: r.get("public_encryption_key"),
+        cookie_consent_status: r.get("cookie_consent_status"),
+        cookie_consent_at: r.get("cookie_consent_at"),
+        trust_factor: r.get("trust_factor"),
+        trust_review_status: r.get("trust_review_status"),
+        trust_review_reason: r.get("trust_review_reason"),
     };
 
     (StatusCode::OK, Json(u)).into_response()
@@ -798,7 +834,17 @@ async fn update_me(
     }
 
     let row = sqlx::query(
-        r#"SELECT id, username, email, email_verified, email_pending, public_encryption_key
+        r#"SELECT id,
+                  username,
+                  email,
+                  email_verified,
+                  email_pending,
+                  public_encryption_key,
+                  COALESCE(cookie_consent_status, 'unknown') AS cookie_consent_status,
+                  cookie_consent_at,
+                  COALESCE(trust_factor, 100) AS trust_factor,
+                  COALESCE(trust_review_status, 'clear') AS trust_review_status,
+                  trust_review_reason
            FROM users WHERE id = ? LIMIT 1"#,
     )
     .bind(me.id)
@@ -818,9 +864,146 @@ async fn update_me(
         email_verified: r.get::<i64, _>("email_verified") != 0,
         email_pending: r.get("email_pending"),
         public_encryption_key: r.get("public_encryption_key"),
+        cookie_consent_status: r.get("cookie_consent_status"),
+        cookie_consent_at: r.get("cookie_consent_at"),
+        trust_factor: r.get("trust_factor"),
+        trust_review_status: r.get("trust_review_status"),
+        trust_review_reason: r.get("trust_review_reason"),
     };
 
     (StatusCode::OK, Json(resp)).into_response()
+}
+
+async fn set_cookie_consent(
+    headers: HeaderMap,
+    State(st): State<AppState>,
+    me: AuthUser,
+    Json(body): Json<CookieConsentBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+    let now = auth::now_iso();
+    let agreement_version = body
+        .agreement_version
+        .as_deref()
+        .unwrap_or("cookies-geo-v1")
+        .chars()
+        .take(48)
+        .collect::<String>();
+
+    let (status, trust_factor, review_status, review_reason) = if body.accepted {
+        (
+            "accepted",
+            100_i64,
+            "clear",
+            Option::<String>::None,
+        )
+    } else {
+        (
+            "declined",
+            35_i64,
+            "review",
+            Some(format!(
+                "Пользователь отказался от обязательных cookies/storage и проверочных сигналов безопасности. Требуется ручная проверка гео-политики. agreement={}",
+                agreement_version
+            )),
+        )
+    };
+
+    let res = sqlx::query(
+        r#"
+        UPDATE users
+        SET cookie_consent_status = ?,
+            cookie_consent_at = ?,
+            trust_factor = CASE
+                WHEN ? = 'accepted' THEN MAX(COALESCE(trust_factor, 100), ?)
+                ELSE MIN(COALESCE(trust_factor, 100), ?)
+            END,
+            trust_review_status = CASE
+                WHEN ? = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN 'clear'
+                WHEN ? = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_status
+                ELSE ?
+            END,
+            trust_review_reason = CASE
+                WHEN ? = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN NULL
+                WHEN ? = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_reason
+                ELSE ?
+            END,
+            trust_review_at = CASE
+                WHEN ? = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN NULL
+                WHEN ? = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_at
+                ELSE ?
+            END
+        WHERE id = ?
+        "#,
+    )
+    .bind(status)
+    .bind(&now)
+    .bind(status)
+    .bind(trust_factor)
+    .bind(trust_factor)
+    .bind(status)
+    .bind(status)
+    .bind(review_status)
+    .bind(status)
+    .bind(status)
+    .bind(&review_reason)
+    .bind(status)
+    .bind(status)
+    .bind(if body.accepted { None::<String> } else { Some(now.clone()) })
+    .bind(me.id)
+    .execute(db)
+    .await;
+
+    if res.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT COALESCE(cookie_consent_status, 'unknown') AS cookie_consent_status,
+               COALESCE(trust_factor, 100) AS trust_factor,
+               COALESCE(trust_review_status, 'clear') AS trust_review_status,
+               trust_review_reason
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some(row) = row else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let body = CookieConsentResponse {
+        ok: true,
+        cookie_consent_status: row.get("cookie_consent_status"),
+        trust_factor: row.get("trust_factor"),
+        trust_review_status: row.get("trust_review_status"),
+        trust_review_reason: row.get("trust_review_reason"),
+    };
+
+    let mut response = (StatusCode::OK, Json(body)).into_response();
+    let secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+    let secure_suffix = if secure { "; Secure" } else { "" };
+    let cookie = format!(
+        "lb_cookie_consent={}; Path=/; Max-Age=31536000; SameSite=Lax{}",
+        status,
+        secure_suffix
+    );
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+
+    response
 }
 
 async fn change_username(

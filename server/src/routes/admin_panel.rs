@@ -394,7 +394,7 @@ fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
         ""
     };
     let users_script = if title.contains("Центр") || title.contains("Пользователи") {
-        "<script src='/static/js/admin-users.js?v=2' defer></script>"
+        "<script src='/static/js/admin-users.js?v=3' defer></script>"
     } else {
         ""
     };
@@ -599,6 +599,7 @@ button:hover {{ background:#202c57; }}
 .admin-user-pill.offline {{ background:#151b2f; color:#b8c3e4; border-color:#2e3a63; }}
 .admin-user-pill.banned {{ background:#251316; color:#ffb4bf; border-color:#5a2730; }}
 .admin-user-pill.clear {{ background:#141e37; color:#aecdff; border-color:#314a84; }}
+.admin-user-pill.review {{ background:#2b1b10; color:#ffd19a; border-color:#73522b; }}
 .admin-users-detail {{ padding:14px; }}
 .admin-user-card {{ display:flex; flex-direction:column; gap:12px; }}
 .admin-user-card-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
@@ -1152,6 +1153,7 @@ fn normalized_user_mode(input: Option<&str>) -> &'static str {
     match input.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
         "active" => "active",
         "banned" => "banned",
+        "review" => "review",
         _ => "all",
     }
 }
@@ -1160,6 +1162,7 @@ fn user_mode_matches(user: &UserRow, mode: &str) -> bool {
     match mode {
         "active" => !user.is_banned,
         "banned" => user.is_banned,
+        "review" => user.trust_review_status == "review" || user.trust_factor < 60,
         _ => true,
     }
 }
@@ -1200,6 +1203,21 @@ fn report_status_label(status: &str) -> &'static str {
         "reviewed" => "Просмотрено",
         "rejected" => "Отклонено",
         _ => "Новая",
+    }
+}
+
+fn cookie_consent_label(status: &str) -> &'static str {
+    match status {
+        "accepted" => "Принято",
+        "declined" => "Отказ",
+        _ => "Не выбрано",
+    }
+}
+
+fn trust_review_label(status: &str) -> &'static str {
+    match status {
+        "review" => "На проверке",
+        _ => "Чисто",
     }
 }
 
@@ -1456,6 +1474,13 @@ fn render_user_detail_card(
     let online_class = if user.is_online { "online" } else { "offline" };
     let access_label = if user.is_banned { "Ограничен" } else { "Без ограничений" };
     let access_class = if user.is_banned { "banned" } else { "clear" };
+    let trust_needs_review = user.trust_review_status == "review" || user.trust_factor < 60;
+    let trust_class = if trust_needs_review { "review" } else { "clear" };
+    let trust_label = if trust_needs_review {
+        "Проверка".to_string()
+    } else {
+        format!("Trust {}", user.trust_factor)
+    };
     let last_seen = if user.presence_updated_at.trim().is_empty() { "нет данных".to_string() } else { fmt_admin_dt(&user.presence_updated_at) };
     let avatar_html = if let Some(file_id) = user.avatar_file_id {
         format!("<img class='admin-user-avatar-img' src='/admin/profile-files/{file_id}/raw' alt='avatar' />")
@@ -1467,6 +1492,23 @@ fn render_user_detail_card(
             "<div class='admin-user-section compact-ban-reason'><strong>Причина бана</strong><div class='admin-user-section-muted'>{}</div><div class='admin-report-meta'>{}</div></div>",
             escape_html(&user.ban_reason),
             if user.ban_at.trim().is_empty() { "".to_string() } else { format!("Выдан: {}", escape_html(&fmt_admin_dt(&user.ban_at))) }
+        )
+    } else {
+        String::new()
+    };
+    let trust_review_html = if trust_needs_review {
+        let reason = if user.trust_review_reason.trim().is_empty() {
+            "Причина не указана".to_string()
+        } else {
+            escape_html(&user.trust_review_reason)
+        };
+        let at = if user.trust_review_at.trim().is_empty() {
+            String::new()
+        } else {
+            format!("<div class='admin-report-meta'>Событие: {}</div>", escape_html(&fmt_admin_dt(&user.trust_review_at)))
+        };
+        format!(
+            "<div class='admin-user-section compact-ban-reason'><strong>Проверка доверия</strong><div class='admin-user-section-muted'>{reason}</div>{at}</div>"
         )
     } else {
         String::new()
@@ -1507,6 +1549,7 @@ fn render_user_detail_card(
         <div class='admin-user-pills'>
           <span class='admin-user-pill {online_class}'>{online_label}</span>
           <span class='admin-user-pill {access_class}'>{access_label}</span>
+          <span class='admin-user-pill {trust_class}'>{trust_label}</span>
         </div>
       </div>
     </div>
@@ -1516,9 +1559,12 @@ fn render_user_detail_card(
   <div class='admin-user-info-grid compact'>
     <div class='admin-user-info'><span>Регистрация</span><strong>{created_at}</strong></div>
     <div class='admin-user-info'><span>Последняя активность</span><strong>{last_seen}</strong></div>
+    <div class='admin-user-info'><span>Cookies</span><strong>{cookie_status}</strong></div>
+    <div class='admin-user-info'><span>Trust</span><strong>{trust_factor} / 100 · {review_status}</strong></div>
   </div>
 
   {ban_reason_html}
+  {trust_review_html}
 
   <div class='admin-user-section'>
     <div class='admin-user-section-head'>
@@ -1552,9 +1598,15 @@ fn render_user_detail_card(
         online_label = online_label,
         access_class = access_class,
         access_label = access_label,
+        trust_class = trust_class,
+        trust_label = escape_html(&trust_label),
         created_at = escape_html(&fmt_admin_dt(&user.created_at)),
         last_seen = escape_html(&last_seen),
+        cookie_status = cookie_consent_label(&user.cookie_consent_status),
+        trust_factor = user.trust_factor,
+        review_status = trust_review_label(&user.trust_review_status),
         ban_reason_html = ban_reason_html,
+        trust_review_html = trust_review_html,
         report_count = reports.len(),
         reports_html = render_user_reports_html(sess, reports, current_return_to),
         main_action = main_action,
@@ -1632,6 +1684,7 @@ fn render_users_panel_body(
     let all_href = user_page_url(base_path, embedded, query, "all", None);
     let active_href = user_page_url(base_path, embedded, query, "active", None);
     let banned_href = user_page_url(base_path, embedded, query, "banned", None);
+    let review_href = user_page_url(base_path, embedded, query, "review", None);
     let search_html = if embedded {
         format!(
             r#"<div class='admin-user-search'>
@@ -1663,14 +1716,15 @@ fn render_users_panel_body(
             let card_url = format!("/admin/users/{}/card?return_to={}", user.id, url::form_urlencoded::byte_serialize(current_return_to.as_bytes()).collect::<String>());
             let details_url = format!("/admin/users/{}/details", user.id);
             let active = if selected_id == Some(user.id) { " active" } else { "" };
-            let pill_class = if user.is_banned { "banned" } else if user.is_online { "online" } else { "offline" };
-            let pill_text = if user.is_banned { "Бан" } else if user.is_online { "Онлайн" } else { "Оффлайн" };
+            let needs_review = user.trust_review_status == "review" || user.trust_factor < 60;
+            let pill_class = if user.is_banned { "banned" } else if needs_review { "review" } else if user.is_online { "online" } else { "offline" };
+            let pill_text = if user.is_banned { "Бан" } else if needs_review { "Проверка" } else if user.is_online { "Онлайн" } else { "Оффлайн" };
             let avatar_html = if let Some(file_id) = user.avatar_file_id {
                 format!("<img class='admin-user-row-avatar-img' src='/admin/profile-files/{file_id}/raw' alt='avatar' />")
             } else {
                 escape_html(&initial)
             };
-            let filter = format!("#{} {} {}", user.id, user.username.to_lowercase(), user.email.to_lowercase());
+            let filter = format!("#{} {} {} {} {}", user.id, user.username.to_lowercase(), user.email.to_lowercase(), user.cookie_consent_status, user.trust_review_status);
             rows_html.push_str(&format!(
                 r#"<a class='admin-user-row{active}' href='{href}' data-admin-user-row data-user-id='{id}' data-card-url='{card_url}' data-details-url='{details_url}' data-filter-item='users' data-filter='{filter}'>
   <div class='admin-user-row-avatar'>{avatar_html}</div>
@@ -1710,6 +1764,7 @@ fn render_users_panel_body(
       <div class='admin-user-tabs'>
         <a href='{all_href}' class='{all_cls}'>Все</a>
         <a href='{active_href}' class='{active_cls}'>Обычные</a>
+        <a href='{review_href}' class='{review_cls}'>Проверка</a>
         <a href='{banned_href}' class='{banned_cls}'>Забаненные</a>
       </div>
       {search_html}
@@ -1721,9 +1776,11 @@ fn render_users_panel_body(
         all_href = escape_html(&all_href),
         active_href = escape_html(&active_href),
         banned_href = escape_html(&banned_href),
+        review_href = escape_html(&review_href),
         all_cls = if mode == "all" { "active" } else { "" },
         active_cls = if mode == "active" { "active" } else { "" },
         banned_cls = if mode == "banned" { "active" } else { "" },
+        review_cls = if mode == "review" { "active" } else { "" },
         search_html = search_html,
         rows_html = rows_html,
         detail_html = detail_html,
@@ -3930,6 +3987,12 @@ struct UserRow {
     avatar_file_id: Option<i64>,
     ban_reason: String,
     ban_at: String,
+    cookie_consent_status: String,
+    cookie_consent_at: String,
+    trust_factor: i64,
+    trust_review_status: String,
+    trust_review_reason: String,
+    trust_review_at: String,
 }
 
 #[derive(Clone)]
@@ -3971,6 +4034,12 @@ fn map_user_row(r: sqlx::sqlite::SqliteRow) -> UserRow {
         avatar_file_id: r.get("avatar_file_id"),
         ban_reason: r.get("ban_reason"),
         ban_at: r.get("ban_at"),
+        cookie_consent_status: r.get("cookie_consent_status"),
+        cookie_consent_at: r.get("cookie_consent_at"),
+        trust_factor: r.get("trust_factor"),
+        trust_review_status: r.get("trust_review_status"),
+        trust_review_reason: r.get("trust_review_reason"),
+        trust_review_at: r.get("trust_review_at"),
     }
 }
 
@@ -3986,7 +4055,13 @@ async fn fetch_users(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<Vec
                COALESCE(p.updated_at, '') AS presence_updated_at,
                up.avatar_file_id AS avatar_file_id,
                COALESCE((SELECT me.reason FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_reason,
-               COALESCE((SELECT me.created_at FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_at
+               COALESCE((SELECT me.created_at FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_at,
+               COALESCE(u.cookie_consent_status, 'unknown') AS cookie_consent_status,
+               COALESCE(u.cookie_consent_at, '') AS cookie_consent_at,
+               COALESCE(u.trust_factor, 100) AS trust_factor,
+               COALESCE(u.trust_review_status, 'clear') AS trust_review_status,
+               COALESCE(u.trust_review_reason, '') AS trust_review_reason,
+               COALESCE(u.trust_review_at, '') AS trust_review_at
         FROM users u
         LEFT JOIN user_presence p ON p.user_id = u.id
         LEFT JOIN user_profile up ON up.user_id = u.id
@@ -4028,7 +4103,13 @@ async fn fetch_user_by_id(db: &SqlitePool, id: i64) -> anyhow::Result<Option<Use
                COALESCE(p.updated_at, '') AS presence_updated_at,
                up.avatar_file_id AS avatar_file_id,
                COALESCE((SELECT me.reason FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_reason,
-               COALESCE((SELECT me.created_at FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_at
+               COALESCE((SELECT me.created_at FROM moderation_events me WHERE me.user_id = u.id AND me.kind = 'ban' ORDER BY me.id DESC LIMIT 1), '') AS ban_at,
+               COALESCE(u.cookie_consent_status, 'unknown') AS cookie_consent_status,
+               COALESCE(u.cookie_consent_at, '') AS cookie_consent_at,
+               COALESCE(u.trust_factor, 100) AS trust_factor,
+               COALESCE(u.trust_review_status, 'clear') AS trust_review_status,
+               COALESCE(u.trust_review_reason, '') AS trust_review_reason,
+               COALESCE(u.trust_review_at, '') AS trust_review_at
         FROM users u
         LEFT JOIN user_presence p ON p.user_id = u.id
         LEFT JOIN user_profile up ON up.user_id = u.id
@@ -4156,6 +4237,12 @@ async fn fetch_test_users(db: &SqlitePool, re: &Regex, limit: i64) -> anyhow::Re
                 avatar_file_id: None,
                 ban_reason: String::new(),
                 ban_at: String::new(),
+                cookie_consent_status: "unknown".to_string(),
+                cookie_consent_at: String::new(),
+                trust_factor: 100,
+                trust_review_status: "clear".to_string(),
+                trust_review_reason: String::new(),
+                trust_review_at: String::new(),
             });
         }
     }

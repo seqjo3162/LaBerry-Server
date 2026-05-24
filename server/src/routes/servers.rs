@@ -548,6 +548,7 @@ pub struct MemberView {
     pub id: i64,
     pub username: String,
     pub avatar_file_id: Option<i64>,
+    pub public_encryption_key: Option<String>,
     pub role: String,
     pub is_online: bool,
     pub status: String,
@@ -1220,6 +1221,7 @@ async fn list_members(
         SELECT
             u.id as id,
             u.username as username,
+            u.public_encryption_key as public_encryption_key,
             up.avatar_file_id as avatar_file_id,
             COALESCE(m.role, 'member') as role,
             CASE
@@ -1251,6 +1253,7 @@ async fn list_members(
             id: r.get("id"),
             username: r.get("username"),
             avatar_file_id: r.try_get::<Option<i64>, _>("avatar_file_id").ok().flatten(),
+            public_encryption_key: r.try_get::<Option<String>, _>("public_encryption_key").ok().flatten(),
             role: r.get::<String, _>("role"),
             is_online: r.get::<i64, _>("is_online") != 0,
             status: r.get::<String, _>("status"),

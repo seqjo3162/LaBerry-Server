@@ -16,7 +16,7 @@ use crate::middleware::auth_guard::AuthUser;
 use crate::server::AppState;
 use crate::ws::RoomId;
 
-const MAX_MESSAGE_CHARS: usize = 4000;
+const MAX_MESSAGE_CHARS: usize = 65535;
 
 #[derive(Serialize)]
 pub struct MessageRow {
@@ -793,7 +793,7 @@ pub async fn send(
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({
                 "detail": "message_too_long",
-                "max_chars": 4000
+                "max_chars": MAX_MESSAGE_CHARS
             })),
         )
             .into_response();
@@ -977,7 +977,7 @@ pub async fn send(
     let room = if kind == "voice" { RoomId::Voice(chat_id) } else { RoomId::Channel(chat_id) };
     st.hub.broadcast_room(&room, &out);
 
-    if kind == "text" {
+    if kind == "text" && !content.starts_with("[[e2ee:v1|") {
         crate::ai_client::spawn_channel_reply(st.clone(), chat_id, me.id, message_id);
     }
 

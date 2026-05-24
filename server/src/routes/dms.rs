@@ -15,7 +15,7 @@ use crate::{auth, server::AppState};
 use crate::middleware::auth_guard::AuthUser;
 use crate::ws::RoomId;
 
-const MAX_MESSAGE_CHARS: usize = 4000;
+const MAX_MESSAGE_CHARS: usize = 65535;
 
 #[derive(Serialize)]
 pub struct DmChatView {
@@ -43,6 +43,7 @@ pub struct DmParticipantView {
     pub id: i64,
     pub username: String,
     pub avatar_file_id: Option<i64>,
+    pub public_encryption_key: Option<String>,
     pub is_me: bool,
     pub is_online: bool,
     pub status: String,
@@ -567,6 +568,7 @@ async fn list_participants(
         r#"
         SELECT u.id,
                u.username,
+               u.public_encryption_key,
                up.avatar_file_id,
                COALESCE(p.is_online, 0) AS is_online,
                COALESCE(p.status, 'offline') AS status
@@ -592,6 +594,7 @@ async fn list_participants(
                 id,
                 username: r.get("username"),
                 avatar_file_id: r.try_get("avatar_file_id").ok(),
+                public_encryption_key: r.try_get("public_encryption_key").ok(),
                 is_me: id == me.id,
                 is_online: r.get::<i64, _>("is_online") != 0,
                 status: r.get("status"),
@@ -848,7 +851,7 @@ async fn send_message(
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(serde_json::json!({
                 "detail": "message_too_long",
-                "max_chars": 4000
+                "max_chars": MAX_MESSAGE_CHARS
             })),
         )
             .into_response();
@@ -987,7 +990,9 @@ async fn send_message(
 
     st.hub.broadcast_room(&RoomId::Channel(chat_id), &out);
 
-    crate::ai_client::spawn_dm_reply(st.clone(), chat_id, me.id, message_id);
+    if !content_trimmed.starts_with("[[e2ee:v1|") {
+        crate::ai_client::spawn_dm_reply(st.clone(), chat_id, me.id, message_id);
+    }
 
     (
         StatusCode::OK,
