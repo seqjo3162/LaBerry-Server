@@ -88,7 +88,8 @@ async fn get_2fa_status(
     .bind(me.id)
     .fetch_optional(db)
     .await
-    .unwrap_or(Ok(0))
+    .ok()
+    .flatten()
     .unwrap_or(0);
 
     (StatusCode::OK, Json(TwoFactorStatusResponse {
