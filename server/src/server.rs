@@ -196,31 +196,29 @@ pub async fn run_server(
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
         
         tokio::spawn(async move {
-            use tokio_rustls::TlsStream;
-            use std::pin::Pin;
-            use std::task::{Context, Poll};
-            use std::io;
-            use tokio::io::{AsyncRead, AsyncWrite};
-            
+            use hyper::server::conn::Http;
+
             loop {
                 match listener.accept().await {
                     Ok((socket, addr)) => {
                         let tls_acceptor = tls_acceptor.clone();
-                        let app = app.clone();
-                        let shutdown_main = shutdown_main.clone();
-                        
+                        let app_clone = app.clone();
+
                         tokio::spawn(async move {
                             match tls_acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
-                                    let _ = axum::serve(
-                                        hyper_util::rt::TokioIo::new(tls_stream),
-                                        app
-                                    ).with_graceful_shutdown(async move {
-                                        shutdown_main.notified().await;
-                                    }).await;
+                                    // Create a hyper-compatible service from the axum app
+                                    let service = app_clone.into_make_service();
+
+                                    if let Err(err) = Http::new()
+                                        .serve_connection(tls_stream, service)
+                                        .await
+                                    {
+                                        eprintln!("[SERVER] TLS connection error: {}", err);
+                                    }
                                 }
                                 Err(e) => {
-                                    eprintln!("[SERVER] TLS error: {}", e);
+                                    eprintln!("[SERVER] TLS accept error: {}", e);
                                 }
                             }
                         });
@@ -231,6 +229,8 @@ pub async fn run_server(
                     }
                 }
             }
+
+            // Should never reach here under normal operation
             Err::<(), anyhow::Error>(anyhow::anyhow!("TLS server stopped"))
         })
     } else {
@@ -399,10 +399,23 @@ pub fn build_router(state: AppState) -> Router {
     HeaderValue::from_static("same-origin"),
 ))
 // HSTS for HTTPS deployment (1 year)
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("strict-transport-security"),
-    HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
-))
+.layer({
+    // Conditionally add HSTS only when TLS is configured to avoid issuing HSTS over plain HTTP
+    let tls_cert = env::var("LB_TLS_CERT_PATH").ok();
+    let tls_key = env::var("LB_TLS_KEY_PATH").ok();
+    if tls_cert.is_some() && tls_key.is_some() {
+        SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("strict-transport-security"),
+            HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+        )
+    } else {
+        // No-op layer when TLS not configured
+        SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-no-op"),
+            HeaderValue::from_static("1"),
+        )
+    }
+})
 // Cache control for security
 .layer(SetResponseHeaderLayer::if_not_present(
     axum::http::header::HeaderName::from_static("cache-control"),
