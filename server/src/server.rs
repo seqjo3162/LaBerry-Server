@@ -4,6 +4,7 @@
 use crate::{
     auth, db,
     ws::{Hub, UserId, VoiceChannelId},
+    middleware::geo_guard::GeoGuardState,
 };
 
 use axum::{
@@ -26,11 +27,10 @@ use dashmap::DashMap;
 use std::{
     collections::{HashMap, HashSet},
     env,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, atomic::{AtomicUsize, Ordering}
     },
 };
 use sysinfo::{Disks, System};
@@ -65,6 +65,8 @@ pub struct AppState {
     pub friends: HashMap<UserId, HashSet<UserId>>,
     pub voice_states: HashMap<UserId, VoiceChannelId>,
     pub admin_sessions: Arc<DashMap<String, AdminSession>>,
+    pub geo_guard: GeoGuardState,
+    pub trusted_proxies: Arc<Vec<IpAddr>>,
 }
 
 // ======================================================
@@ -106,6 +108,15 @@ pub async fn run_server(
     db::bootstrap::ensure_global_server(&db).await?;
     println!("[DB] ✅ Bootstrap complete");
 
+
+    let geo_guard = GeoGuardState::from_custom_file("assets/custom_blocked_cidr")?;
+    let trusted_proxies = Arc::new(vec![
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+        std::net::IpAddr::V6(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
+        // Если Caddy в Docker-контейнере, например:
+        // std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 1)),
+    ]);
+
     let state = AppState {
         db,
         hub: Arc::new(hub),
@@ -113,6 +124,8 @@ pub async fn run_server(
         friends: HashMap::new(),
         voice_states: HashMap::new(),
         admin_sessions: Arc::new(DashMap::new()),
+        geo_guard,
+        trusted_proxies,   // <-- добавить
     };
 
     // One shutdown signal for both servers.
@@ -345,15 +358,15 @@ pub fn build_router(state: AppState) -> Router {
             ServeDir::new(static_dir.clone())
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
         )
-        ;
-
-    // Admin panel is NOT exposed on the public server.
-    // It is served by a dedicated local-only listener (see run_server).
-
-    let router = router.with_state(state)
-        .layer(axum::middleware::from_fn(crate::middleware::host_guard::host_guard))
-        .layer(axum::middleware::from_fn(crate::middleware::geo_guard::geo_guard))
-        // Protect server from huge request bodies (uploads, etc.)
+        // 👇 ВАЖНО: слои middleware ДО with_state
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::host_guard::host_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::geo_guard::geo_guard,
+        ))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
 
 // Basic security headers (can be customized via env)
@@ -406,33 +419,34 @@ pub fn build_router(state: AppState) -> Router {
     ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
 ))
 
+        // CORS
         .layer({
-    // CORS: deny-by-default. Configure explicit origins via CORS_ALLOWED_ORIGINS env (comma-separated) or "*".
-    let allowed = env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
-    let mut cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+            let allowed = env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
+            let mut cors = CorsLayer::new()
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
-    if !allowed.trim().is_empty() {
-        let a = allowed.trim();
-        if a == "*" {
-            cors = cors.allow_origin(tower_http::cors::Any);
-        } else {
-            let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
-            for o in a.split(',') {
-                let o = o.trim();
-                if o.is_empty() { continue; }
-                if let Ok(v) = o.parse::<axum::http::HeaderValue>() {
-                    origins.push(v);
+            if !allowed.trim().is_empty() {
+                let a = allowed.trim();
+                if a == "*" {
+                    cors = cors.allow_origin(tower_http::cors::Any);
+                } else {
+                    let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
+                    for o in a.split(',') {
+                        let o = o.trim();
+                        if o.is_empty() { continue; }
+                        if let Ok(v) = o.parse::<axum::http::HeaderValue>() {
+                            origins.push(v);
+                        }
+                    }
+                    if !origins.is_empty() {
+                        cors = cors.allow_origin(origins);
+                    }
                 }
             }
-            if !origins.is_empty() {
-                cors = cors.allow_origin(origins);
-            }
-        }
-    }
-    cors
-})
+            cors
+        })
+
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().include_headers(false))
@@ -443,6 +457,9 @@ pub fn build_router(state: AppState) -> Router {
                 ),
         )
         .layer(CatchPanicLayer::new());
+
+    // 👇 Только теперь передаём state во все маршруты
+    let router = router.with_state(state);
 
     println!("[ROUTER] ✅ Routes ready");
     router
@@ -560,6 +577,10 @@ mod tests {
             friends: HashMap::new(),
             voice_states: HashMap::new(),
             admin_sessions: Arc::new(DashMap::new()),
+            geo_guard: GeoGuardState {
+                blocked_networks: Arc::new(vec![]),
+            },
+            trusted_proxies: Arc::new(vec![]), 
         }
     }
 
