@@ -327,3 +327,40 @@ pub fn sha256_hex(s: &str) -> String {
     h.update(s.as_bytes());
     format!("{:x}", h.finalize())
 }
+
+/// Constant-time string comparison to prevent timing attacks
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        // Still do a dummy comparison to avoid timing leak
+        let _ = verify_password("dummy", "");
+        return false;
+    }
+    
+    let mut result: u32 = 0;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        result |= (x ^ y) as u32;
+    }
+    result == 0
+}
+
+/// Timing-safe password verification with dummy Argon2 for non-existent users
+pub fn verify_password_timing_safe(password: &str, stored_hash: Option<&str>) -> bool {
+    match stored_hash {
+        Some(hash) => {
+            let Ok(parsed) = PasswordHash::new(hash) else {
+                // Hash parsing failed, still do dummy verification
+                let _ = verify_password("dummy", "");
+                return false;
+            };
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        },
+        None => {
+            // User doesn't exist, still perform Argon2 to equalize timing
+            let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$5pslEHwf7TvJPJfYiJU9sQ$wKzJpqEqlHnWQfcXlb0H5oDu+LJ6PO+HO5WdmxIyGyU";
+            let _ = verify_password("dummy", dummy_hash);
+            false
+        }
+    }
+}

@@ -2,10 +2,9 @@
 // 🔐 TLS/HTTPS Configuration for LaBerry Server
 // ======================================================
 
-use rustls_pemfile::{certs, private_keys};
+use rustls_pemfile::{certs, private_key};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 /// Load TLS certificate and private key from PEM files
 /// 
@@ -40,14 +39,8 @@ pub fn load_tls_config(
     // Read private key
     let key_file = fs::File::open(key_path)?;
     let mut key_reader = std::io::BufReader::new(key_file);
-    let mut keys: Vec<rustls::pki_types::PrivateKeyDer> = private_keys(&mut key_reader)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if keys.is_empty() {
-        anyhow::bail!("No private keys found in {}", key_path);
-    }
-
-    let key = keys.remove(0);
+    let key = private_key(&mut key_reader)?
+        .ok_or_else(|| anyhow::anyhow!("No private keys found in {}", key_path))?;
 
     // Create server config
     let config = rustls::ServerConfig::builder()
