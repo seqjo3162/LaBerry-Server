@@ -13,6 +13,7 @@ pub mod dms;
 pub mod downloads;
 pub mod sessions;
 pub mod rtc;
+pub mod twofa;
 
 pub mod profile_files;
 

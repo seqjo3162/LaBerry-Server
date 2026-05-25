@@ -156,19 +156,81 @@ pub async fn run_server(
     let app = build_router(state.clone());
     println!("[SERVER] Main router built ✅");
 
+    // Check for TLS configuration
+    let tls_cert_path = env::var("LB_TLS_CERT_PATH").ok();
+    let tls_key_path = env::var("LB_TLS_KEY_PATH").ok();
+    
+    let has_tls = tls_cert_path.is_some() && tls_key_path.is_some();
+    
+    if has_tls {
+        println!("[SERVER] 🔐 TLS/HTTPS enabled");
+    } else {
+        println!("[SERVER] ⚠️  TLS/HTTPS disabled - for production with E2EE, use HTTPS!");
+    }
+
     println!("[SERVER] Binding main TCP listener...");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("[SERVER] ✅ Main bound to {}", addr);
 
     let shutdown_main = shutdown.clone();
-    let mut main_handle = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                shutdown_main.notified().await;
-            })
-            .await
-            .map_err(anyhow::Error::from)
-    });
+    let mut main_handle = if has_tls {
+        // HTTPS mode
+        let tls_config = crate::tls::load_tls_config(
+            &tls_cert_path.unwrap(),
+            &tls_key_path.unwrap(),
+        )?;
+        
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
+        
+        tokio::spawn(async move {
+            use tokio_rustls::TlsStream;
+            use std::pin::Pin;
+            use std::task::{Context, Poll};
+            use std::io;
+            use tokio::io::{AsyncRead, AsyncWrite};
+            
+            loop {
+                match listener.accept().await {
+                    Ok((socket, addr)) => {
+                        let tls_acceptor = tls_acceptor.clone();
+                        let app = app.clone();
+                        let shutdown_main = shutdown_main.clone();
+                        
+                        tokio::spawn(async move {
+                            match tls_acceptor.accept(socket).await {
+                                Ok(tls_stream) => {
+                                    let _ = axum::serve(
+                                        hyper_util::rt::TokioIo::new(tls_stream),
+                                        app
+                                    ).with_graceful_shutdown(async move {
+                                        shutdown_main.notified().await;
+                                    }).await;
+                                }
+                                Err(e) => {
+                                    eprintln!("[SERVER] TLS error: {}", e);
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("[SERVER] Accept error: {}", e);
+                        break;
+                    }
+                }
+            }
+            Err::<(), anyhow::Error>(anyhow::anyhow!("TLS server stopped"))
+        })
+    } else {
+        // HTTP mode
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    shutdown_main.notified().await;
+                })
+                .await
+                .map_err(anyhow::Error::from)
+        })
+    };
 
     // ------------------------------
     // Admin server (local-only)
@@ -270,6 +332,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/api/profile-files", crate::routes::profile_files::router())
         .nest("/api/embeds", crate::routes::embeds::router())
         .nest("/api/rtc", crate::routes::rtc::router())
+        .nest("/api/2fa", crate::routes::twofa::router())
         .nest(
             "/files",
             Router::new()
@@ -303,12 +366,16 @@ pub fn build_router(state: AppState) -> Router {
     HeaderValue::from_static("DENY"),
 ))
 .layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("x-xss-protection"),
+    HeaderValue::from_static("1; mode=block"),
+))
+.layer(SetResponseHeaderLayer::if_not_present(
     axum::http::header::HeaderName::from_static("referrer-policy"),
-    HeaderValue::from_static("no-referrer"),
+    HeaderValue::from_static("strict-origin-when-cross-origin"),
 ))
 .layer(SetResponseHeaderLayer::if_not_present(
     axum::http::header::HeaderName::from_static("permissions-policy"),
-    HeaderValue::from_static("geolocation=(), microphone=(self), camera=()"),
+    HeaderValue::from_static("geolocation=(), microphone=(self), camera=(), payment=()"),
 ))
 .layer(SetResponseHeaderLayer::if_not_present(
     axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
@@ -318,10 +385,24 @@ pub fn build_router(state: AppState) -> Router {
     axum::http::header::HeaderName::from_static("cross-origin-resource-policy"),
     HeaderValue::from_static("same-origin"),
 ))
+// HSTS for HTTPS deployment (1 year)
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("strict-transport-security"),
+    HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+))
+// Cache control for security
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("cache-control"),
+    HeaderValue::from_static("no-cache, no-store, must-revalidate, private"),
+))
+.layer(SetResponseHeaderLayer::if_not_present(
+    axum::http::header::HeaderName::from_static("pragma"),
+    HeaderValue::from_static("no-cache"),
+))
 .layer(SetResponseHeaderLayer::if_not_present(
     axum::http::header::HeaderName::from_static("content-security-policy"),
     HeaderValue::from_str(
-        &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
+        &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
     ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
 ))
 

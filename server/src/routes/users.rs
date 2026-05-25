@@ -895,14 +895,59 @@ async fn register_device_key(
     me: AuthUser,
     Json(body): Json<RegisterDeviceKeyBody>,
 ) -> impl IntoResponse {
+    use crate::e2ee::{JwkKey, DeviceKeyValidator};
+    
     let db = &st.db;
     let now = auth::now_iso();
 
-    if body.device_id.trim().is_empty() || body.public_jwk.trim().is_empty() {
-        return StatusCode::BAD_REQUEST.into_response();
+    // Validate input
+    if let Err(e) = DeviceKeyValidator::validate_registration(
+        &body.device_id,
+        &body.public_jwk,
+        &body.label,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Invalid request: {}", e)}))
+        ).into_response();
     }
 
-    let q = sqlx::query(
+    // Parse and validate JWK
+    let jwk = match JwkKey::from_json(&body.public_jwk) {
+        Ok(key) => key,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid JWK: {}", e)}))
+            ).into_response();
+        }
+    };
+
+    // Compute fingerprint for key pinning
+    let fingerprint = jwk.fingerprint();
+
+    // Check for existing key and detect key changes
+    let existing_pin = sqlx::query_as::<_, (Option<String>,)>(
+        r#"SELECT fingerprint FROM e2ee_key_pins WHERE user_id = ? AND device_id = ?"#
+    )
+    .bind(me.id)
+    .bind(&body.device_id)
+    .fetch_optional(db)
+    .await;
+
+    if let Ok(Some((Some(existing_fp),))) = existing_pin {
+        if existing_fp != fingerprint {
+            // Key changed! This could be legitimate device change or compromise
+            eprintln!("[SECURITY] E2EE key changed for user {} device {}", me.id, body.device_id);
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": "e2ee_public_key_changed"}))
+            ).into_response();
+        }
+    }
+
+    // Register device key
+    let device_registration = sqlx::query(
         r#"
         INSERT OR REPLACE INTO user_device_keys(device_id, user_id, public_jwk, label, created_at, last_seen)
         VALUES(?, ?, ?, ?, ?, ?)
@@ -917,11 +962,29 @@ async fn register_device_key(
     .execute(db)
     .await;
 
-    if q.is_err() {
+    if device_registration.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+    // Store/update key fingerprint for pinning
+    let _ = sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO e2ee_key_pins(user_id, device_id, fingerprint, created_at, last_verified_at)
+        VALUES(?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(me.id)
+    .bind(&body.device_id)
+    .bind(&fingerprint)
+    .bind(&now)
+    .bind(&now)
+    .execute(db)
+    .await;
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "ok": true,
+        "fingerprint": fingerprint
+    }))).into_response()
 }
 
 async fn get_user_device_keys(

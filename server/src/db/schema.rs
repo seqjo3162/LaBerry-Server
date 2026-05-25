@@ -878,6 +878,79 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
         .execute(db)
         .await;
 
+    // e2ee_key_pins: Server-side key pinning for E2EE security
+    // Stores SHA-256 fingerprints of public keys to detect key changes
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS e2ee_key_pins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            device_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_verified_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            UNIQUE(user_id, device_id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_e2ee_key_pins_user_id ON e2ee_key_pins(user_id);"#)
+        .execute(db)
+        .await?;
+
+    // two_factor_backup_codes: Backup codes for account recovery
+    // Each code can only be used once. Must be hashed for security.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS two_factor_backup_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            code_hash TEXT NOT NULL,
+            is_used INTEGER NOT NULL DEFAULT 0,
+            used_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_two_factor_backup_codes_user_id ON two_factor_backup_codes(user_id);"#)
+        .execute(db)
+        .await?;
+
+    // user_sessions: Track active sessions for better session management
+    // Allows revoking specific sessions without invalidating the whole account
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            device_id TEXT,
+            device_label TEXT,
+            token_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_activity_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            is_revoked INTEGER NOT NULL DEFAULT 0,
+            revoked_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_sessions_user_id ON user_sessions(user_id);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_sessions_expires ON user_sessions(expires_at);"#)
+        .execute(db)
+        .await?;
+
     let ai_enabled_env = std::env::var("LB_AI_ENABLED")
         .ok()
         .map(|v| {

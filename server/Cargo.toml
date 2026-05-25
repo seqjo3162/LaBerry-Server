@@ -56,6 +56,15 @@ hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
 
+# TLS/HTTPS Support
+rustls-pemfile = "2.1"
+
+# E2EE JWK Validation
+jsonwebkey = { version = "0.3", features = ["crypto"] }
+
+# Time-based operations for security
+time = { version = "0.3", features = ["macros"] }
+
 # ТОЛЬКО ОДНА СЕКЦИЯ ДЛЯ НЕ-ANDROID!
 [target.'cfg(not(target_os = "android"))'.dependencies]
 sqlx = { version = "0.8", default-features = false, features = [

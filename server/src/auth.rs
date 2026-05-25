@@ -281,6 +281,47 @@ pub fn generate_2fa_code_6() -> String {
     format!("{:06}", rng.sample(dist))
 }
 
+/// Generate backup codes for 2FA account recovery
+/// Returns 10 codes in format: XXXX-XXXX-XXXX (48 bits each)
+pub fn generate_2fa_backup_codes() -> Vec<String> {
+    let mut rng = rand::thread_rng();
+    let dist = Uniform::new(0u64, 281_474_976_710_656u64); // 2^48
+    
+    (0..10)
+        .map(|_| {
+            let code = rng.sample(dist);
+            format!("{:012X}", code)
+                .chars()
+                .collect::<Vec<_>>()
+                .chunks(4)
+                .map(|chunk| chunk.iter().collect::<String>())
+                .collect::<Vec<_>>()
+                .join("-")
+        })
+        .collect()
+}
+
+/// Verify backup code and mark as used
+/// Codes should be stored as hashes in DB, never in plaintext
+pub fn verify_backup_code(code: &str, stored_hash: &str) -> bool {
+    let code_hash = sha256_hex(code);
+    code_hash == stored_hash
+}
+
+/// Generate session ID for tracking user sessions
+pub fn generate_session_id() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::thread_rng();
+    
+    (0..32)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
 pub fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
