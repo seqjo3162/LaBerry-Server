@@ -100,6 +100,26 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
     .execute(db)
     .await?;
 
+
+    // user_device_keys: store per-device public keys for E2EE
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_device_keys (
+            device_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            public_jwk TEXT NOT NULL,
+            label TEXT,
+            created_at TEXT NOT NULL,
+            last_seen TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_user_device_keys_user_id ON user_device_keys(user_id);"#)
+        .execute(db)
+        .await?;
     // migrate legacy dbs
     try_add_column(db, "users", "email_verified INTEGER NOT NULL DEFAULT 0", "email_verified")
         .await?;

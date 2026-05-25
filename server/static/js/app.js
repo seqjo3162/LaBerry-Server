@@ -76,6 +76,31 @@ function e2eeStorageKey() {
     return `lb:e2ee:identity:v1:${Number.isFinite(uid) && uid > 0 ? uid : 'anon'}`;
 }
 
+function e2eeDeviceIdStorageKey() {
+    const uid = Number(currentUser?.id);
+    return `lb:e2ee:device_id:v1:${Number.isFinite(uid) && uid > 0 ? uid : 'anon'}`;
+}
+
+function e2eeGetOrCreateDeviceId() {
+    try {
+        let id = localStorage.getItem(e2eeDeviceIdStorageKey());
+        if (id && String(id).trim()) return id;
+        if (crypto && typeof crypto.randomUUID === 'function') {
+            id = crypto.randomUUID();
+        } else {
+            const a = new Uint8Array(16);
+            crypto.getRandomValues(a);
+            let s = '';
+            for (let i = 0; i < a.length; i += 1) s += (a[i] | 0).toString(16).padStart(2, '0');
+            id = s;
+        }
+        localStorage.setItem(e2eeDeviceIdStorageKey(), id);
+        return id;
+    } catch (_) {
+        return null;
+    }
+}
+
 function e2eeTrustedKeysStorageKey() {
     const uid = Number(currentUser?.id);
     return `${E2EE_TRUSTED_KEYS_PREFIX}:${Number.isFinite(uid) && uid > 0 ? uid : 'anon'}`;
@@ -201,6 +226,30 @@ async function e2eeImportPublicKey(jwk) {
     );
 }
 
+async function e2eeRegisterDeviceKey(deviceId, publicJwk, label) {
+    if (!deviceId || !publicJwk) return;
+    try {
+        await api('/api/users/me/device-keys', {
+            method: 'POST',
+            body: JSON.stringify({ device_id: deviceId, public_jwk: JSON.stringify(publicJwk), label: label || null }),
+        });
+    } catch (e) {
+        console.warn('[E2EE] failed to register device key', e);
+    }
+}
+
+async function e2eeGetUserDeviceKeys(userId) {
+    const id = Number(userId);
+    if (!Number.isFinite(id) || id <= 0) return [];
+    try {
+        const rows = await api(`/api/users/${encodeURIComponent(id)}/device-keys`);
+        if (!Array.isArray(rows)) return [];
+        return rows.map((r) => ({ device_id: r.device_id, public_jwk: e2eeParsePublicKey(r.public_jwk) }));
+    } catch (e) {
+        return [];
+    }
+}
+
 async function e2eeEnsureIdentity(upload = false) {
     if (!e2eeAvailable()) return null;
     if (e2eeIdentityPromise) return e2eeIdentityPromise;
@@ -234,11 +283,11 @@ async function e2eeEnsureIdentity(upload = false) {
         const publicText = JSON.stringify(publicJwk);
         if (upload && currentUser && currentUser.public_encryption_key !== publicText) {
             try {
-                const updated = await api('/api/users/me', {
-                    method: 'PUT',
-                    body: JSON.stringify({ public_encryption_key: publicText })
-                });
-                currentUser = { ...currentUser, ...(updated || {}), public_encryption_key: publicText };
+                    // register per-device key instead of overwriting account-level key
+                    const deviceId = e2eeGetOrCreateDeviceId();
+                    await e2eeRegisterDeviceKey(deviceId, publicJwk, navigator.userAgent);
+                    // still update account object locally
+                    currentUser = { ...currentUser, ...(await api('/api/users/me') || {}), public_encryption_key: publicText };
             } catch (e) {
                 console.warn('[E2EE] failed to publish public key', e);
             }
@@ -270,8 +319,19 @@ async function e2eeGetUserPublicKey(userId) {
         if (jwk) {
             await e2eeTrustPublicKey(id, u?.username, jwk);
             e2eePublicKeyCache.set(id, jwk);
+            return jwk;
         }
-        return jwk;
+        // fallback: try to get per-device keys
+        const devs = await e2eeGetUserDeviceKeys(id);
+        if (devs && devs.length) {
+            const first = devs[0].public_jwk;
+            if (first) {
+                await e2eeTrustPublicKey(id, u?.username, first);
+                e2eePublicKeyCache.set(id, first);
+                return first;
+            }
+        }
+        return null;
     } catch (e) {
         if (e?.code === 'e2ee_public_key_changed') throw e;
         return null;
@@ -346,23 +406,60 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     );
     const messageKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', messageKey));
 
+    // ephemeral sender key for this message
+    const ephemeral = await crypto.subtle.generateKey(
+        { name: 'ECDH', namedCurve: 'P-256' },
+        true,
+        ['deriveKey']
+    );
+    const ephemeralPubJwk = await crypto.subtle.exportKey('jwk', ephemeral.publicKey);
+
     for (const recipient of recipients) {
         const id = Number(recipient?.id);
         if (!Number.isFinite(id) || id <= 0) continue;
-        const jwk = e2eeParsePublicKey(recipient?.public_encryption_key) || await e2eeGetUserPublicKey(id);
-        if (!jwk) {
+
+        // gather recipient devices
+        let devices = [];
+        try {
+            devices = await e2eeGetUserDeviceKeys(id);
+        } catch (_) { devices = []; }
+
+        // fallback to account-level single key
+        if ((!devices || devices.length === 0) && recipient?.public_encryption_key) {
+            const parsed = e2eeParsePublicKey(recipient.public_encryption_key);
+            if (parsed) devices = [{ device_id: 'server', public_jwk: parsed }];
+        }
+
+        if (!devices || devices.length === 0) {
             missing.push(recipient?.username || `#${id}`);
             continue;
         }
-        await e2eeTrustPublicKey(id, recipient?.username, jwk);
-        const wrapKey = await e2eeDeriveWrapKey(jwk);
-        if (!wrapKey) {
-            missing.push(recipient?.username || `#${id}`);
-            continue;
+
+        keys[String(id)] = {};
+
+        for (const d of devices) {
+            const devId = String(d.device_id || '');
+            const jwk = d.public_jwk;
+            if (!jwk) {
+                continue;
+            }
+            try {
+                const publicKey = await e2eeImportPublicKey(jwk);
+                if (!publicKey) continue;
+                const wrapKey = await crypto.subtle.deriveKey(
+                    { name: 'ECDH', public: publicKey },
+                    ephemeral.privateKey,
+                    { name: 'AES-GCM', length: 256 },
+                    false,
+                    ['encrypt', 'decrypt']
+                );
+                const keyIv = crypto.getRandomValues(new Uint8Array(12));
+                const keyCt = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: keyIv }, wrapKey, messageKeyRaw));
+                keys[String(id)][devId || 'unknown'] = { iv: e2eeBytesToB64u(keyIv), ct: e2eeBytesToB64u(keyCt) };
+            } catch (e) {
+                console.warn('[E2EE] key wrap failed for device', d, e);
+            }
         }
-        const keyIv = crypto.getRandomValues(new Uint8Array(12));
-        const keyCt = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: keyIv }, wrapKey, messageKeyRaw));
-        keys[String(id)] = { iv: e2eeBytesToB64u(keyIv), ct: e2eeBytesToB64u(keyCt) };
     }
 
     if (!keys[String(currentUser?.id)] || missing.length) {
@@ -385,6 +482,7 @@ async function e2eeEncryptForCurrentChat(plaintext) {
         alg: 'LB-E2EE-v1',
         sender: Number(currentUser?.id) || 0,
         sender_key: identity.publicJwk,
+        ephemeral: ephemeralPubJwk,
         iv: e2eeBytesToB64u(iv),
         ct: e2eeBytesToB64u(ct),
         keys,
@@ -403,25 +501,80 @@ async function e2eeDecryptText(content) {
     try {
         const identity = await e2eeEnsureIdentity(false);
         if (!identity || !currentUser?.id) return '🔒 Не удалось открыть ключ шифрования.';
-        const wrapped = env.keys?.[String(currentUser.id)];
+
+        const myDeviceId = e2eeGetOrCreateDeviceId();
+        const userKeyMap = env.keys && env.keys[String(currentUser.id)];
+
+        // backward-compatible: old format had keys[userId] = { iv, ct }
+        if (userKeyMap && userKeyMap.iv && userKeyMap.ct) {
+            try {
+                const senderKey = e2eeParsePublicKey(env.sender_key) || await e2eeGetUserPublicKey(env.sender);
+                const wrapKey = await e2eeDeriveWrapKey(senderKey);
+                if (!wrapKey) return '🔒 Не удалось получить ключ отправителя.';
+                const messageKeyRaw = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: e2eeB64uToBytes(userKeyMap.iv) },
+                    wrapKey,
+                    e2eeB64uToBytes(userKeyMap.ct)
+                );
+                const messageKey = await crypto.subtle.importKey('raw', messageKeyRaw, { name: 'AES-GCM' }, false, ['decrypt']);
+                const plain = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: e2eeB64uToBytes(env.iv) },
+                    messageKey,
+                    e2eeB64uToBytes(env.ct)
+                );
+                return new TextDecoder().decode(plain);
+            } catch (e) {
+                console.warn('[E2EE] legacy decrypt failed', e);
+                return '🔒 Не удалось расшифровать сообщение на этом устройстве.';
+            }
+        }
+
+        if (!userKeyMap || typeof userKeyMap !== 'object') return '🔒 Сообщение зашифровано не для этого аккаунта или устройства.';
+
+        const wrapped = userKeyMap[String(myDeviceId)] || userKeyMap[myDeviceId] || userKeyMap['unknown'];
         if (!wrapped) return '🔒 Сообщение зашифровано не для этого аккаунта или устройства.';
 
-        const senderKey = e2eeParsePublicKey(env.sender_key) || await e2eeGetUserPublicKey(env.sender);
-        const wrapKey = await e2eeDeriveWrapKey(senderKey);
-        if (!wrapKey) return '🔒 Не удалось получить ключ отправителя.';
+        try {
+            // prefer ephemeral sender key if present
+            let wrapKey = null;
+            if (env.ephemeral) {
+                const senderEphemeral = e2eeParsePublicKey(env.ephemeral) || env.ephemeral;
+                const senderEphemeralKey = await e2eeImportPublicKey(senderEphemeral);
+                if (senderEphemeralKey) {
+                    wrapKey = await crypto.subtle.deriveKey(
+                        { name: 'ECDH', public: senderEphemeralKey },
+                        identity.privateKey,
+                        { name: 'AES-GCM', length: 256 },
+                        false,
+                        ['decrypt']
+                    );
+                }
+            }
 
-        const messageKeyRaw = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: e2eeB64uToBytes(wrapped.iv) },
-            wrapKey,
-            e2eeB64uToBytes(wrapped.ct)
-        );
-        const messageKey = await crypto.subtle.importKey('raw', messageKeyRaw, { name: 'AES-GCM' }, false, ['decrypt']);
-        const plain = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: e2eeB64uToBytes(env.iv) },
-            messageKey,
-            e2eeB64uToBytes(env.ct)
-        );
-        return new TextDecoder().decode(plain);
+            // fallback to sender static key (legacy)
+            if (!wrapKey) {
+                const senderKey = e2eeParsePublicKey(env.sender_key) || await e2eeGetUserPublicKey(env.sender);
+                wrapKey = await e2eeDeriveWrapKey(senderKey);
+            }
+
+            if (!wrapKey) return '🔒 Не удалось получить ключ отправителя.';
+
+            const messageKeyRaw = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv: e2eeB64uToBytes(wrapped.iv) },
+                wrapKey,
+                e2eeB64uToBytes(wrapped.ct)
+            );
+            const messageKey = await crypto.subtle.importKey('raw', messageKeyRaw, { name: 'AES-GCM' }, false, ['decrypt']);
+            const plain = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv: e2eeB64uToBytes(env.iv) },
+                messageKey,
+                e2eeB64uToBytes(env.ct)
+            );
+            return new TextDecoder().decode(plain);
+        } catch (e) {
+            console.warn('[E2EE] decrypt failed', e);
+            return '🔒 Не удалось расшифровать сообщение на этом устройстве.';
+        }
     } catch (e) {
         console.warn('[E2EE] decrypt failed', e);
         return '🔒 Не удалось расшифровать сообщение на этом устройстве.';

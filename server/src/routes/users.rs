@@ -380,6 +380,7 @@ fn sanitize_status(s: &str) -> String {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/me", get(me).put(update_me))
+        .route("/me/device-keys", post(register_device_key))
         .route("/me/email/request_code", post(request_email_code))
         .route("/me/email/confirm_code", post(confirm_email_code))
         .route("/me/profile", get(get_my_profile).put(update_my_profile))
@@ -397,6 +398,7 @@ pub fn router() -> Router<AppState> {
         .route("/:id/report", post(report_user))
         .route("/:id/profile", get(get_profile_by_id))
         .route("/:id", get(get_by_id))
+        .route("/:id/device-keys", get(get_user_device_keys))
 }
 
 fn sanitize_email(s: &str) -> Option<String> {
@@ -872,6 +874,80 @@ async fn update_me(
     };
 
     (StatusCode::OK, Json(resp)).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RegisterDeviceKeyBody {
+    pub device_id: String,
+    pub public_jwk: String,
+    pub label: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DeviceKeyView {
+    pub device_id: String,
+    pub public_jwk: String,
+    pub label: Option<String>,
+}
+
+async fn register_device_key(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Json(body): Json<RegisterDeviceKeyBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+    let now = auth::now_iso();
+
+    if body.device_id.trim().is_empty() || body.public_jwk.trim().is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let q = sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO user_device_keys(device_id, user_id, public_jwk, label, created_at, last_seen)
+        VALUES(?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(body.device_id.trim())
+    .bind(me.id)
+    .bind(body.public_jwk.trim())
+    .bind(body.label.map(|s| s.trim().to_string()))
+    .bind(&now)
+    .bind(&now)
+    .execute(db)
+    .await;
+
+    if q.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+async fn get_user_device_keys(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let rows = sqlx::query(
+        r#"SELECT device_id, public_jwk, label FROM user_device_keys WHERE user_id = ?"#,
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+    .ok()
+    .unwrap_or_default();
+
+    let mut out: Vec<DeviceKeyView> = Vec::new();
+    for r in rows.into_iter() {
+        let device_id: String = r.get("device_id");
+        let public_jwk: String = r.get("public_jwk");
+        let label: Option<String> = r.get("label");
+        out.push(DeviceKeyView { device_id, public_jwk, label });
+    }
+
+    (StatusCode::OK, Json(out)).into_response()
 }
 
 async fn set_cookie_consent(
