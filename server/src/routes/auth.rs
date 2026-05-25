@@ -178,7 +178,7 @@ async fn login(
     Form(body): Form<LoginBody>,
 ) -> Result<Response, ApiError> {
 
-// rate limit (best-effort, in-memory)
+// rate limit (best-effort, in-memory + DB-backed)
 let ip = rate_limit::extract_ip(&headers).unwrap_or_else(|| "unknown".to_string());
 let u = body.username.trim().to_ascii_lowercase();
 let key = format!("login:{}:{}", ip, u);
@@ -201,36 +201,66 @@ if !rate_limit::allow(&key, 12, 300) { // 12 attempts / 5 min per ip+username
     .bind(&body.username)
     .fetch_optional(db)
     .await
-    .map_err(|_| ApiError::Internal("Database error"))?
-    .ok_or(ApiError::Unauthorized("Invalid credentials"))?;
+    .map_err(|_| ApiError::Internal("Database error"))?;
+
+    // 🔴 SECURITY FIX: Timing-safe authentication
+    // If user not found, still run dummy Argon2 to prevent user enumeration
+    let (user_exists, r_unwrapped) = match r {
+        Some(row) => (true, Some(row)),
+        None => (false, None),
+    };
+
+    if !auth::verify_password_timing_safe(&body.password, r_unwrapped.as_ref().map(|r| r.get::<String, _>("password_hash")).as_deref()) {
+        return Err(ApiError::Unauthorized("Invalid credentials"));
+    }
+
+    if !user_exists {
+        return Err(ApiError::Unauthorized("Invalid credentials"));
+    }
+
+    let r = r_unwrapped.unwrap();
 
     if r.get::<i64, _>("is_banned") != 0 {
         return Err(ApiError::Forbidden("User banned"));
-    }
-
-    if !auth::verify_password(&body.password, r.get("password_hash")) {
-        return Err(ApiError::Unauthorized("Invalid credentials"));
     }
 
     if r.get::<i64, _>("is_2fa_enabled") != 0 {
         let code = auth::generate_2fa_code_6();
         let code_hash = auth::sha256_hex(&code);
         let sent_at = auth::now_iso();
+        let expires_at = (auth::now_unix() + 300).to_string(); // 5 minutes TTL
 
+        // 🔴 SECURITY FIX: 2FA TTL and reset attempts on new code
         sqlx::query(
             r#"
             UPDATE users
             SET two_factor_secret_code_hash = ?,
-                two_factor_code_sent_at = ?
+                two_factor_code_sent_at = ?,
+                two_factor_code_expires_at = ?,
+                two_factor_code_attempts = 0,
+                two_factor_locked_until = NULL
             WHERE id = ?
             "#,
         )
         .bind(code_hash)
         .bind(sent_at)
+        .bind(expires_at)
         .bind(r.get::<i64, _>("id"))
         .execute(db)
         .await
         .map_err(|_| ApiError::Internal("Database error"))?;
+
+        // Audit log for 2FA code request
+        let _ = sqlx::query(
+            r#"INSERT INTO audit_logs(user_id, action, status, ip_address, created_at) VALUES(?, ?, ?, ?, ?)"#
+        )
+        .bind(r.get::<i64, _>("id"))
+        .bind("2fa_code_request")
+        .bind("success")
+        .bind(&ip)
+        .bind(auth::now_iso())
+        .execute(db)
+        .await;
 
         return Ok((
             StatusCode::OK,
@@ -325,9 +355,11 @@ async fn verify_2fa(
 ) -> Result<Response, ApiError> {
     let db = &st.db;
 
+    // 🔴 SECURITY FIX: Check 2FA lockout
     let r = sqlx::query(
         r#"
-        SELECT id, username, token_version, two_factor_secret_code_hash
+        SELECT id, username, token_version, two_factor_secret_code_hash, 
+               two_factor_code_expires_at, two_factor_code_attempts, two_factor_locked_until
         FROM users
         WHERE id = ?
         LIMIT 1
@@ -339,65 +371,180 @@ async fn verify_2fa(
     .map_err(|_| ApiError::Internal("Database error"))?
     .ok_or(ApiError::NotFound("User not found"))?;
 
+    let user_id: i64 = r.get("id");
+    let username: String = r.get("username");
+    let token_version: i64 = r.get("token_version");
     let stored_hash: Option<String> = r.get("two_factor_secret_code_hash");
+    let expires_at_str: Option<String> = r.get("two_factor_code_expires_at");
+    let attempts: i64 = r.get("two_factor_code_attempts");
+    let locked_until_str: Option<String> = r.get("two_factor_locked_until");
+
     let stored_hash = stored_hash.ok_or(ApiError::NotFound("2FA not active"))?;
 
-    if auth::sha256_hex(&body.code) != stored_hash {
+    // Check if account is locked
+    if let Some(locked_until) = locked_until_str {
+        if let Ok(locked_ts) = locked_until.parse::<i64>() {
+            if auth::now_unix() < locked_ts {
+                // Log failed attempt
+                let _ = sqlx::query(
+                    r#"INSERT INTO audit_logs(user_id, action, status, details, created_at) VALUES(?, ?, ?, ?, ?)"#
+                )
+                .bind(user_id)
+                .bind("2fa_verify")
+                .bind("blocked_lockout")
+                .bind("Account locked due to too many failed attempts")
+                .bind(auth::now_iso())
+                .execute(db)
+                .await;
+                return Err(ApiError::Forbidden("Account locked. Try again in 15 minutes"));
+            }
+        }
+    }
+
+    // 🔴 SECURITY FIX: Check 2FA code TTL (5 minutes)
+    if let Some(exp_at) = expires_at_str {
+        if let Ok(exp_ts) = exp_at.parse::<i64>() {
+            if auth::now_unix() > exp_ts {
+                let _ = sqlx::query(
+                    r#"INSERT INTO audit_logs(user_id, action, status, details, created_at) VALUES(?, ?, ?, ?, ?)"#
+                )
+                .bind(user_id)
+                .bind("2fa_verify")
+                .bind("expired")
+                .bind("2FA code expired")
+                .bind(auth::now_iso())
+                .execute(db)
+                .await;
+                return Err(ApiError::Unauthorized("2FA code expired. Please request a new one"));
+            }
+        }
+    }
+
+    // Verify the code
+    let code_matches = auth::constant_time_eq(&auth::sha256_hex(&body.code), &stored_hash);
+    
+    if !code_matches {
+        // Increment attempts
+        let new_attempts = attempts + 1;
+        
+        if new_attempts >= 3 {
+            // Lock account for 15 minutes
+            let locked_until = auth::now_unix() + 900; // 15 minutes
+            sqlx::query(
+                r#"
+                UPDATE users
+                SET two_factor_code_attempts = ?,
+                    two_factor_locked_until = ?,
+                    two_factor_secret_code_hash = NULL,
+                    two_factor_code_sent_at = NULL
+                WHERE id = ?
+                "#,
+            )
+            .bind(3)
+            .bind(locked_until.to_string())
+            .bind(user_id)
+            .execute(db)
+            .await
+            .ok();
+
+            let _ = sqlx::query(
+                r#"INSERT INTO audit_logs(user_id, action, status, details, created_at) VALUES(?, ?, ?, ?, ?)"#
+            )
+            .bind(user_id)
+            .bind("2fa_verify")
+            .bind("locked")
+            .bind("Account locked after 3 failed attempts")
+            .bind(auth::now_iso())
+            .execute(db)
+            .await;
+
+            return Err(ApiError::Forbidden("Too many failed attempts. Account locked for 15 minutes"));
+        } else {
+            // Increment attempt counter
+            sqlx::query(
+                r#"UPDATE users SET two_factor_code_attempts = ? WHERE id = ?"#
+            )
+            .bind(new_attempts)
+            .bind(user_id)
+            .execute(db)
+            .await
+            .ok();
+
+            let _ = sqlx::query(
+                r#"INSERT INTO audit_logs(user_id, action, status, details, created_at) VALUES(?, ?, ?, ?, ?)"#
+            )
+            .bind(user_id)
+            .bind("2fa_verify")
+            .bind("invalid_code")
+            .bind(format!("Invalid 2FA code (attempt {}/3)", new_attempts))
+            .bind(auth::now_iso())
+            .execute(db)
+            .await;
+        }
         return Err(ApiError::Unauthorized("Invalid 2FA code"));
     }
 
+    // ✅ Code verified successfully, clear the code and reset attempts
     sqlx::query(
         r#"
         UPDATE users
         SET two_factor_secret_code_hash = NULL,
-            two_factor_code_sent_at = NULL
+            two_factor_code_sent_at = NULL,
+            two_factor_code_expires_at = NULL,
+            two_factor_code_attempts = 0
         WHERE id = ?
         "#,
     )
-    .bind(r.get::<i64, _>("id"))
+    .bind(user_id)
     .execute(db)
     .await
     .map_err(|_| ApiError::Internal("Database error"))?;
 
-    
-let username: String = r.get("username");
-let token_version: i64 = r.get("token_version");
-let user_id: i64 = r.get("id");
+    let token = auth::create_access_token(&username, token_version)
+        .map_err(|_| ApiError::Internal("Token error"))?;
 
-let token = auth::create_access_token(&username, token_version)
-    .map_err(|_| ApiError::Internal("Token error"))?;
+    let refresh_jti = uuid::Uuid::new_v4().to_string();
+    let refresh = auth::create_refresh_token(&username, token_version, &refresh_jti)
+        .map_err(|_| ApiError::Internal("Token error"))?;
+    let refresh_hash = auth::sha256_hex(&refresh);
+    let now = auth::now_iso();
+    let refresh_claims = auth::decode_refresh_claims(&refresh)
+        .map_err(|_| ApiError::Internal("Token error"))?;
+    let expires_at = refresh_claims.exp.to_string();
 
-let refresh_jti = Uuid::new_v4().to_string();
-let refresh = auth::create_refresh_token(&username, token_version, &refresh_jti)
-    .map_err(|_| ApiError::Internal("Token error"))?;
-let refresh_hash = auth::sha256_hex(&refresh);
-let now = auth::now_iso();
-let refresh_claims = auth::decode_refresh_claims(&refresh)
-    .map_err(|_| ApiError::Internal("Token error"))?;
-let expires_at = refresh_claims.exp.to_string();
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO refresh_sessions(user_id, refresh_token_hash, user_agent, ip, created_at, last_used_at, expires_at, revoked_at)
+        VALUES(?, ?, NULL, NULL, ?, ?, ?, NULL)
+        "#,
+    )
+    .bind(user_id)
+    .bind(&refresh_hash)
+    .bind(&now)
+    .bind(&now)
+    .bind(&expires_at)
+    .execute(db)
+    .await;
 
-let _ = sqlx::query(
-    r#"
-    INSERT INTO refresh_sessions(user_id, refresh_token_hash, user_agent, ip, created_at, last_used_at, expires_at, revoked_at)
-    VALUES(?, ?, NULL, NULL, ?, ?, ?, NULL)
-    "#,
-)
-.bind(user_id)
-.bind(&refresh_hash)
-.bind(&now)
-.bind(&now)
-.bind(&expires_at)
-.execute(db)
-.await;
+    // Audit log for successful 2FA verification
+    let _ = sqlx::query(
+        r#"INSERT INTO audit_logs(user_id, action, status, created_at) VALUES(?, ?, ?, ?)"#
+    )
+    .bind(user_id)
+    .bind("2fa_verify_success")
+    .bind("success")
+    .bind(auth::now_iso())
+    .execute(db)
+    .await;
 
-Ok((
-    StatusCode::OK,
-    Json(LoginResponse {
-        access_token: Some(token),
-        refresh_token: Some(refresh),
-        token_type: Some("bearer".into()),
-        user_id: Some(user_id),
-        requires_2fa: false,
+    Ok((
+        StatusCode::OK,
+        Json(LoginResponse {
+            access_token: Some(token),
+            refresh_token: Some(refresh),
+            token_type: Some("bearer".into()),
+            user_id: Some(user_id),
+            requires_2fa: false,
     }),
 )
     .into_response())

@@ -951,6 +951,83 @@ sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_refresh_sessions_user_id ON refresh
         .execute(db)
         .await?;
 
+    // ======== PHASE 1: SECURITY FIXES ========
+    
+    // rate_limit_logs: Persistent rate limiting to prevent bypass on restart
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS rate_limit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL,
+            timestamp INTEGER NOT NULL
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_rate_limit_logs_key_ts ON rate_limit_logs(key, timestamp);"#)
+        .execute(db)
+        .await?;
+
+    // csrf_tokens: CSRF token storage for state-changing operations
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS csrf_tokens (
+            token_hash TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_csrf_tokens_user_id ON csrf_tokens(user_id);"#)
+        .execute(db)
+        .await?;
+
+    // audit_logs: Security audit trail for sensitive operations
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT NOT NULL,
+            resource_type TEXT,
+            resource_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'success',
+            details TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_audit_logs_user_id ON audit_logs(user_id);"#)
+        .execute(db)
+        .await?;
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_audit_logs_created_at ON audit_logs(created_at DESC);"#)
+        .execute(db)
+        .await?;
+
+    // 2FA security upgrades: Add TTL and attempt tracking
+    try_add_column(db, "users", "two_factor_code_expires_at TEXT", "two_factor_code_expires_at").await?;
+    try_add_column(db, "users", "two_factor_code_attempts INTEGER NOT NULL DEFAULT 0", "two_factor_code_attempts").await?;
+    try_add_column(db, "users", "two_factor_locked_until TEXT", "two_factor_locked_until").await?;
+
+    // Performance: Add missing database indexes
+    try_add_column(db, "messages", "sender_id INTEGER", "sender_id").await.ok(); // May already exist
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_messages_sender_id ON messages(sender_id);"#)
+        .execute(db)
+        .await.ok();
+    sqlx::query(r#"CREATE INDEX IF NOT EXISTS ix_messages_created_at ON messages(created_at DESC);"#)
+        .execute(db)
+        .await.ok();
+
     let ai_enabled_env = std::env::var("LB_AI_ENABLED")
         .ok()
         .map(|v| {
