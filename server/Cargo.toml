@@ -62,7 +62,7 @@ base64 = "0.22"
 rustls-pemfile = "2.1"
 
 # E2EE JWK Validation
-jsonwebkey = { version = "0.3", features = ["crypto"] }
+jsonwebkey = { version = "0.3.5", features = ["p256", "jsonwebtoken", "generate"] }
 
 # Time-based operations for security
 time = { version = "0.3", features = ["macros"] }
