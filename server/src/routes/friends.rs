@@ -310,6 +310,7 @@ async fn request_friend(
     };
 
     let accepted = if inserted {
+        crate::ws::friends_events::friend_request_received(st.hub.as_ref(), receiver_id, sender_id).await;
         crate::ai_client::auto_accept_friend_request_if_ai(st.clone(), sender_id, receiver_id).await
     } else {
         false
@@ -476,6 +477,8 @@ async fn accept(
     .execute(&st.db)
     .await;
 
+    crate::ws::friends_events::friend_request_accepted(st.hub.as_ref(), sender, receiver).await;
+
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }
 
@@ -606,6 +609,8 @@ async fn remove_friend(
     .bind(me)
     .execute(&st.db)
     .await;
+
+    crate::ws::friends_events::friend_removed(st.hub.as_ref(), me, friend_id).await;
 
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }

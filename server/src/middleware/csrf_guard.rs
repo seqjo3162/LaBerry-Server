@@ -101,7 +101,7 @@ pub async fn csrf_guard(
     next: Next,
 ) -> Result<Response, (StatusCode, &'static str)> {
     // Only check POST, PUT, DELETE, PATCH requests
-    match req.method() {
+    match *req.method() {
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS => {
             // Safe methods, skip CSRF check
             return Ok(next.run(req).await);

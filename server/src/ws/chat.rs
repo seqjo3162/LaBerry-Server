@@ -7,9 +7,9 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
-use crate::{
-    auth,
-    ws::{ConnId, Hub, RoomId, UserId},
+use crate::auth;
+use crate::ws::{
+    ConnId, Hub, RoomId, UserId, WS_CHANNEL_BUFFER,
 };
 
 static CONN_ID_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -22,7 +22,7 @@ pub async fn handle_single_ws(
     username: String,
 ) {
     let conn_id: ConnId = CONN_ID_SEQ.fetch_add(1, Ordering::Relaxed);
-    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+    let (tx, mut rx) = mpsc::channel::<Value>(WS_CHANNEL_BUFFER);
 
     // multi-device: allow several WS connections per user
 
@@ -57,7 +57,7 @@ pub async fn handle_single_ws(
         hub.room_join(room, user_id, conn_id, tx.clone());
     }
 
-    let _ = tx.send(json!({
+    let _ = tx.try_send(json!({
         "type": "connected",
         "connection_id": conn_id,
         "user_id": user_id,
@@ -117,7 +117,7 @@ pub async fn handle_single_ws(
                                     .or_else(|| v.get("timestamp").and_then(|x| x.as_i64()))
                                     .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
 
-                                let _ = tx.send(json!({"type":"pong","t": t}));
+                                let _ = tx.try_send(json!({"type":"pong","t": t}));
                                 continue;
                             }
                         }
@@ -173,7 +173,7 @@ async fn handle_incoming_message(
     user_id: UserId,
     conn_id: ConnId,
     username: &str,
-    tx: &mpsc::UnboundedSender<Value>,
+    tx: &mpsc::Sender<Value>,
 ) {
     let Ok(v) = serde_json::from_str::<Value>(text) else { return; };
     let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
@@ -225,17 +225,17 @@ async fn handle_incoming_message(
         // =====================
         "dm_call_invite" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }
 
             let Some(peer_id) = dm_peer_user_id(db, chat_id, user_id).await else {
-                let _ = tx.send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
                 return;
             };
 
@@ -259,22 +259,22 @@ async fn handle_incoming_message(
                 }));
             }
 
-            let _ = tx.send(json!({"type":"dm_call_invite_sent","chat_id": chat_id,"delivered":delivered}));
+            let _ = tx.try_send(json!({"type":"dm_call_invite_sent","chat_id": chat_id,"delivered":delivered}));
         }
 
         "dm_call_accept" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }
 
             let Some(peer_id) = dm_peer_user_id(db, chat_id, user_id).await else {
-                let _ = tx.send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
                 return;
             };
 
@@ -286,24 +286,24 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             }));
 
-            let _ = tx.send(json!({"type":"dm_call_accept_sent","chat_id": chat_id}));
+            let _ = tx.try_send(json!({"type":"dm_call_accept_sent","chat_id": chat_id}));
         }
 
         "dm_call_decline" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             let reason = v.get("data").and_then(|d| d.get("reason")).and_then(|x| x.as_str()).unwrap_or("declined");
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }
 
             let Some(peer_id) = dm_peer_user_id(db, chat_id, user_id).await else {
-                let _ = tx.send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
                 return;
             };
 
@@ -316,24 +316,24 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             }));
 
-            let _ = tx.send(json!({"type":"dm_call_decline_sent","chat_id": chat_id}));
+            let _ = tx.try_send(json!({"type":"dm_call_decline_sent","chat_id": chat_id}));
         }
 
         "dm_call_cancel" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             let reason = v.get("data").and_then(|d| d.get("reason")).and_then(|x| x.as_str()).unwrap_or("cancel");
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }
 
             let Some(peer_id) = dm_peer_user_id(db, chat_id, user_id).await else {
-                let _ = tx.send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
                 return;
             };
 
@@ -346,22 +346,22 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             }));
 
-            let _ = tx.send(json!({"type":"dm_call_cancel_sent","chat_id": chat_id}));
+            let _ = tx.try_send(json!({"type":"dm_call_cancel_sent","chat_id": chat_id}));
         }
 
         "dm_call_end" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }
 
             let Some(peer_id) = dm_peer_user_id(db, chat_id, user_id).await else {
-                let _ = tx.send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_dm","chat_id": chat_id}));
                 return;
             };
 
@@ -373,7 +373,7 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             }));
 
-            let _ = tx.send(json!({"type":"dm_call_end_sent","chat_id": chat_id}));
+            let _ = tx.try_send(json!({"type":"dm_call_end_sent","chat_id": chat_id}));
         }
 
         // =====================
@@ -381,23 +381,23 @@ async fn handle_incoming_message(
         // =====================
         "voice_join" => {
             let Some(channel_id) = v.get("data").and_then(|d| d.get("channel_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             if !can_access_chat(db, user_id, channel_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","channel_id": channel_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","channel_id": channel_id}));
                 return;
             }
 
             if !is_voice_allowed(db, channel_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_voice_channel","channel_id": channel_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_voice_channel","channel_id": channel_id}));
                 return;
             }
 
             if hub.voice_get_conn_channel(conn_id) == Some(channel_id) {
                 let peers = voice_peers(hub, channel_id, Some(user_id));
-                let _ = tx.send(json!({
+                let _ = tx.try_send(json!({
                     "type": "voice_joined",
                     "channel_id": channel_id,
                     "peers": peers,
@@ -431,7 +431,7 @@ async fn handle_incoming_message(
             let peers = voice_peers(hub, channel_id, Some(user_id));
 
             // Ack to self
-            let _ = tx.send(json!({
+            let _ = tx.try_send(json!({
                 "type": "voice_joined",
                 "channel_id": channel_id,
                 "peers": peers,
@@ -456,13 +456,13 @@ async fn handle_incoming_message(
 
             let current = hub.voice_get_conn_channel(conn_id);
             let Some(current_ch) = current else {
-                let _ = tx.send(json!({"type":"voice_left","channel_id": channel_id_opt}));
+                let _ = tx.try_send(json!({"type":"voice_left","channel_id": channel_id_opt}));
                 return;
             };
 
             if let Some(req_ch) = channel_id_opt {
                 if req_ch != current_ch {
-                    let _ = tx.send(json!({"type":"error","code":"not_in_that_voice","channel_id": req_ch,"current_channel_id": current_ch}));
+                    let _ = tx.try_send(json!({"type":"error","code":"not_in_that_voice","channel_id": req_ch,"current_channel_id": current_ch}));
                     return;
                 }
             }
@@ -477,11 +477,11 @@ async fn handle_incoming_message(
 
             // Only allow signaling inside the same voice channel
             if hub.voice_get_conn_channel(conn_id) != Some(channel_id) {
-                let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
             }
             if hub.voice_get_user_channel(to_user_id) != Some(channel_id) {
-                let _ = tx.send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
                 return;
             }
 
@@ -498,7 +498,7 @@ async fn handle_incoming_message(
                     if let Some(sdp) = data.get("sdp") {
                         out["sdp"] = sdp.clone();
                     } else {
-                        let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                        let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                         return;
                     }
                 }
@@ -506,7 +506,7 @@ async fn handle_incoming_message(
                     if let Some(cand) = data.get("candidate") {
                         out["candidate"] = cand.clone();
                     } else {
-                        let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                        let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                         return;
                     }
                 }
@@ -518,7 +518,7 @@ async fn handle_incoming_message(
 
             // Send only to the peer connection that is actually in this voice room.
             if !send_to_voice_user(hub, channel_id, to_user_id, &out) {
-                let _ = tx.send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
             }
         }
 
@@ -527,12 +527,12 @@ async fn handle_incoming_message(
         // =====================
         "voice_ss_start" => {
             let Some(channel_id) = v.get("data").and_then(|d| d.get("channel_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             if hub.voice_get_conn_channel(conn_id) != Some(channel_id) {
-                let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
             }
 
@@ -540,7 +540,7 @@ async fn handle_incoming_message(
             hub.ss_set(channel_id, user_id, true);
 
             // ack to self
-            let _ = tx.send(json!({
+            let _ = tx.try_send(json!({
                 "type": "voice_ss_started",
                 "channel_id": channel_id,
                 "user_id": user_id,
@@ -559,12 +559,12 @@ async fn handle_incoming_message(
 
         "voice_ss_stop" => {
             let Some(channel_id) = v.get("data").and_then(|d| d.get("channel_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             if hub.voice_get_conn_channel(conn_id) != Some(channel_id) {
-                let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
             }
 
@@ -572,7 +572,7 @@ async fn handle_incoming_message(
             hub.ss_set(channel_id, user_id, false);
 
             // ack to self
-            let _ = tx.send(json!({
+            let _ = tx.try_send(json!({
                 "type": "voice_ss_stopped",
                 "channel_id": channel_id,
                 "user_id": user_id,
@@ -596,11 +596,11 @@ async fn handle_incoming_message(
 
             // Only allow inside same voice channel
             if hub.voice_get_conn_channel(conn_id) != Some(channel_id) {
-                let _ = tx.send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","channel_id": channel_id}));
                 return;
             }
             if hub.voice_get_user_channel(to_user_id) != Some(channel_id) {
-                let _ = tx.send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
                 return;
             }
 
@@ -613,25 +613,25 @@ async fn handle_incoming_message(
             });
 
             if !send_to_voice_user(hub, channel_id, to_user_id, &out) {
-                let _ = tx.send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"peer_not_in_voice","channel_id": channel_id,"to_user_id": to_user_id}));
             }
         }
 
         // v2
         "join_chat" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
-                let _ = tx.send(json!({"type":"error","code":"bad_request"}));
+                let _ = tx.try_send(json!({"type":"error","code":"bad_request"}));
                 return;
             };
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }            let is_voice = chat_is_voice(db, chat_id).await;
 
             let room = if is_voice {
                 if hub.voice_get_conn_channel(conn_id) != Some(chat_id) {
-                    let _ = tx.send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
+                    let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
                     return;
                 }
                 RoomId::Voice(chat_id)
@@ -640,7 +640,7 @@ async fn handle_incoming_message(
             };
 
             hub.room_join(room.clone(), user_id, conn_id, tx.clone());
-            let _ = tx.send(json!({"type":"joined","room": room_to_json(if is_voice {"voice"} else {"channel"}, chat_id)}));
+            let _ = tx.try_send(json!({"type":"joined","room": room_to_json(if is_voice {"voice"} else {"channel"}, chat_id)}));
         }
 
         "send_message" => {
@@ -650,7 +650,7 @@ async fn handle_incoming_message(
             if content.is_empty() { return; }
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }
 
@@ -681,7 +681,7 @@ async fn handle_incoming_message(
             let is_voice = chat_is_voice(db, chat_id).await;
             if is_voice {
                 if hub.voice_get_conn_channel(conn_id) != Some(chat_id) {
-                    let _ = tx.send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
+                    let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
                     return;
                 }
                 hub.broadcast_room(&RoomId::Voice(chat_id), &out);
@@ -689,7 +689,7 @@ async fn handle_incoming_message(
                 let is_voice = chat_is_voice(db, chat_id).await;
             if is_voice {
                 if hub.voice_get_conn_channel(conn_id) != Some(chat_id) {
-                    let _ = tx.send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
+                    let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
                     return;
                 }
                 hub.broadcast_room(&RoomId::Voice(chat_id), &out);
@@ -705,7 +705,7 @@ async fn handle_incoming_message(
             let chat_id = id;
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }
 
@@ -713,14 +713,14 @@ async fn handle_incoming_message(
 
             if is_voice {
                 if hub.voice_get_conn_channel(conn_id) != Some(chat_id) {
-                    let _ = tx.send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
+                    let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
                     return;
                 }
                 hub.room_join(RoomId::Voice(chat_id), user_id, conn_id, tx.clone());
-                let _ = tx.send(json!({"type":"joined","room": room_to_json("voice", chat_id)}));
+                let _ = tx.try_send(json!({"type":"joined","room": room_to_json("voice", chat_id)}));
             } else {
                 hub.room_join(RoomId::Channel(chat_id), user_id, conn_id, tx.clone());
-                let _ = tx.send(json!({"type":"joined","room": room_to_json(&kind, chat_id)}));
+                let _ = tx.try_send(json!({"type":"joined","room": room_to_json(&kind, chat_id)}));
             }
         }
 
@@ -733,7 +733,7 @@ async fn handle_incoming_message(
 
             let chat_id = id;
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
                 return;
             }
 
@@ -775,7 +775,7 @@ fn broadcast_room_excluding_conn(hub: &Hub, room_id: &RoomId, exclude_conn_id: C
                 if *tx.key() == exclude_conn_id {
                     continue;
                 }
-                let _ = tx.value().send(payload.clone());
+                let _ = tx.value().try_send(payload.clone());
             }
         }
     }
@@ -792,7 +792,7 @@ fn send_to_voice_user(hub: &Hub, channel_id: i64, user_id: UserId, payload: &Val
 
     let mut sent = false;
     for tx in conns.iter() {
-        if tx.value().send(payload.clone()).is_ok() {
+        if tx.value().try_send(payload.clone()).is_ok() {
             sent = true;
         }
     }
@@ -819,7 +819,7 @@ fn voice_leave_internal(
     hub: &Hub,
     user_id: UserId,
     conn_id: ConnId,
-    tx: &mpsc::UnboundedSender<Value>,
+    tx: &mpsc::Sender<Value>,
     channel_id: i64,
     switched: bool,
 ) {
@@ -830,7 +830,7 @@ fn voice_leave_conn_internal(
     hub: &Hub,
     user_id: UserId,
     conn_id: ConnId,
-    tx: Option<&mpsc::UnboundedSender<Value>>,
+    tx: Option<&mpsc::Sender<Value>>,
     channel_id: i64,
     switched: bool,
 ) {
@@ -856,7 +856,7 @@ fn voice_leave_conn_internal(
         "timestamp": chrono::Utc::now().timestamp_millis()
     });
     if let Some(tx) = tx {
-        let _ = tx.send(left);
+        let _ = tx.try_send(left);
     } else {
         let _ = hub.send_to_conn(conn_id, &left);
     }

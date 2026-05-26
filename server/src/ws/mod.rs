@@ -8,6 +8,7 @@ use std::sync::{
 };
 use tokio::sync::mpsc;
 use chrono;
+use tracing;
 
 // ======================================================
 // LOG HELPERS (disable verbose WS logs by default)
@@ -23,7 +24,7 @@ macro_rules! ws_debug {
             })
             .unwrap_or(false);
         if enabled {
-            println!($($arg)*);
+            tracing::debug!($($arg)*);
         }
     }};
 }
@@ -272,7 +273,7 @@ impl Hub {
         room_id: RoomId,
         user_id: UserId,
         conn_id: ConnId,
-        tx: mpsc::UnboundedSender<Value>,
+        tx: WsSender,
     ) {
         let room = self.rooms.entry(room_id).or_insert_with(DashMap::new);
         let user_conns = room.entry(user_id).or_insert_with(DashMap::new);
@@ -309,11 +310,11 @@ impl Hub {
                 for tx in user_conns.value().iter() {
                     // We still clone here but it's Arc clone (cheap), not Value clone (expensive)
                     let payload_for_send = (*payload_arc).clone();
-                    let _ = tx.value().try_send(payload_for_send).map_err(|e| {
-                        if e.is_full() {
+                    if let Err(e) = tx.value().try_send(payload_for_send) {
+                        if matches!(e, mpsc::error::TrySendError::Full(_)) {
                             ws_debug!("[BACKPRESSURE] Channel full for user, slow client detected");
                         }
-                    });
+                    }
                 }
             }
         }
@@ -327,11 +328,11 @@ impl Hub {
                 }
                 for tx in user_conns.value().iter() {
                     let payload_for_send = (*payload_arc).clone();
-                    let _ = tx.value().try_send(payload_for_send).map_err(|e| {
-                        if e.is_full() {
+                    if let Err(e) = tx.value().try_send(payload_for_send) {
+                        if matches!(e, mpsc::error::TrySendError::Full(_)) {
                             ws_debug!("[BACKPRESSURE] Channel full, slow client detected");
                         }
-                    });
+                    }
                 }
             }
         }
@@ -378,7 +379,7 @@ impl Hub {
             if detail.is_closing.load(Ordering::Relaxed) {
                 return false;
             }
-            return detail.tx.send(payload.clone()).is_ok();
+            return detail.tx.try_send(payload.clone()).is_ok();
         }
         false
     }
@@ -389,7 +390,7 @@ impl Hub {
     pub fn broadcast_presence(&self, payload: &Value) {
         for user_conns in self.presence.iter() {
             for tx in user_conns.value().iter() {
-                let _ = tx.value().send(payload.clone());
+                let _ = tx.value().try_send(payload.clone());
             }
         }
     }
@@ -417,7 +418,7 @@ impl Hub {
         for conn_id in &conn_ids {
             if let Some(detail) = self.conn_details.get(conn_id) {
                 detail.is_closing.store(true, Ordering::Relaxed);
-                let _ = detail.tx.send(payload.clone());
+                let _ = detail.tx.try_send(payload.clone());
             }
         }
 
@@ -440,7 +441,7 @@ impl Hub {
                 detail.is_closing.store(true, Ordering::Relaxed);
                 
                 // Send takeover notification to old connection
-                let _ = detail.tx.send(json!({
+                let _ = detail.tx.try_send(json!({
                     "type": "connection_taken_over",
                     "new_connection_id": new_conn_id,
                     "timestamp": chrono::Utc::now().timestamp_millis()

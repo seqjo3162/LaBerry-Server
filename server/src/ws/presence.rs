@@ -4,7 +4,7 @@ use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
-use crate::ws::{ConnId, Hub, UserId};
+use crate::ws::{self, ConnId, Hub, UserId};
 
 static CONN_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -23,7 +23,7 @@ pub async fn handle(
     };
 
     let conn_id: ConnId = CONN_ID_SEQ.fetch_add(1, Ordering::Relaxed);
-    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+    let (tx, mut rx) = mpsc::channel::<Value>(ws::WS_CHANNEL_BUFFER);
 
     // ===== REGISTER PRESENCE =====
     let was_offline = hub.presence.get(&user_id).is_none();

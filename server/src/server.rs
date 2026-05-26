@@ -19,12 +19,16 @@ use axum::{
     Json,
     Router,
 };
+use hyper::service::service_fn;
+use tower::Service;
+
 
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 use dashmap::DashMap;
 use chrono;
+use tracing;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -81,11 +85,11 @@ pub async fn run_server(
     _shutdown_rx: oneshot::Receiver<()>,
     hub: Hub,
 ) -> anyhow::Result<()> {
-    println!("[SERVER] Starting...");
-    println!("[SERVER] Listening on {}", addr);
+    tracing::info!("[SERVER] Starting...");
+    tracing::info!("[SERVER] Listening on {}", addr);
     match env::current_dir() {
-        Ok(dir) => println!("[SERVER] CWD = {:?}", dir),
-        Err(err) => eprintln!("[SERVER] CWD error: {}", err),
+        Ok(dir) => tracing::info!("[SERVER] CWD = {:?}", dir),
+        Err(err) => tracing::error!("[SERVER] CWD error: {}", err),
     }
     
     if secret.as_bytes().len() < 32 {
@@ -93,11 +97,11 @@ pub async fn run_server(
     }
 
     let db_url = format!("sqlite:{}?mode=rwc", db_path);
-    println!("[SERVER] Connecting DB: {}", db_url);
+    tracing::info!("[SERVER] Connecting DB: {}", db_url);
     std::env::set_var("DATABASE_URL", &db_url);
     std::env::set_var("SECRET_KEY", secret);
 
-    println!("[DB] Connecting...");
+    tracing::info!("[DB] Connecting...");
     // 🔧 PERFORMANCE: Configure SQLite connection pool for multi-core (Ryzen 5950X: 16 cores)
     use sqlx::sqlite::SqlitePoolOptions;
     use std::time::Duration;
@@ -109,15 +113,15 @@ pub async fn run_server(
         .idle_timeout(Duration::from_secs(300))
         .connect(&db_url)
         .await?;
-    println!("[DB] ✅ Connected (pool: 32 max, 8 min)");
+    tracing::info!("[DB] ✅ Connected (pool: 32 max, 8 min)");
 
-    println!("[DB] Running init...");
+    tracing::info!("[DB] Running init...");
     db::init(&db).await?;
-    println!("[DB] ✅ Init complete");
+    tracing::info!("[DB] ✅ Init complete");
 
-    println!("[DB] Bootstrapping global server...");
+    tracing::info!("[DB] Bootstrapping global server...");
     db::bootstrap::ensure_global_server(&db).await?;
-    println!("[DB] ✅ Bootstrap complete");
+    tracing::info!("[DB] ✅ Bootstrap complete");
 
 
     let geo_guard = GeoGuardState::from_custom_file("assets/custom_blocked_cidr")?;
@@ -186,10 +190,10 @@ pub async fn run_server(
                         match crate::middleware::rate_limit::cleanup_expired_logs(&cleanup_db).await {
                             Ok(rows) => {
                                 if rows > 0 {
-                                    println!("[CLEANUP] Deleted {} expired rate limit logs", rows);
+                                    tracing::info!("[CLEANUP] Deleted {} expired rate limit logs", rows);
                                 }
                             },
-                            Err(e) => eprintln!("[ERROR] Failed to cleanup rate limit logs: {}", e),
+                            Err(e) => tracing::error!("[ERROR] Failed to cleanup rate limit logs: {}", e),
                         }
 
                         // Clean expired CSRF tokens
@@ -201,10 +205,10 @@ pub async fn run_server(
                             Ok(result) => {
                                 let rows = result.rows_affected();
                                 if rows > 0 {
-                                    println!("[CLEANUP] Deleted {} expired CSRF tokens", rows);
+                                    tracing::info!("[CLEANUP] Deleted {} expired CSRF tokens", rows);
                                 }
                             },
-                            Err(e) => eprintln!("[ERROR] Failed to cleanup CSRF tokens: {}", e),
+                            Err(e) => tracing::error!("[ERROR] Failed to cleanup CSRF tokens: {}", e),
                         }
 
                         // Clean in-memory rate limit buckets
@@ -221,9 +225,9 @@ pub async fn run_server(
     // ------------------------------
     // Main (public) server
     // ------------------------------
-    println!("[SERVER] Building main router...");
+    tracing::info!("[SERVER] Building main router...");
     let app = build_router(state.clone());
-    println!("[SERVER] Main router built ✅");
+    tracing::info!("[SERVER] Main router built ✅");
 
     // Check for TLS configuration
     let tls_cert_path = env::var("LB_TLS_CERT_PATH").ok();
@@ -232,21 +236,21 @@ pub async fn run_server(
     let has_tls = tls_cert_path.is_some() && tls_key_path.is_some();
     
     if has_tls {
-        println!("[SERVER] 🔐 TLS/HTTPS enabled");
+        tracing::info!("[SERVER] 🔐 TLS/HTTPS enabled");
     } else {
-        println!("[SERVER] ⚠️  TLS/HTTPS disabled - for production with E2EE, use HTTPS!");
+        tracing::info!("[SERVER] ⚠️  TLS/HTTPS disabled - for production with E2EE, use HTTPS!");
     }
 
-    println!("[SERVER] Binding main TCP listener...");
+    tracing::info!("[SERVER] Binding main TCP listener...");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("[SERVER] ✅ Main bound to {}", addr);
+    tracing::info!("[SERVER] ✅ Main bound to {}", addr);
 
     let shutdown_main = shutdown.clone();
     let mut main_handle = if has_tls {
         // HTTPS mode
         let tls_config = crate::tls::load_tls_config(
-            &tls_cert_path.unwrap(),
-            &tls_key_path.unwrap(),
+            &tls_cert_path.expect("has_tls ensures LB_TLS_CERT_PATH is set"),
+            &tls_key_path.expect("has_tls ensures LB_TLS_KEY_PATH is set"),
         )?;
         
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
@@ -262,22 +266,23 @@ pub async fn run_server(
                             match tls_acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
                                     let io = hyper_util::rt::TokioIo::new(tls_stream);
+                                    let svc = service_fn(move |req| app_clone.clone().call(req));
                                     
                                     if let Err(err) = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                                        .serve_connection(io, app_clone)
+                                        .serve_connection(io, svc)
                                         .await
                                     {
-                                        eprintln!("[SERVER] TLS connection error: {}", err);
+                                        tracing::error!("[SERVER] TLS connection error: {}", err);
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("[SERVER] TLS accept error: {}", e);
+                                    tracing::error!("[SERVER] TLS accept error: {}", e);
                                 }
                             }
                         });
                     }
                     Err(e) => {
-                        eprintln!("[SERVER] Accept error: {}", e);
+                        tracing::error!("[SERVER] Accept error: {}", e);
                         break;
                     }
                 }
@@ -304,7 +309,7 @@ pub async fn run_server(
     let admin_enabled = env_bool("LB_ENABLE_ADMIN_PANEL", false)
         || std::env::var("LB_ADMIN_PASSWORD").ok().is_some()
         || std::env::var("LB_ADMIN_PASSWORD_HASH").ok().is_some();
-    println!("[ADMIN] env LB_ENABLE_ADMIN_PANEL={:?} LB_ADMIN_HOST={:?} LB_ADMIN_PORT={:?} -> enabled={}",
+    tracing::info!("[ADMIN] env LB_ENABLE_ADMIN_PANEL={:?} LB_ADMIN_HOST={:?} LB_ADMIN_PORT={:?} -> enabled={}",
         std::env::var("LB_ENABLE_ADMIN_PANEL").ok(),
         std::env::var("LB_ADMIN_HOST").ok(),
         std::env::var("LB_ADMIN_PORT").ok(),
@@ -315,13 +320,13 @@ pub async fn run_server(
     if admin_enabled {
         let admin_addr = admin_bind_addr()?;
 
-        println!("[ADMIN] Building admin router...");
+        tracing::info!("[ADMIN] Building admin router...");
         let admin_app = build_admin_router(state);
-        println!("[ADMIN] Router built ✅");
+        tracing::info!("[ADMIN] Router built ✅");
 
-        println!("[ADMIN] Binding admin TCP listener...");
+        tracing::info!("[ADMIN] Binding admin TCP listener...");
         let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
-        println!("[ADMIN] ✅ Admin bound to {}", admin_addr);
+        tracing::info!("[ADMIN] ✅ Admin bound to {}", admin_addr);
 
         let shutdown_admin = shutdown.clone();
         admin_handle = Some(tokio::spawn(async move {
@@ -360,14 +365,14 @@ pub async fn run_server(
 // 🧭 Router builder
 // ======================================================
 pub fn build_router(state: AppState) -> Router {
-    println!("[ROUTER] Building routes...");
+    tracing::info!("[ROUTER] Building routes...");
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("server")
         .join("static");
 
-    println!("[ROUTER] Static dir: {:?}", static_dir);
+    tracing::info!("[ROUTER] Static dir: {:?}", static_dir);
 
     let router = Router::new()
         .route("/", get(crate::routes::pages::index))
@@ -411,7 +416,8 @@ pub fn build_router(state: AppState) -> Router {
             ServeDir::new(static_dir.clone())
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
         )
-        // 👇 ВАЖНО: слои middleware ДО with_state
+        // 👇 ВАЖНО: ExtractLayer с ConnectInfo ДО geo_guard (нужен для ConnectInfo извлекателя)
+        .layer(axum::extract::Extension(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::host_guard::host_guard,
@@ -490,15 +496,15 @@ pub fn build_router(state: AppState) -> Router {
             let allowed = env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
             let mut cors = CorsLayer::new()
                 .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
-                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, "X-CSRF-Token".parse().unwrap()])
-                .allow_credentials();
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::HeaderName::from_static("x-csrf-token")])
+                .allow_credentials(true);
 
             if !allowed.trim().is_empty() {
                 let a = allowed.trim();
                 if a == "*" {
-                    eprintln!("⚠️  WARNING: CORS_ALLOWED_ORIGINS='*' is not recommended for production!");
-                    eprintln!("⚠️  Set CORS_ALLOWED_ORIGINS to specific origins (comma-separated)");
-                    eprintln!("⚠️  Example: https://example.com,https://app.example.com");
+                    tracing::warn!("⚠️  WARNING: CORS_ALLOWED_ORIGINS='*' is not recommended for production!");
+                    tracing::warn!("⚠️  Set CORS_ALLOWED_ORIGINS to specific origins (comma-separated)");
+                    tracing::warn!("⚠️  Example: https://example.com,https://app.example.com");
                     cors = cors.allow_origin(tower_http::cors::Any);
                 } else {
                     let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
@@ -512,11 +518,11 @@ pub fn build_router(state: AppState) -> Router {
                     if !origins.is_empty() {
                         cors = cors.allow_origin(origins);
                     } else {
-                        eprintln!("⚠️  WARNING: No valid CORS origins configured, defaulting to same-origin only");
+                        tracing::warn!("⚠️  WARNING: No valid CORS origins configured, defaulting to same-origin only");
                     }
                 }
             } else {
-                eprintln!("ℹ️  CORS_ALLOWED_ORIGINS not set, defaulting to same-origin policy");
+                tracing::info!("ℹ️  CORS_ALLOWED_ORIGINS not set, defaulting to same-origin policy");
             }
             cors
         })
@@ -538,7 +544,7 @@ pub fn build_router(state: AppState) -> Router {
     // 👇 Только теперь передаём state во все маршруты
     let router = router.with_state(state);
 
-    println!("[ROUTER] ✅ Routes ready");
+    tracing::info!("[ROUTER] ✅ Routes ready");
     router
 }
 
@@ -709,11 +715,11 @@ async fn ws_health(ws: WebSocketUpgrade, State(st): State<AppState>) -> impl Int
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    println!("[WS_HEALTH] connected");
+    tracing::info!("[WS_HEALTH] connected");
     ws.on_upgrade(move |socket| async move {
-        println!("[WS_HEALTH] upgrade success, entering loop");
+        tracing::info!("[WS_HEALTH] upgrade success, entering loop");
         health_loop(socket, st).await;
-        println!("[WS_HEALTH] loop ended");
+        tracing::info!("[WS_HEALTH] loop ended");
     })
 }
 
@@ -750,7 +756,7 @@ async fn health_loop(mut socket: WebSocket, st: AppState) {
             "disk": { "used_gb": disk_used, "total_gb": disk_total }
         });
         if let Err(err) = socket.send(Message::Text(payload.to_string())).await {
-            println!("[WS_HEALTH] disconnected (err={})", err);
+            tracing::info!("[WS_HEALTH] disconnected (err={})", err);
             break;
         }
     }
@@ -830,7 +836,7 @@ async fn ws_main(
     ws.on_upgrade(move |mut socket| async move {
         let prev = connected.fetch_add(1, Ordering::Relaxed) + 1;
         if ws_debug_enabled() {
-            println!("[WS] CONNECT (total={})", prev);
+            tracing::info!("[WS] CONNECT (total={})", prev);
         }
 
         // Authenticate
@@ -859,7 +865,7 @@ async fn ws_main(
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
             if ws_debug_enabled() {
-                println!("[WS] DISCONNECT (unauthorized) (total={})", after);
+                tracing::info!("[WS] DISCONNECT (unauthorized) (total={})", after);
             }
             return;
         };
@@ -871,7 +877,7 @@ async fn ws_main(
                 let _ = socket.send(Message::Close(None)).await;
                 let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
                 if ws_debug_enabled() {
-                    println!("[WS] DISCONNECT (invalid token) (total={})", after);
+                    tracing::info!("[WS] DISCONNECT (invalid token) (total={})", after);
                 }
                 return;
             }
@@ -894,7 +900,7 @@ async fn ws_main(
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
             if ws_debug_enabled() {
-                println!("[WS] DISCONNECT (user not found) (total={})", after);
+                tracing::info!("[WS] DISCONNECT (user not found) (total={})", after);
             }
             return;
         };
@@ -905,7 +911,7 @@ async fn ws_main(
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
             if ws_debug_enabled() {
-                println!("[WS] DISCONNECT (banned) (total={})", after);
+                tracing::info!("[WS] DISCONNECT (banned) (total={})", after);
             }
             return;
         }
@@ -916,7 +922,7 @@ async fn ws_main(
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
             if ws_debug_enabled() {
-                println!("[WS] DISCONNECT (invalidated) (total={})", after);
+                tracing::info!("[WS] DISCONNECT (invalidated) (total={})", after);
             }
             return;
         }
@@ -924,14 +930,14 @@ async fn ws_main(
         let user_id: i64 = row.get("id");
 
         if ws_debug_enabled() {
-            println!("[WS] ✅ AUTH OK user_id={} username={}", user_id, username);
+            tracing::info!("[WS] ✅ AUTH OK user_id={} username={}", user_id, username);
         }
 
         crate::ws::chat::handle_single_ws(socket, db.clone(), hub.clone(), user_id, username).await;
 
         let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
         if ws_debug_enabled() {
-            println!("[WS] DISCONNECT user={} (total={})", user_id, after);
+            tracing::info!("[WS] DISCONNECT user={} (total={})", user_id, after);
         }
     })
 }

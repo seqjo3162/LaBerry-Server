@@ -5,6 +5,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+
 use ipnet::IpNet;
 use serde_json::json;
 use std::{
@@ -32,7 +33,8 @@ impl GeoGuardState {
 
     /// Загружает только список CIDR из текстового файла (по одному CIDR на строку)
     pub fn from_custom_file<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let networks = load_custom_networks(path.as_ref().to_str().unwrap())?;
+        let path_str = path.as_ref().to_str().ok_or_else(|| anyhow::anyhow!("Non-UTF-8 path: {:?}", path.as_ref()))?;
+        let networks = load_custom_networks(path_str)?;
         Ok(Self {
             blocked_networks: Arc::new(networks),
         })
@@ -98,7 +100,14 @@ fn load_custom_networks(path: &str) -> anyhow::Result<Vec<IpNet>> {
 
 fn get_real_ip(addr: SocketAddr, headers: &HeaderMap, trusted_proxies: &[IpAddr]) -> IpAddr {
     let ip = addr.ip();
-    if !trusted_proxies.contains(&ip) {
+    // Разрешаем X-Forwarded-For для loopback, частных и link-local сетей
+    let is_trusted = trusted_proxies.contains(&ip)
+        || ip.is_loopback()
+        || match &ip {
+            IpAddr::V4(addr) => addr.is_private() || addr.is_link_local(),
+            IpAddr::V6(addr) => addr.is_unique_local() || addr.is_unicast_link_local(),
+        };
+    if !is_trusted {
         return ip;
     }
     if let Some(xff) = headers.get("X-Forwarded-For") {

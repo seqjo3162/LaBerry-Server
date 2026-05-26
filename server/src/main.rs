@@ -6,6 +6,7 @@ use std::{
 };
 
 use laberry_server::ws::Hub;
+use tracing;
 use tokio::{signal, sync::oneshot};
 
 fn install_panic_logger() {
@@ -13,7 +14,7 @@ fn install_panic_logger() {
         let bt = Backtrace::force_capture();
         let msg = format!("[PANIC] {}\nBacktrace:\n{}\n\n", info, bt);
 
-        eprintln!("{}", msg);
+        tracing::error!("{}", msg);
 
         if let Ok(mut f) = OpenOptions::new()
             .create(true)
@@ -31,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = oneshot::channel::<()>();
 
-    println!("🚀 LaBerry Server starting...");
+    tracing::info!("🚀 LaBerry Server starting...");
 
     let host = std::env::var("LB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("LB_PORT")
@@ -39,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(5001);
     let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
-    println!("📡 Server will listen on: {}", addr);
+    tracing::info!("📡 Server will listen on: {}", addr);
 
     let db_path = std::env::var("LB_DB_PATH").unwrap_or_else(|_| "./laberry.db".to_string());
 
@@ -52,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         signal::ctrl_c()
             .await
             .expect("failed to listen for Ctrl+C");
-        println!("🛑 Received Ctrl+C, shutting down...");
+        tracing::info!("🛑 Received Ctrl+C, shutting down...");
         let _ = tx.send(());
     });
 

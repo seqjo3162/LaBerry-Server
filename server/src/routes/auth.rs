@@ -218,7 +218,9 @@ if !rate_limit::allow(&key, 12, 300) { // 12 attempts / 5 min per ip+username
         return Err(ApiError::Unauthorized("Invalid credentials"));
     }
 
-    let r = r_unwrapped.unwrap();
+    let Some(r) = r_unwrapped else {
+        return Err(ApiError::Internal("User vanished"));
+    };
 
     if r.get::<i64, _>("is_banned") != 0 {
         return Err(ApiError::Forbidden("User banned"));
