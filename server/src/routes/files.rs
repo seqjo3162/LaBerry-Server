@@ -104,6 +104,24 @@ async fn resolve_user_id_for_file_request(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
+    // 🔴 SECURITY FIX: Verify user can access the chat containing this file
+    // Get chat_id from files table
+    let file_row = sqlx::query("SELECT chat_id FROM files WHERE id = ? LIMIT 1")
+        .bind(file_id)
+        .fetch_optional(&st.db)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let chat_id: i64 = file_row.get("chat_id");
+
+    // Verify user has access to chat
+    if !can_access_chat_by_user_id(st, claims.uid, chat_id).await {
+        eprintln!("[SECURITY] Unauthorized file download attempt: user_id={}, file_id={}, chat_id={}", claims.uid, file_id, chat_id);
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     Ok(claims.uid)
 }
 

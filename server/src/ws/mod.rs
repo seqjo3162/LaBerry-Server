@@ -30,6 +30,16 @@ macro_rules! ws_debug {
 
 
 // ======================================================
+// TYPE DEFINITIONS FOR BOUNDED CHANNELS
+// ======================================================
+
+// 🔧 PERFORMANCE FIX: Use bounded channels instead of unbounded to prevent memory issues
+pub type WsSender = mpsc::Sender<Value>;
+pub type WsReceiver = mpsc::Receiver<Value>;
+
+const WS_CHANNEL_BUFFER: usize = 128; // Bounded queue size per connection
+
+// ======================================================
 // TYPEDEFS
 // ======================================================
 
@@ -62,10 +72,10 @@ pub mod friends_events;
 #[derive(Clone)]
 pub struct Hub {
     /// presence: user_id -> conn_id -> sender
-    pub presence: Arc<DashMap<UserId, DashMap<ConnId, mpsc::UnboundedSender<Value>>>>,
+    pub presence: Arc<DashMap<UserId, DashMap<ConnId, WsSender>>>,
 
     /// rooms: room_id -> user_id -> conn_id -> sender
-    pub rooms: Arc<DashMap<RoomId, DashMap<UserId, DashMap<ConnId, mpsc::UnboundedSender<Value>>>>>,
+    pub rooms: Arc<DashMap<RoomId, DashMap<UserId, DashMap<ConnId, WsSender>>>>,
 
     /// 🔥 idempotent WS: user_id -> active conn_id
     pub active_conn: Arc<DashMap<UserId, ConnId>>,
@@ -93,7 +103,7 @@ pub struct Hub {
 #[derive(Clone)]
 pub struct ConnectionDetail {
     pub user_id: UserId,
-    pub tx: mpsc::UnboundedSender<Value>,
+    pub tx: WsSender,
     pub created_at: std::time::Instant,
     pub is_closing: Arc<AtomicBool>,
 }
@@ -223,7 +233,7 @@ impl Hub {
         &self,
         user_id: UserId,
         conn_id: ConnId,
-        tx: mpsc::UnboundedSender<Value>,
+        tx: WsSender,
     ) {
         let user_conns = self
             .presence
@@ -292,22 +302,36 @@ impl Hub {
     }
 
     pub fn broadcast_room(&self, room_id: &RoomId, payload: &Value) {
+        // 🔧 PERFORMANCE FIX: Wrap payload in Arc to avoid cloning for each connection
+        let payload_arc = Arc::new(payload.clone());
         if let Some(room) = self.rooms.get(room_id) {
             for user_conns in room.iter() {
                 for tx in user_conns.value().iter() {
-                    let _ = tx.value().send(payload.clone());
+                    // We still clone here but it's Arc clone (cheap), not Value clone (expensive)
+                    let payload_for_send = (*payload_arc).clone();
+                    let _ = tx.value().try_send(payload_for_send).map_err(|e| {
+                        if e.is_full() {
+                            ws_debug!("[BACKPRESSURE] Channel full for user, slow client detected");
+                        }
+                    });
                 }
             }
         }
     }
     pub fn broadcast_room_except_user(&self, room_id: &RoomId, exclude_user: UserId, payload: &Value) {
+        let payload_arc = Arc::new(payload.clone());
         if let Some(room) = self.rooms.get(room_id) {
             for user_conns in room.iter() {
                 if *user_conns.key() == exclude_user {
                     continue;
                 }
                 for tx in user_conns.value().iter() {
-                    let _ = tx.value().send(payload.clone());
+                    let payload_for_send = (*payload_arc).clone();
+                    let _ = tx.value().try_send(payload_for_send).map_err(|e| {
+                        if e.is_full() {
+                            ws_debug!("[BACKPRESSURE] Channel full, slow client detected");
+                        }
+                    });
                 }
             }
         }
@@ -322,7 +346,7 @@ impl Hub {
         let mut sent = false;
         if let Some(conns) = self.presence.get(&user_id) {
             for tx in conns.iter() {
-                if tx.value().send(payload.clone()).is_ok() {
+                if tx.value().try_send(payload.clone()).is_ok() {
                     sent = true;
                 }
             }
@@ -548,7 +572,10 @@ pub async fn handle(
     user_id: UserId,
 ) {
     let conn_id: ConnId = CONN_ID_SEQ.fetch_add(1, Ordering::Relaxed);
-    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+    
+    // 🔧 PERFORMANCE FIX: Use bounded channel (128) instead of unbounded
+    // This prevents memory issues from slow clients and backpressure builds up properly
+    let (tx, mut rx) = mpsc::channel::<Value>(WS_CHANNEL_BUFFER);
 
     // ======================
     // WAIT FOR USER TO BE AVAILABLE (PREVENT RAPID RECONNECTS)

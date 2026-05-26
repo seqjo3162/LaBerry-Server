@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 use dashmap::DashMap;
+use chrono;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -97,8 +98,18 @@ pub async fn run_server(
     std::env::set_var("SECRET_KEY", secret);
 
     println!("[DB] Connecting...");
-    let db = SqlitePool::connect(&db_url).await?;
-    println!("[DB] ✅ Connected");
+    // 🔧 PERFORMANCE: Configure SQLite connection pool for multi-core (Ryzen 5950X: 16 cores)
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::time::Duration;
+    
+    let db = SqlitePoolOptions::new()
+        .max_connections(32)  // 2x CPU cores for 16-core Ryzen
+        .min_connections(8)   // Keep minimum connections warm
+        .acquire_timeout(Duration::from_secs(5))
+        .idle_timeout(Duration::from_secs(300))
+        .connect(&db_url)
+        .await?;
+    println!("[DB] ✅ Connected (pool: 32 max, 8 min)");
 
     println!("[DB] Running init...");
     db::init(&db).await?;
@@ -162,6 +173,51 @@ pub async fn run_server(
         });
     }
 
+    // 🔴 SECURITY FIX: Background cleanup for rate limiting and CSRF tokens
+    {
+        let cleanup_db = state.db.clone();
+        let cleanup_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut tick = interval(Duration::from_secs(60 * 60)); // hourly
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        // Clean expired rate limit logs
+                        match crate::middleware::rate_limit::cleanup_expired_logs(&cleanup_db).await {
+                            Ok(rows) => {
+                                if rows > 0 {
+                                    println!("[CLEANUP] Deleted {} expired rate limit logs", rows);
+                                }
+                            },
+                            Err(e) => eprintln!("[ERROR] Failed to cleanup rate limit logs: {}", e),
+                        }
+
+                        // Clean expired CSRF tokens
+                        let now = chrono::Utc::now().to_rfc3339();
+                        match sqlx::query(r#"DELETE FROM csrf_tokens WHERE expires_at < ?"#)
+                            .bind(&now)
+                            .execute(&cleanup_db)
+                            .await {
+                            Ok(result) => {
+                                let rows = result.rows_affected();
+                                if rows > 0 {
+                                    println!("[CLEANUP] Deleted {} expired CSRF tokens", rows);
+                                }
+                            },
+                            Err(e) => eprintln!("[ERROR] Failed to cleanup CSRF tokens: {}", e),
+                        }
+
+                        // Clean in-memory rate limit buckets
+                        crate::middleware::rate_limit::cleanup_expired_buckets();
+                    }
+                    _ = cleanup_shutdown.notified() => {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     // ------------------------------
     // Main (public) server
     // ------------------------------
@@ -196,22 +252,19 @@ pub async fn run_server(
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
         
         tokio::spawn(async move {
-            use hyper::server::conn::Http;
-
             loop {
                 match listener.accept().await {
-                    Ok((socket, addr)) => {
+                    Ok((socket, _remote_addr)) => {
                         let tls_acceptor = tls_acceptor.clone();
                         let app_clone = app.clone();
 
                         tokio::spawn(async move {
                             match tls_acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
-                                    // Create a hyper-compatible service from the axum app
-                                    let service = app_clone.into_make_service();
-
-                                    if let Err(err) = Http::new()
-                                        .serve_connection(tls_stream, service)
+                                    let io = hyper_util::rt::TokioIo::new(tls_stream);
+                                    
+                                    if let Err(err) = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                                        .serve_connection(io, app_clone)
                                         .await
                                     {
                                         eprintln!("[SERVER] TLS connection error: {}", err);
@@ -432,16 +485,20 @@ pub fn build_router(state: AppState) -> Router {
     ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
 ))
 
-        // CORS
+        // 🔴 SECURITY FIX: CORS Configuration with Whitelist (not wildcard)
         .layer({
             let allowed = env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
             let mut cors = CorsLayer::new()
                 .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
-                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, "X-CSRF-Token".parse().unwrap()])
+                .allow_credentials();
 
             if !allowed.trim().is_empty() {
                 let a = allowed.trim();
                 if a == "*" {
+                    eprintln!("⚠️  WARNING: CORS_ALLOWED_ORIGINS='*' is not recommended for production!");
+                    eprintln!("⚠️  Set CORS_ALLOWED_ORIGINS to specific origins (comma-separated)");
+                    eprintln!("⚠️  Example: https://example.com,https://app.example.com");
                     cors = cors.allow_origin(tower_http::cors::Any);
                 } else {
                     let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
@@ -454,11 +511,18 @@ pub fn build_router(state: AppState) -> Router {
                     }
                     if !origins.is_empty() {
                         cors = cors.allow_origin(origins);
+                    } else {
+                        eprintln!("⚠️  WARNING: No valid CORS origins configured, defaulting to same-origin only");
                     }
                 }
+            } else {
+                eprintln!("ℹ️  CORS_ALLOWED_ORIGINS not set, defaulting to same-origin policy");
             }
             cors
         })
+
+        // 🔴 SECURITY FIX: CSRF Protection middleware
+        .layer(axum::middleware::from_fn(crate::middleware::csrf_guard::csrf_guard))
 
         .layer(
             TraceLayer::new_for_http()

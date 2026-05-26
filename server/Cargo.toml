@@ -16,7 +16,7 @@ android = []
 ipnet = "2.9"
 maxminddb = "0.24"
 hyper = "1.0"
-hyper-util = "0.1"
+hyper-util = { version = "0.1", features = ["full"] }
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "signal", "net"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-rustls = "0.25"

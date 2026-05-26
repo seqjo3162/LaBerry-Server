@@ -162,7 +162,7 @@ impl DeviceKeyValidator {
         }
 
         // Validate JWK
-        let jwk = JwkKey::from_json(public_jwk)?;
+        let _jwk = JwkKey::from_json(public_jwk)?;
 
         // Validate label if provided
         if let Some(lbl) = label {
