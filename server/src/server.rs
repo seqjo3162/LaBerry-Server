@@ -196,22 +196,25 @@ pub async fn run_server(
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
         
         tokio::spawn(async move {
-            use hyper::server::conn::Http;
-
             loop {
                 match listener.accept().await {
-                    Ok((socket, addr)) => {
+                    Ok((socket, _addr)) => {
                         let tls_acceptor = tls_acceptor.clone();
                         let app_clone = app.clone();
 
                         tokio::spawn(async move {
                             match tls_acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
-                                    // Create a hyper-compatible service from the axum app
-                                    let service = app_clone.into_make_service();
+                                    // Обёртки для совместимости Tokio и Hyper 1.0
+                                    use hyper_util::rt::TokioIo;
+                                    use hyper_util::service::TowerToHyperService;
 
-                                    if let Err(err) = Http::new()
-                                        .serve_connection(tls_stream, service)
+                                    let io = TokioIo::new(tls_stream);
+                                    let service = TowerToHyperService::new(app_clone);
+
+                                    // Используем http1::Builder из Hyper 1.0 вместо старого Http::new()
+                                    if let Err(err) = hyper::server::conn::http1::Builder::new()
+                                        .serve_connection(io, service)
                                         .await
                                     {
                                         eprintln!("[SERVER] TLS connection error: {}", err);

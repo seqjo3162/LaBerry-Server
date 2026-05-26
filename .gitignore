@@ -32,3 +32,4 @@ TODO.md
 *.crt
 *.crt
 server/messenger.crt
+.env
