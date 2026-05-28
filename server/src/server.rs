@@ -411,13 +411,13 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/:file_id", get(crate::routes::files::get_file))
                 .with_state(state.clone()),
         )
+        // 👇 Extension ДО nest_service, чтобы ConnectInfo работал
+        .layer(axum::extract::Extension(state.clone()))
         .nest_service(
             "/static",
             ServeDir::new(static_dir.clone())
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
         )
-        // 👇 ВАЖНО: ExtractLayer с ConnectInfo ДО geo_guard (нужен для ConnectInfo извлекателя)
-        .layer(axum::extract::Extension(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::host_guard::host_guard,
@@ -662,6 +662,7 @@ mod tests {
             admin_sessions: Arc::new(DashMap::new()),
             geo_guard: GeoGuardState {
                 blocked_networks: Arc::new(vec![]),
+                allowed_domains: Arc::new(vec!["laberry.ru".to_string()]),
             },
             trusted_proxies: Arc::new(vec![]), 
         }

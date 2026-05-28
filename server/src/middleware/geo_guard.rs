@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{ConnectInfo, State},
+    extract::{State},
     http::{HeaderMap, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -21,6 +21,7 @@ use crate::server::AppState;
 #[derive(Clone)]
 pub struct GeoGuardState {
     pub blocked_networks: Arc<Vec<IpNet>>,
+    pub allowed_domains: Arc<Vec<String>>,
 }
 
 impl GeoGuardState {
@@ -28,6 +29,7 @@ impl GeoGuardState {
         let networks = load_sk_networks_from_ripe(ripe_file_path)?;
         Ok(Self {
             blocked_networks: Arc::new(networks),
+            allowed_domains: Arc::new(vec!["laberry.ru".to_string()]),
         })
     }
 
@@ -37,6 +39,7 @@ impl GeoGuardState {
         let networks = load_custom_networks(path_str)?;
         Ok(Self {
             blocked_networks: Arc::new(networks),
+            allowed_domains: Arc::new(vec!["laberry.ru".to_string()]),
         })
     }
 }
@@ -122,13 +125,52 @@ fn get_real_ip(addr: SocketAddr, headers: &HeaderMap, trusted_proxies: &[IpAddr]
     ip
 }
 
+fn get_real_ip_from_headers(headers: &HeaderMap, trusted_proxies: &[IpAddr]) -> IpAddr {
+    // Пытаемся получить IP из X-Forwarded-For
+    if let Some(xff) = headers.get("X-Forwarded-For") {
+        if let Ok(xff_str) = xff.to_str() {
+            if let Some(first) = xff_str.split(',').next() {
+                if let Ok(real_ip) = first.trim().parse::<IpAddr>() {
+                    let is_trusted = trusted_proxies.contains(&real_ip)
+                        || real_ip.is_loopback()
+                        || match &real_ip {
+                            IpAddr::V4(addr) => addr.is_private() || addr.is_link_local(),
+                            IpAddr::V6(addr) => addr.is_unique_local() || addr.is_unicast_link_local(),
+                        };
+                    if is_trusted {
+                        return real_ip;
+                    }
+                }
+            }
+        }
+    }
+    // Пытаемся получить IP из X-Real-IP
+    if let Some(xri) = headers.get("X-Real-IP") {
+        if let Ok(xri_str) = xri.to_str() {
+            if let Ok(real_ip) = xri_str.trim().parse::<IpAddr>() {
+                let is_trusted = trusted_proxies.contains(&real_ip)
+                    || real_ip.is_loopback()
+                    || match &real_ip {
+                        IpAddr::V4(addr) => addr.is_private() || addr.is_link_local(),
+                        IpAddr::V6(addr) => addr.is_unique_local() || addr.is_unicast_link_local(),
+                    };
+                if is_trusted {
+                    return real_ip;
+                }
+            }
+        }
+    }
+    // Возвращаем loopback по умолчанию
+    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+}
+
 pub async fn geo_guard(
     State(app): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let ip = get_real_ip(addr, request.headers(), &app.trusted_proxies);
+    // Получаем IP из заголовков или соединения
+    let ip = get_real_ip_from_headers(request.headers(), &app.trusted_proxies);
 
     if ip.is_loopback() {
         return next.run(request).await;

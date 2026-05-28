@@ -75,7 +75,7 @@ pub(super) struct ExpiredFileRow {
     pub(super) chat_id: i64,
 }
 
-async fn resolve_user_id_for_file_request(
+pub(super) async fn resolve_user_id_for_file_request(
     st: &AppState,
     me: Option<&AuthUser>,
     file_id: i64,
@@ -132,7 +132,7 @@ async fn resolve_user_id_for_file_request(
     Ok(claims.uid)
 }
 
-async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -> bool {
+pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -> bool {
     #[derive(sqlx::FromRow)]
     struct ChatInfo {
         server_id: Option<i64>,
@@ -198,7 +198,7 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
     }
 }
 
-async fn load_file_for_serving(st: &AppState, file_id: i64) -> Result<FileServeRow, StatusCode> {
+pub(super) async fn load_file_for_serving(st: &AppState, file_id: i64) -> Result<FileServeRow, StatusCode> {
     let row: Option<FileServeRow> = sqlx::query_as(
         r#"
         SELECT
@@ -239,7 +239,7 @@ async fn load_file_for_serving(st: &AppState, file_id: i64) -> Result<FileServeR
     Ok(row)
 }
 
-async fn load_file_for_access(st: &AppState, file_id: i64) -> Result<FileAccessRow, StatusCode> {
+pub(super) async fn load_file_for_access(st: &AppState, file_id: i64) -> Result<FileAccessRow, StatusCode> {
     let row: Option<FileAccessRow> = sqlx::query_as(
         r#"
         SELECT

@@ -109,14 +109,30 @@ pub async fn csrf_guard(
         _ => {}
     }
 
-    // Skip CSRF for public endpoints (auth routes)
+    // Skip CSRF for public endpoints and authenticated API routes
     let path = req.uri().path();
-    if path.starts_with("/api/auth/login") 
+    
+    // Skip all /api/* endpoints — they are protected by Bearer token auth
+    if path.starts_with("/api/") {
+        return Ok(next.run(req).await);
+    }
+    
+    // Skip WebSocket connections
+    if path.starts_with("/ws") {
+        return Ok(next.run(req).await);
+    }
+    
+    // Skip admin panel endpoints (they use their own session-based CSRF)
+    if path.starts_with("/admin-panel/") {
+        return Ok(next.run(req).await);
+    }
+    
+    // Skip specific public endpoints
+    if path.starts_with("/api/auth/login")
         || path.starts_with("/api/auth/register")
         || path.starts_with("/api/auth/refresh")
         || path.starts_with("/api/auth/verify-2fa")
         || path.starts_with("/verify")
-        || path.starts_with("/ws")
     {
         // These endpoints have their own security (2FA, rate limiting, token validation)
         return Ok(next.run(req).await);

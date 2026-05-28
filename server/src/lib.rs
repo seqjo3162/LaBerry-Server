@@ -14,23 +14,3 @@ pub mod api_error;
 pub mod ai_client;
 pub mod tls;
 pub mod e2ee;
-#[cfg(target_os = "android")]
-mod jni_bridge;
-
-// =======================
-// NOTE
-// =======================
-//
-// Android JNI entrypoint intentionally NOT defined here.
-//
-// Android must use:
-//   jni_bridge.rs
-//   Java_com_laberry_app_NativeServer_*
-//
-// This avoids:
-// - double server startup
-// - multiple Tokio runtimes
-// - port conflicts
-// - broken shutdown logic
-//
-// lib.rs is now a pure crate root.

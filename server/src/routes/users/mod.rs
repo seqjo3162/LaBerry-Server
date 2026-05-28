@@ -216,15 +216,15 @@ pub struct SearchQuery {
 #[derive(Deserialize)]
 pub struct RegisterDeviceKeyBody {
     pub device_id: String,
-    pub public_jwk: String,
+    /// Опциональная метка устройства (например "iPhone 15")
     pub label: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct DeviceKeyView {
     pub device_id: String,
-    pub public_jwk: String,
     pub label: Option<String>,
+    pub last_seen: Option<String>,
 }
 
 pub fn sanitize_email(s: &str) -> Option<String> {
@@ -540,88 +540,69 @@ async fn register_device_key(
     me: AuthUser,
     Json(body): Json<RegisterDeviceKeyBody>,
 ) -> impl IntoResponse {
-    use crate::e2ee::{JwkKey, DeviceKeyValidator};
+    use crate::e2ee::AccountKey;
 
     let db = &st.db;
     let now = auth::now_iso();
 
-    if let Err(e) = DeviceKeyValidator::validate_registration(
-        &body.device_id,
-        &body.public_jwk,
-        &body.label,
-    ) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("Invalid request: {}", e)}))
-        ).into_response();
+    // Проверяем device_id формат
+    let did = body.device_id.trim();
+    if did.is_empty() || did.len() > 255 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid device_id length"}))).into_response();
+    }
+    if !did.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid device_id format"}))).into_response();
     }
 
-    let jwk = match JwkKey::from_json(&body.public_jwk) {
-        Ok(key) => key,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid JWK: {}", e)}))
-            ).into_response();
-        }
+    // Получаем или генерируем аккаунт-ключ
+    let existing_key: Option<String> = sqlx::query_scalar(
+        "SELECT public_encryption_key FROM users WHERE id = ? LIMIT 1"
+    )
+    .bind(me.id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
+    let account_key = if let Some(b64) = existing_key {
+        AccountKey::from_base64(&b64).unwrap_or_else(AccountKey::generate)
+    } else {
+        AccountKey::generate()
     };
 
-    let fingerprint = jwk.fingerprint();
-
-    let existing_pin = sqlx::query_as::<_, (Option<String>,)>(
-        r#"SELECT fingerprint FROM e2ee_key_pins WHERE user_id = ? AND device_id = ?"#
+    // Сохраняем аккаунт-ключ
+    let b64_key = account_key.to_base64();
+    let _ = sqlx::query(
+        "UPDATE users SET public_encryption_key = ? WHERE id = ?"
     )
+    .bind(&b64_key)
     .bind(me.id)
-    .bind(&body.device_id)
-    .fetch_optional(db)
-    .await;
-
-    if let Ok(Some((Some(existing_fp),))) = existing_pin {
-        if existing_fp != fingerprint {
-            tracing::warn!("[SECURITY] E2EE key changed for user {} device {}", me.id, body.device_id);
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({"error": "e2ee_public_key_changed"}))
-            ).into_response();
-        }
-    }
-
-    let device_registration = sqlx::query(
-        r#"
-        INSERT OR REPLACE INTO user_device_keys(device_id, user_id, public_jwk, label, created_at, last_seen)
-        VALUES(?, ?, ?, ?, ?, ?)
-        "#,
-    )
-    .bind(body.device_id.trim())
-    .bind(me.id)
-    .bind(body.public_jwk.trim())
-    .bind(body.label.map(|s| s.trim().to_string()))
-    .bind(&now)
-    .bind(&now)
     .execute(db)
     .await;
 
-    if device_registration.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
+    // Сохраняем device registration
+    let label = body.label.as_ref().map(|s| s.trim().to_string());
     let _ = sqlx::query(
         r#"
-        INSERT OR REPLACE INTO e2ee_key_pins(user_id, device_id, fingerprint, created_at, last_verified_at)
+        INSERT OR REPLACE INTO user_device_keys(device_id, user_id, label, created_at, last_seen)
         VALUES(?, ?, ?, ?, ?)
         "#,
     )
+    .bind(did)
     .bind(me.id)
-    .bind(&body.device_id)
-    .bind(&fingerprint)
+    .bind(label)
     .bind(&now)
     .bind(&now)
     .execute(db)
     .await;
 
+    tracing::info!("[E2EE] Device registered: user={} device={} fingerprint={}", me.id, did, account_key.fingerprint());
+
     (StatusCode::OK, Json(serde_json::json!({
         "ok": true,
-        "fingerprint": fingerprint
+        "fingerprint": account_key.fingerprint(),
+        "account_key": &b64_key,
+        "device_id": did
     }))).into_response()
 }
 
@@ -632,7 +613,7 @@ async fn get_user_device_keys(
     let db = &st.db;
 
     let rows = sqlx::query(
-        r#"SELECT device_id, public_jwk, label FROM user_device_keys WHERE user_id = ?"#,
+        r#"SELECT device_id, label, last_seen FROM user_device_keys WHERE user_id = ?"#,
     )
     .bind(id)
     .fetch_all(db)
@@ -643,9 +624,13 @@ async fn get_user_device_keys(
     let mut out: Vec<DeviceKeyView> = Vec::new();
     for r in rows.into_iter() {
         let device_id: String = r.get("device_id");
-        let public_jwk: String = r.get("public_jwk");
         let label: Option<String> = r.get("label");
-        out.push(DeviceKeyView { device_id, public_jwk, label });
+        let last_seen: Option<String> = r.get("last_seen");
+        out.push(DeviceKeyView {
+            device_id,
+            label,
+            last_seen,
+        });
     }
 
     (StatusCode::OK, Json(out)).into_response()

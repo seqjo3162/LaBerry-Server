@@ -105,6 +105,24 @@ function apiTrace(step, data) {
   }
 }
 
+// Встроенная проверка истечения JWT токена (из websocket-manager.js)
+function _apiIsJwtExpired(token) {
+  try {
+    const parts = String(token || '').split('.');
+    if (parts.length < 2) return false;
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : '';
+    const json = atob(b64 + pad);
+    const p = JSON.parse(json);
+    const exp = p && typeof p.exp === 'number' ? p.exp : null;
+    if (!exp) return false;
+    const nowSec = Math.floor(Date.now() / 1000);
+    return exp <= (nowSec + 15); // 15 сек skew
+  } catch {
+    return false;
+  }
+}
+
 export async function api(path, opts = {}) {
   const requestId = ++apiRequestCounter;
   const startTime = performance.now();
@@ -113,9 +131,9 @@ export async function api(path, opts = {}) {
   const optsForFetch = { ...opts };
   delete optsForFetch._didRefresh;
   
-  apiTrace('REQUEST_START', { 
-    url: path, 
-    requestId, 
+  apiTrace('REQUEST_START', {
+    url: path,
+    requestId,
     method: opts.method || 'GET',
     timestamp: new Date().toISOString()
   });
@@ -125,6 +143,22 @@ export async function api(path, opts = {}) {
     if (!localStorage.getItem('auth_token') && token) {
       try { localStorage.setItem('auth_token', token); } catch (_) {}
       try { localStorage.removeItem('token'); } catch (_) {}
+    }
+
+    // Предварительная проверка токена — если истёк, пробуем обновить ДО запроса
+    if (token && _apiIsJwtExpired(token)) {
+      apiWarn('[API] Token expired, refreshing before request...');
+      const next = await refreshAccessToken();
+      if (next) {
+        token = next;
+        apiWarn('[API] Token refreshed successfully');
+      } else {
+        apiWarn('[API] Token refresh failed – redirecting to login');
+        redirectToLogin();
+        const err = new Error('Unauthorized');
+        err.status = 401;
+        throw err;
+      }
     }
 
     const headers = {

@@ -33,6 +33,12 @@ fn request_host(headers: &HeaderMap) -> Option<String> {
 }
 
 fn host_allowed(host: &str) -> bool {
+    const DEFAULT_ALLOWED_DOMAINS: &[&str] = &["laberry.ru"];
+
+    if DEFAULT_ALLOWED_DOMAINS.iter().any(|d| *d == host) {
+        return true;
+    }
+
     let allowed = configured_allowed_hosts();
     let is_loopback = is_loopback_host(host);
     let is_ip = host.parse::<IpAddr>().is_ok();

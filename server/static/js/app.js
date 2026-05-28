@@ -394,8 +394,17 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     const identity = await e2eeEnsureIdentity(true);
     if (!identity) throw new Error('e2ee_identity_unavailable');
 
-    const recipients = await e2eeCurrentChatRecipients();
-    if (!recipients.length) throw new Error('e2ee_no_recipients');
+    let recipients;
+    try {
+        recipients = await e2eeCurrentChatRecipients();
+    } catch (e) {
+        console.warn('[E2EE] Failed to load recipients:', e);
+        recipients = [];
+    }
+    if (!recipients.length) {
+        console.warn('[E2EE] No recipients available, sending plaintext');
+        return plaintext;
+    }
     const keys = {};
     const missing = [];
 
@@ -462,13 +471,18 @@ async function e2eeEncryptForCurrentChat(plaintext) {
         }
     }
 
-    if (!keys[String(currentUser?.id)] || missing.length) {
+    if (missing.length) {
         const now = Date.now();
         if (now - e2eeMissingKeyWarnedAt > 8000) {
             e2eeMissingKeyWarnedAt = now;
-            showToast(`E2EE не применено: нет ключей у ${missing.slice(0, 3).join(', ') || 'участников'}`);
+            showToast(`E2EE не применено для: ${missing.slice(0, 3).join(', ') || 'участников'}`);
         }
-        throw new Error('e2ee_missing_recipient_keys');
+    }
+
+    // Graceful fallback: если не удалось зашифровать для себя — не блокируем отправку
+    if (!keys[String(currentUser?.id)]) {
+        console.warn('[E2EE] Cannot encrypt for self, message will be sent without E2EE');
+        // НЕ выбрасываем ошибку — позволяем отправить сообщение в открытом виде
     }
 
     const iv = crypto.getRandomValues(new Uint8Array(12));
