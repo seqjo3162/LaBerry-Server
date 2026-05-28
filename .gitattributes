@@ -1,0 +1,66 @@
+# ============================================
+# LaBerry-Server .gitattributes
+# ============================================
+# Управление обработкой файлов в git
+# ============================================
+
+# ============================================
+# Бинарные файлы (не должны попадать в git)
+# ============================================
+*.key binary
+*.pem binary
+*.pfx binary
+*.crt binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.log binary
+*.zip binary
+*.7z binary
+
+# ============================================
+# Экспорт-игнор (не попадут при git archive)
+# ============================================
+.env export-ignore
+.env.local export-ignore
+.env.* export-ignore
+.env.example export-ignore
+
+# ============================================
+# Текстовые файлы (принудительно)
+# ============================================
+*.rs text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.md text eol=lf
+*.ini text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf
+*.txt text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.svg binary
+*.webp binary
+*.ico binary
+*.woff2 binary
+*.woff binary
+*.ttf binary
+*.eot binary
+*.mp4 binary
+*.webm binary
+*.mp3 binary
+*.wav binary
+*.flac binary
+*.opus binary
+*.webp binary
+*.avif binary
+*.heic binary
+*.heif binary
