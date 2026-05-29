@@ -258,7 +258,8 @@ pub async fn run_server(
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
-                    Ok((socket, _remote_addr)) => {
+                    // 1. Убираем подчеркивание, чтобы использовать remote_addr
+                    Ok((socket, remote_addr)) => { 
                         let tls_acceptor = tls_acceptor.clone();
                         let app_clone = app.clone();
 
@@ -266,8 +267,12 @@ pub async fn run_server(
                             match tls_acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
                                     let io = hyper_util::rt::TokioIo::new(tls_stream);
-                                    let svc = service_fn(move |req| app_clone.clone().call(req));
                                     
+                                    let svc = service_fn(move |mut req| {
+                                        req.extensions_mut().insert(axum::extract::connect_info::ConnectInfo(remote_addr));
+                                        app_clone.clone().call(req)
+                                    });
+
                                     if let Err(err) = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
                                         .serve_connection(io, svc)
                                         .await
@@ -294,7 +299,8 @@ pub async fn run_server(
     } else {
         // HTTP mode
         tokio::spawn(async move {
-            axum::serve(listener, app)
+            // Добавляем .into_make_service_with_connect_info::<SocketAddr>()
+            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
                 .with_graceful_shutdown(async move {
                     shutdown_main.notified().await;
                 })

@@ -167,10 +167,9 @@ fn get_real_ip_from_headers(headers: &HeaderMap, trusted_proxies: &[IpAddr]) -> 
 pub async fn geo_guard(
     State(app): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    request: Request<Body>,
+    request: Request<Body>,                     
     next: Next,
 ) -> Response {
-    // Получаем peer SocketAddr и вычисляем реальный IP
     let ip = get_real_ip(peer, request.headers(), &app.trusted_proxies);
 
     if ip.is_loopback() {
@@ -193,6 +192,7 @@ pub async fn geo_guard(
 
     next.run(request).await
 }
+
 
 fn deny(code: &'static str, message: &'static str) -> Response {
     (
