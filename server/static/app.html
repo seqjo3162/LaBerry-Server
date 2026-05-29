@@ -393,6 +393,9 @@
   </div>
 
   <script src="/static/js/start-page-link.js?v=1"></script>
-  <script type="module" src="/static/js/app.js?v=61"></script>
+  <!-- E2EE: X25519 + ChaCha20 для end-to-end шифрования -->
+  <script src="/static/js/nacl.min.js"></script>
+  <script src="/static/js/nacl-polyfill.js?v=1"></script>
+  <script type="module" src="/static/js/app.js?v=62"></script>
 </body>
 </html>

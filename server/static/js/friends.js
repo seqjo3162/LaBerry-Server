@@ -22,7 +22,24 @@ function presencePillHtml(status) {
 }
 
 export function initFriends() {
-  console.log("[FRIENDS] initFriends()");
+  console.log(`
+  Hi someone! How are you? Good or bad — does not matter.
+
+  What are you doing here?
+  Wanna help with code or maybe hack my project?
+  Please don't do that.
+
+  I just wanna make something better for users.
+  Maybe you can send me some bugs or bad things from the code.
+
+  And thank you if you did not hack my project.
+  I'll be very happy.
+
+  If you really read all of this, send me a message with this code:
+
+  __ XOR 0x4a
+  `);
+}
 
   const friendsBtn = document.getElementById("friendsBtn");
   const chatView = document.getElementById("chatView");
@@ -618,4 +635,4 @@ export function initFriends() {
   });
   window.openFriends = openFriends;
   window.closeFriends = closeFriends;
-}
+

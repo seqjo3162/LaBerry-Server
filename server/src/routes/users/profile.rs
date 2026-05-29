@@ -135,6 +135,18 @@ pub async fn update_me(
         }
     }
 
+    // Валидация и сохранение публичного E2EE ключа
+    if let Some(ref pub_key) = body.public_encryption_key {
+        use crate::e2ee::E2eeKeyPair;
+        // Валидируем что это корректный base64-encoded X25519 public key (32 bytes)
+        if E2eeKeyPair::from_public_b64(pub_key).is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"detail": "Invalid public encryption key. Must be base64-encoded 32-byte X25519 public key."})),
+            ).into_response();
+        }
+    }
+    
     if sqlx::query(
         r#"UPDATE users
            SET public_encryption_key = ?

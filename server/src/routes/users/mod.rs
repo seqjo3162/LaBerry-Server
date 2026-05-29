@@ -540,7 +540,7 @@ async fn register_device_key(
     me: AuthUser,
     Json(body): Json<RegisterDeviceKeyBody>,
 ) -> impl IntoResponse {
-    use crate::e2ee::AccountKey;
+    use crate::e2ee::E2eeKeyPair;
 
     let db = &st.db;
     let now = auth::now_iso();
@@ -554,7 +554,7 @@ async fn register_device_key(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid device_id format"}))).into_response();
     }
 
-    // Получаем или генерируем аккаунт-ключ
+    // Получаем или генерируем E2EE keypair
     let existing_key: Option<String> = sqlx::query_scalar(
         "SELECT public_encryption_key FROM users WHERE id = ? LIMIT 1"
     )
@@ -564,18 +564,19 @@ async fn register_device_key(
     .ok()
     .flatten();
 
-    let account_key = if let Some(b64) = existing_key {
-        AccountKey::from_base64(&b64).unwrap_or_else(AccountKey::generate)
+    let keypair = if let Some(b64) = existing_key {
+        // Пытаемся восстановить из публичного ключа
+        E2eeKeyPair::from_public_b64(&b64).unwrap_or_else(E2eeKeyPair::generate)
     } else {
-        AccountKey::generate()
+        E2eeKeyPair::generate()
     };
 
-    // Сохраняем аккаунт-ключ
-    let b64_key = account_key.to_base64();
+    // Сохраняем ТОЛЬКО публичный ключ на сервере
+    let pub_key_b64 = keypair.public_key_b64.clone();
     let _ = sqlx::query(
         "UPDATE users SET public_encryption_key = ? WHERE id = ?"
     )
-    .bind(&b64_key)
+    .bind(&pub_key_b64)
     .bind(me.id)
     .execute(db)
     .await;
@@ -596,12 +597,14 @@ async fn register_device_key(
     .execute(db)
     .await;
 
-    tracing::info!("[E2EE] Device registered: user={} device={} fingerprint={}", me.id, did, account_key.fingerprint());
+    tracing::info!("[E2EE] Keypair registered: user={} device={} fingerprint={}", me.id, did, keypair.fingerprint());
 
+    // Возвращаем клиенту публичный ключ + fingerprint
+    // Приватный ключ НЕ возвращается с сервера!
     (StatusCode::OK, Json(serde_json::json!({
         "ok": true,
-        "fingerprint": account_key.fingerprint(),
-        "account_key": &b64_key,
+        "fingerprint": keypair.fingerprint(),
+        "public_key": &pub_key_b64,
         "device_id": did
     }))).into_response()
 }

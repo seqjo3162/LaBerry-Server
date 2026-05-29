@@ -487,7 +487,7 @@ pub fn build_router(state: AppState) -> Router {
 .layer(SetResponseHeaderLayer::if_not_present(
     axum::http::header::HeaderName::from_static("content-security-policy"),
     HeaderValue::from_str(
-        &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
+        &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; connect-src 'self' wss: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; frame-src 'self' https://www.youtube.com https://player.vimeo.com https://rutube.ru; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
     ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
 ))
 
