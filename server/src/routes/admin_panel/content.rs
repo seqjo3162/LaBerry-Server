@@ -2,10 +2,11 @@ pub(super) use crate::auth;
 pub(super) use crate::server::{AdminSession, AppState};
 
 use axum::{
-    extract::{Form, Multipart, Path, Query, State},
+    extract::{Form, Multipart, Path, Query, State, ConnectInfo},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
+use std::net::SocketAddr;
 
 use sqlx::{Row, SqlitePool};
 use std::path::PathBuf;
@@ -26,11 +27,12 @@ use super::{
 
 pub(super) async fn admin_file_raw(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(file_id): Path<i64>,
 ) -> impl IntoResponse {
     if let Err((code, msg)) = require_admin_panel_enabled() { return (code, msg).into_response(); }
-    if let Err((code, msg)) = require_allow_ip(&headers) { return (code, msg).into_response(); }
+    if let Err((code, msg)) = require_allow_ip(&st, &headers, Some(peer)) { return (code, msg).into_response(); }
     if let Err(redir) = require_auth(&st, &headers) { return redir.into_response(); }
 
     let row = sqlx::query(
@@ -90,11 +92,12 @@ pub(super) async fn admin_file_raw(
 
 pub(super) async fn admin_profile_file_raw(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(file_id): Path<i64>,
 ) -> impl IntoResponse {
     if let Err((code, msg)) = require_admin_panel_enabled() { return (code, msg).into_response(); }
-    if let Err((code, msg)) = require_allow_ip(&headers) { return (code, msg).into_response(); }
+    if let Err((code, msg)) = require_allow_ip(&st, &headers, Some(peer)) { return (code, msg).into_response(); }
     if let Err(redir) = require_auth(&st, &headers) { return redir.into_response(); }
 
     let row = sqlx::query(
@@ -154,11 +157,12 @@ pub(super) async fn admin_profile_file_raw(
 
 pub(super) async fn admin_gif_raw(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(asset_id): Path<i64>,
 ) -> impl IntoResponse {
     if let Err((code, msg)) = require_admin_panel_enabled() { return (code, msg).into_response(); }
-    if let Err((code, msg)) = require_allow_ip(&headers) { return (code, msg).into_response(); }
+    if let Err((code, msg)) = require_allow_ip(&st, &headers, Some(peer)) { return (code, msg).into_response(); }
     if let Err(redir) = require_auth(&st, &headers) { return redir.into_response(); }
 
     let row = sqlx::query(
@@ -217,13 +221,14 @@ pub(super) async fn admin_gif_raw(
 
 pub(super) async fn gifs_page(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<MsgQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -331,13 +336,14 @@ pub(super) fn render_admin_gifs_panel_body(sess: &AdminSession, rows: &[AdminGif
 
 pub(super) async fn admin_gif_upload(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -393,6 +399,7 @@ pub(super) async fn admin_gif_upload(
 
 pub(super) async fn admin_gif_delete(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
@@ -400,7 +407,7 @@ pub(super) async fn admin_gif_delete(
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -596,13 +603,14 @@ pub(super) fn render_admin_downloads_panel_body(sess: &AdminSession, rows: &[Adm
 
 pub(super) async fn downloads_page(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<MsgQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -623,13 +631,14 @@ pub(super) async fn downloads_page(
 
 pub(super) async fn admin_download_upload(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -746,6 +755,7 @@ pub(super) async fn admin_download_upload(
 
 pub(super) async fn admin_download_delete(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
@@ -753,7 +763,7 @@ pub(super) async fn admin_download_delete(
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -873,13 +883,14 @@ pub(super) fn render_db_panel_body(sess: &AdminSession, return_to: &str) -> Stri
 
 pub(super) async fn db_tools_page(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<MsgQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -901,45 +912,50 @@ pub(super) async fn db_tools_page(
 
 pub(super) async fn db_wipe_messages_post(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    db_action_common(st, headers, f, DbAction::WipeMessages).await
+    db_action_common(st, Some(peer), headers, f, DbAction::WipeMessages).await
 }
 
 pub(super) async fn db_wipe_servers_post(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    db_action_common(st, headers, f, DbAction::WipeServers).await
+    db_action_common(st, Some(peer), headers, f, DbAction::WipeServers).await
 }
 
 pub(super) async fn db_reset_keep_users_post(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    db_action_common(st, headers, f, DbAction::ResetKeepUsers).await
+    db_action_common(st, Some(peer), headers, f, DbAction::ResetKeepUsers).await
 }
 
 pub(super) async fn db_vacuum_post(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    db_action_common(st, headers, f, DbAction::Vacuum).await
+    db_action_common(st, Some(peer), headers, f, DbAction::Vacuum).await
 }
 
 pub(super) async fn db_cleanup_expired_files_post(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -965,6 +981,7 @@ pub(super) enum DbAction {
 
 pub(super) async fn db_action_common(
     st: AppState,
+    peer: Option<SocketAddr>,
     headers: HeaderMap,
     f: ActionForm,
     act: DbAction,
@@ -972,7 +989,7 @@ pub(super) async fn db_action_common(
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, peer) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {

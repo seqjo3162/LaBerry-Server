@@ -1,13 +1,14 @@
-use crate::{auth, server::{AdminSession, AppState}};
+use crate::{auth, middleware::rate_limit, server::{AdminSession, AppState}};
 
 use anyhow::Context;
 use axum::{
-    extract::{Form, Path, Query, State},
+    extract::{Form, Path, Query, State, ConnectInfo},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Router,
 };
+use std::net::SocketAddr;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use password_hash::{PasswordHash, PasswordVerifier};
 use regex::Regex;
@@ -850,11 +851,11 @@ fn cookie_clear(secure: bool) -> String {
 // Pages
 // =============================
 
-async fn root(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+async fn root(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     if session_get(&st, &headers).is_none() {
@@ -874,11 +875,11 @@ pub(super) struct MsgQuery {
     user_id: Option<i64>,
 }
 
-async fn login_get(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<MsgQuery>) -> impl IntoResponse {
+async fn login_get(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(q): Query<MsgQuery>) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     if session_get(&st, &headers).is_some() {
@@ -915,13 +916,14 @@ struct LoginForm {
 
 async fn login_post(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
 
@@ -1208,12 +1210,13 @@ struct SuggestionStatusForm {
 
 async fn admin_report_status(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ReportStatusForm>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
-    if let Err(e) = require_allow_ip(&headers) { return e.into_response(); }
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) { return e.into_response(); }
     let (_sid, sess) = match require_auth(&st, &headers) {
         Ok(v) => v,
         Err(r) => return r.into_response(),
@@ -1250,13 +1253,14 @@ async fn admin_report_status(
 
 async fn suggestions_page(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<SuggestionsQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -1285,6 +1289,7 @@ async fn suggestions_page(
 
 async fn admin_suggestion_status(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<SuggestionStatusForm>,
@@ -1292,7 +1297,7 @@ async fn admin_suggestion_status(
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -1365,13 +1370,14 @@ async fn admin_suggestion_status(
 
 async fn center_page(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<MsgQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {

@@ -480,13 +480,14 @@ pub(crate) fn render_users_panel_body(
 
 pub(crate) async fn users_list(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -534,12 +535,13 @@ pub(crate) async fn users_list(
 
 pub(crate) async fn admin_user_card_fragment(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Query(q): Query<ListQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
-    if let Err(e) = require_allow_ip(&headers) { return e.into_response(); }
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) { return e.into_response(); }
     let (_sid, sess) = match require_auth(&st, &headers) {
         Ok(v) => v,
         Err(r) => return r.into_response(),
@@ -558,11 +560,12 @@ pub(crate) async fn admin_user_card_fragment(
 
 pub(crate) async fn admin_user_details_fragment(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
-    if let Err(e) = require_allow_ip(&headers) { return e.into_response(); }
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) { return e.into_response(); }
     if let Err(r) = require_auth(&st, &headers) { return r.into_response(); }
 
     match fetch_user_by_id(&st.db, id).await {
@@ -574,38 +577,42 @@ pub(crate) async fn admin_user_details_fragment(
 
 pub(crate) async fn user_ban(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    action_user_common(st, headers, id, f, UserAction::Заблокировать).await
+    action_user_common(st, Some(peer), headers, id, f, UserAction::Заблокировать).await
 }
 
 pub(crate) async fn user_purge_content(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    action_user_common(st, headers, id, f, UserAction::PurgeContent).await
+    action_user_common(st, Some(peer), headers, id, f, UserAction::PurgeContent).await
 }
 
 pub(crate) async fn user_unban(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    action_user_common(st, headers, id, f, UserAction::Unban).await
+    action_user_common(st, Some(peer), headers, id, f, UserAction::Unban).await
 }
 
 pub(crate) async fn user_ban_forever(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
 ) -> impl IntoResponse {
-    action_user_common(st, headers, id, f, UserAction::DeleteAccount).await
+    action_user_common(st, Some(peer), headers, id, f, UserAction::DeleteAccount).await
 }
 
 enum UserAction {
@@ -617,6 +624,7 @@ enum UserAction {
 
 async fn action_user_common(
     st: AppState,
+    peer: Option<std::net::SocketAddr>,
     headers: HeaderMap,
     user_id: i64,
     f: ActionForm,
@@ -625,7 +633,7 @@ async fn action_user_common(
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, peer) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -675,13 +683,14 @@ pub(crate) struct TestUsersQuery {
 
 pub(crate) async fn test_users_page(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<TestUsersQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -754,13 +763,14 @@ pub(crate) struct DeleteTestUsersForm {
 
 pub(crate) async fn test_users_delete(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Form(f): Form<DeleteTestUsersForm>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {

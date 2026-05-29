@@ -1,11 +1,12 @@
 use crate::server::{AdminSession, AppState};
 
 use axum::{
-    extract::State,
+    extract::{State, ConnectInfo},
     Json,
     http::HeaderMap,
     response::IntoResponse,
 };
+use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use std::env;
 
@@ -179,12 +180,13 @@ fn homie_ok_from_value(value: &serde_json::Value, answer: &str) -> bool {
 
 pub async fn homie_health_get(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if let Err((_code, msg)) = require_admin_panel_enabled() {
         return Json(HomieProxyResponse { ok: false, error: msg, upstream: None }).into_response();
     }
-    if let Err((_code, msg)) = require_allow_ip(&headers) {
+    if let Err((_code, msg)) = require_allow_ip(&st, &headers, Some(peer)) {
         return Json(HomieProxyResponse { ok: false, error: msg, upstream: None }).into_response();
     }
     if require_auth(&st, &headers).is_err() {
@@ -221,12 +223,13 @@ pub async fn homie_health_get(
 
 pub async fn homie_tools_get(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if let Err((_code, msg)) = require_admin_panel_enabled() {
         return Json(HomieProxyResponse { ok: false, error: msg, upstream: None }).into_response();
     }
-    if let Err((_code, msg)) = require_allow_ip(&headers) {
+    if let Err((_code, msg)) = require_allow_ip(&st, &headers, Some(peer)) {
         return Json(HomieProxyResponse { ok: false, error: msg, upstream: None }).into_response();
     }
     if require_auth(&st, &headers).is_err() {
@@ -263,13 +266,14 @@ pub async fn homie_tools_get(
 
 pub async fn homie_chat_post(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(f): Json<HomieJsonForm>,
 ) -> impl IntoResponse {
     if let Err((_code, msg)) = require_admin_panel_enabled() {
         return Json(HomieJsonResponse { ok: false, answer: String::new(), error: msg }).into_response();
     }
-    if let Err((_code, msg)) = require_allow_ip(&headers) {
+    if let Err((_code, msg)) = require_allow_ip(&st, &headers, Some(peer)) {
         return Json(HomieJsonResponse { ok: false, answer: String::new(), error: msg }).into_response();
     }
 
@@ -352,13 +356,14 @@ pub async fn homie_chat_post(
 
 pub async fn homie_reset_post(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(f): Json<HomieJsonForm>,
 ) -> impl IntoResponse {
     if let Err((_code, msg)) = require_admin_panel_enabled() {
         return Json(HomieJsonResponse { ok: false, answer: String::new(), error: msg }).into_response();
     }
-    if let Err((_code, msg)) = require_allow_ip(&headers) {
+    if let Err((_code, msg)) = require_allow_ip(&st, &headers, Some(peer)) {
         return Json(HomieJsonResponse { ok: false, answer: String::new(), error: msg }).into_response();
     }
 
