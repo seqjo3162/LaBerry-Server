@@ -42,7 +42,7 @@
 - **Транскодирование изображений** — автоматическое создание превью
 
 ### Безопасность
-- **E2EE** — end-to-end шифрование (X25519 + ChaCha20-Poly1305 + HKDF)
+- **E2EE** — end-to-end шифрование (ECDH P-256 + AES-GCM, с X25519-совместимостью)
 - **2FA** — двухфакторная аутентификация через email
 - **Argon2id** — хеширование паролей
 - **JWT (HS256)** — сессионное управление с token version
@@ -174,7 +174,7 @@ LaBerry — готовое решение для организации внут
 | **Асинхронность** | Tokio | 1.37+ |
 | **Кэш/State** | DashMap | 5 (concurrent HashMap) |
 | **Картинки** | image | 0.25 |
-| **E2EE** | x25519-dalek + crypto_box | X25519 + ChaCha20 |
+| **E2EE** | x25519-dalek + crypto_box | ECDH P-256 + AES-GCM (X25519 compatible) |
 | **AI Integration** | reqwest | 0.12 |
 | **GeoIP** | maxminddb | 0.24 |
 
@@ -549,17 +549,24 @@ CREATE TABLE files (
 | POST | `/api/twofa/disable` | Отключить 2FA |
 | POST | `/api/twofa/verify-code` | Проверить код |
 
-### Admin
+### Админ-панель
+
+LaBerry поставляется с опциональной веб-админкой, которая запускается отдельно и по умолчанию доступна только на локальном интерфейсе.
 
 | Метод | Путь | Описание |
 |---|---|---|
-| GET | `/api/admin/users` | Список пользователей |
-| PUT | `/api/admin/users/{id}/ban` | Забанить |
-| PUT | `/api/admin/users/{id}/unban` | Разбанить |
-| DELETE | `/api/admin/users/{id}` | Удалить |
-| DELETE | `/api/admin/content` | Удалить контент |
+| GET | `/admin/` | Корень админ-панели |
+| GET | `/admin/login` | Страница входа |
+| POST | `/admin/logout` | Выход из админ-панели |
+| GET | `/admin/users` | Список пользователей |
+| POST | `/admin/users/{id}/ban` | Забанить пользователя |
+| POST | `/admin/users/{id}/unban` | Разбанить пользователя |
+| POST | `/admin/users/{id}/purge` | Удалить пользовательский контент |
+| POST | `/admin/users/{id}/ban_forever` | Забанить навсегда |
 
-> Полный API документация: [LaBerry-API.md](LaBerry-API.md)
+> Полная документация API: [LaBerry-API.md](LaBerry-API.md)
+
+> Примечание: админ-панель включается через `LB_ENABLE_ADMIN_PANEL=1` или `LB_ADMIN_PASSWORD[_HASH]` и по умолчанию привязывается к `127.0.0.1` / `::1` для безопасности.
 
 ---
 
@@ -634,7 +641,7 @@ WSS: wss://host/ws
 | **GeoIP Blocking** | Блокировка по CIDR (RIPE database) |
 | **Host Header** | Проверка Host header (middleware) |
 | **Security Headers** | HSTS, CSP, X-Frame-Options, Referrer-Policy |
-| **E2EE** | X25519 + ChaCha20-Poly1305 + HKDF |
+| **E2EE** | ECDH P-256 + AES-GCM, с X25519-совместимостью |
 | **TLS** | rustls native или Caddy reverse proxy |
 | **2FA** | Email-based verification |
 
@@ -963,7 +970,7 @@ docker-compose -f turn/docker-compose.yml restart
 - ✅ REST API (все основные endpoints)
 - ✅ WebSocket real-time chat
 - ✅ Voice channels (WebRTC)
-- ✅ E2EE (X25519 + ChaCha20)
+- ✅ E2EE (P-256 ECDH + AES-GCM, X25519 compatible)
 - ✅ Admin panel (web + CLI)
 - ✅ 2FA (email)
 - ✅ GeoIP blocking

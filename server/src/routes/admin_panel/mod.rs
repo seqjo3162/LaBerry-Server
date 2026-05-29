@@ -771,7 +771,7 @@ pub(super) fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<(String
     }
 }
 
-pub(super) fn require_allow_ip(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+pub(super) fn require_allow_ip(st: &AppState, headers: &HeaderMap, peer: Option<SocketAddr>) -> Result<(), (StatusCode, String)> {
     // Optional simple allow-list by exact IPs.
     // NOTE: If you run behind proxy, ensure X-Forwarded-For is trusted.
     let allow = env::var("LB_ADMIN_ALLOW_IPS").unwrap_or_default();
@@ -780,15 +780,15 @@ pub(super) fn require_allow_ip(headers: &HeaderMap) -> Result<(), (StatusCode, S
         return Ok(());
     }
 
-    let remote = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()));
+    // Determine client IP but only trust forwarded headers when peer is trusted.
+    let remote = rate_limit::extract_ip(
+        headers,
+        peer.map(|p| p.ip()),
+        st.trusted_proxies.as_slice(),
+    );
 
     let Some(remote) = remote else {
-        return Err((StatusCode::FORBIDDEN, "Включён список разрешённых IP, но заголовок с IP не передан".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Включён список разрешённых IP, но IP не обнаружен".to_string()));
     };
 
     let ip: IpAddr = remote

@@ -246,13 +246,14 @@ pub(crate) fn render_servers_panel_body(query: &str, rows_html: &str, embedded: 
 
 pub(crate) async fn servers_list(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -325,6 +326,7 @@ pub(crate) async fn servers_list(
 
 pub(crate) async fn server_delete(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
@@ -332,7 +334,7 @@ pub(crate) async fn server_delete(
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {
@@ -365,6 +367,7 @@ pub(crate) async fn server_delete(
 
 pub(crate) async fn server_add_all_users(
     State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Form(f): Form<ActionForm>,
@@ -372,7 +375,7 @@ pub(crate) async fn server_add_all_users(
     if let Err(e) = require_admin_panel_enabled() {
         return e.into_response();
     }
-    if let Err(e) = require_allow_ip(&headers) {
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
         return e.into_response();
     }
     let (_sid, sess) = match require_auth(&st, &headers) {

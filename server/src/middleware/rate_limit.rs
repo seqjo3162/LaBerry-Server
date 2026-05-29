@@ -102,22 +102,52 @@ pub fn cleanup_expired_buckets() {
     });
 }
 
-pub fn extract_ip(headers: &axum::http::HeaderMap) -> Option<String> {
-    // Prefer first IP from X-Forwarded-For
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
-        if let Some(first) = v.split(',').next() {
-            let ip = first.trim();
+use std::net::IpAddr;
+
+/// Extract client IP from headers, but only trust forwarded headers when the
+/// immediate peer (the connector) is a trusted proxy or local address.
+///
+/// - `headers` — request headers
+/// - `peer_ip` — actual TCP peer IP (if available)
+/// - `trusted_proxies` — list of IPs considered trusted (e.g. Caddy frontends)
+pub fn extract_ip(
+    headers: &axum::http::HeaderMap,
+    peer_ip: Option<IpAddr>,
+    trusted_proxies: &[IpAddr],
+) -> Option<String> {
+    // Determine if the immediate peer is trusted (loopback/private or in configured list)
+    let mut peer_is_trusted = false;
+    if let Some(peer) = peer_ip {
+        peer_is_trusted = peer.is_loopback()
+            || match &peer {
+                IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+                IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+            }
+            || trusted_proxies.iter().any(|p| *p == peer);
+    }
+
+    // If peer is trusted, prefer X-Forwarded-For / X-Real-IP (first value)
+    if peer_is_trusted {
+        if let Some(v) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
+            if let Some(first) = v.split(',').next() {
+                let ip = first.trim();
+                if !ip.is_empty() {
+                    return Some(ip.to_string());
+                }
+            }
+        }
+
+        if let Some(v) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
+            let ip = v.trim();
             if !ip.is_empty() {
                 return Some(ip.to_string());
             }
         }
     }
 
-    if let Some(v) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
-        let ip = v.trim();
-        if !ip.is_empty() {
-            return Some(ip.to_string());
-        }
+    // Fallback to peer IP if available
+    if let Some(peer) = peer_ip {
+        return Some(peer.to_string());
     }
 
     None
