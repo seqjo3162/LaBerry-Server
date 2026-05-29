@@ -1,10 +1,11 @@
 use axum::{
     body::Body,
-    extract::{State},
+    extract::{State, ConnectInfo},
     http::{HeaderMap, Request, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::IntoResponse, Response,
 };
+use std::net::SocketAddr;
 
 use ipnet::IpNet;
 use serde_json::json;
@@ -169,8 +170,19 @@ pub async fn geo_guard(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Получаем IP из заголовков или соединения
-    let ip = get_real_ip_from_headers(request.headers(), &app.trusted_proxies);
+    // Получаем peer SocketAddr (если доступен) и вычисляем реальный IP.
+    // Если peer доступен, используем `get_real_ip` (оно проверяет доверенность peer).
+    let peer_addr = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0);
+
+    let ip = if let Some(addr) = peer_addr {
+        get_real_ip(addr, request.headers(), &app.trusted_proxies)
+    } else {
+        // Fallback: try headers-based resolution (less secure)
+        get_real_ip_from_headers(request.headers(), &app.trusted_proxies)
+    };
 
     if ip.is_loopback() {
         return next.run(request).await;

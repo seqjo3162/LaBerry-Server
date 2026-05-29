@@ -1,11 +1,12 @@
 use axum::{
-    extract::{Form, State},
+    extract::{Form, State, ConnectInfo},
     http::HeaderMap,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -174,17 +175,19 @@ async fn register(
 // ===========================
 async fn login(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(body): Form<LoginBody>,
 ) -> Result<Response, ApiError> {
 
-// rate limit (best-effort, in-memory + DB-backed)
-let ip = rate_limit::extract_ip(&headers).unwrap_or_else(|| "unknown".to_string());
-let u = body.username.trim().to_ascii_lowercase();
-let key = format!("login:{}:{}", ip, u);
-if !rate_limit::allow(&key, 12, 300) { // 12 attempts / 5 min per ip+username
-    return Err(ApiError::TooManyRequests("Too many login attempts, try later"));
-}
+    // rate limit (best-effort, in-memory + DB-backed)
+    let ip = rate_limit::extract_ip(&headers, Some(peer.ip()), st.trusted_proxies.as_slice())
+        .unwrap_or_else(|| "unknown".to_string());
+    let u = body.username.trim().to_ascii_lowercase();
+    let key = format!("login:{}:{}", ip, u);
+    if !rate_limit::allow(&key, 12, 300) { // 12 attempts / 5 min per ip+username
+        return Err(ApiError::TooManyRequests("Too many login attempts, try later"));
+    }
 
 
     let db = &st.db;
@@ -296,7 +299,7 @@ let ua = headers
     .get(axum::http::header::USER_AGENT)
     .and_then(|h| h.to_str().ok())
     .map(|s| s.to_string());
-let ip = rate_limit::extract_ip(&headers);
+let ip = rate_limit::extract_ip(&headers, Some(peer.ip()), st.trusted_proxies.as_slice());
 
 // access token session (best-effort)
 let token_hash = auth::sha256_hex(&token);
@@ -558,6 +561,7 @@ async fn verify_2fa(
 // ===========================
 async fn refresh(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let Some(authz) = headers
@@ -572,7 +576,8 @@ async fn refresh(
     };
 
     // rate limit refresh calls per ip
-    let ip = rate_limit::extract_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    let ip = rate_limit::extract_ip(&headers, Some(peer.ip()), st.trusted_proxies.as_slice())
+        .unwrap_or_else(|| "unknown".to_string());
     if !rate_limit::allow(&format!("refresh:{}", ip), 60, 300) {
         return Err(ApiError::TooManyRequests("Too many refresh requests"));
     }
@@ -665,7 +670,7 @@ async fn refresh(
         .get(axum::http::header::USER_AGENT)
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-    let ip = rate_limit::extract_ip(&headers);
+    let ip = rate_limit::extract_ip(&headers, Some(peer.ip()), st.trusted_proxies.as_slice());
 
     let expires_at_new = refresh_claims.exp.to_string();
 
