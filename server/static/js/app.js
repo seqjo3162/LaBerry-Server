@@ -209,7 +209,12 @@ function e2eeParseEnvelope(text) {
         const packed = raw.slice(E2EE_PREFIX.length, -E2EE_SUFFIX.length);
         const json = new TextDecoder().decode(e2eeB64uToBytes(packed));
         const env = JSON.parse(json);
-        return env && env.alg === 'LB-E2EE-v1' ? env : null;
+        if (!env) return null;
+        // Поддержка клиентского формата (alg: 'LB-E2EE-v1')
+        if (env.alg === 'LB-E2EE-v1') return { ...env, _format: 'client' };
+        // Поддержка серверного формата (v: 1)
+        if (env.v === 1) return { ...env, _format: 'server' };
+        return null;
     } catch (_) {
         return null;
     }
@@ -545,7 +550,21 @@ async function e2eeDecryptText(content) {
 
         if (!userKeyMap || typeof userKeyMap !== 'object') return '🔒 Сообщение зашифровано не для этого аккаунта или устройства.';
 
-        const wrapped = userKeyMap[String(myDeviceId)] || userKeyMap[myDeviceId] || userKeyMap['unknown'];
+        // Поиск wrapped ключа: сначала по myDeviceId, затем по всем ключам в userKeyMap
+        let wrapped = userKeyMap[String(myDeviceId)] || userKeyMap[myDeviceId] || userKeyMap['unknown'];
+        
+        // Если не нашли — ищем по всем device_id в keys[userId]
+        if (!wrapped && typeof userKeyMap === 'object') {
+            for (const devKey of Object.keys(userKeyMap)) {
+                if (devKey === 'iv' || devKey === 'ct') continue;
+                const val = userKeyMap[devKey];
+                if (val && typeof val === 'object' && val.iv && val.ct) {
+                    wrapped = val;
+                    break;
+                }
+            }
+        }
+        
         if (!wrapped) return '🔒 Сообщение зашифровано не для этого аккаунта или устройства.';
 
         try {
