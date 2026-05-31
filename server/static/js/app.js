@@ -308,7 +308,11 @@ async function e2eeEnsureIdentity(upload = false) {
         let privateJwk = saved?.privateJwk || null;
         let publicJwk = saved?.publicJwk || null;
 
-        if (!privateJwk || !publicJwk) {
+        let privateKeyB64 = saved?.privateKeyB64 || null;
+        let publicKeyB64 = saved?.publicKeyB64 || null;
+
+        if (!privateJwk || !publicJwk || !privateKeyB64) {
+            // 1. Старый формат (P-256) для Web Crypto API (резервный)
             const pair = await crypto.subtle.generateKey(
                 { name: 'ECDH', namedCurve: 'P-256' },
                 true,
@@ -316,7 +320,19 @@ async function e2eeEnsureIdentity(upload = false) {
             );
             privateJwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
             publicJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
-            try { localStorage.setItem(e2eeStorageKey(), JSON.stringify({ privateJwk, publicJwk })); } catch (_) {}
+
+            // 2. НОВЫЙ ФОРМАТ (X25519) для совместимости с Rust-сервером
+            if (window.nacl) {
+                const naclPair = nacl.box.keyPair();
+                privateKeyB64 = e2eeBytesToB64u(naclPair.secretKey);
+                publicKeyB64 = e2eeBytesToB64u(naclPair.publicKey);
+            }
+
+            try { 
+                localStorage.setItem(e2eeStorageKey(), JSON.stringify({ 
+                    privateJwk, publicJwk, privateKeyB64, publicKeyB64 
+                })); 
+            } catch (_) {}
         }
 
         const privateKey = await crypto.subtle.importKey(
@@ -327,7 +343,9 @@ async function e2eeEnsureIdentity(upload = false) {
             ['deriveKey']
         );
 
-        const publicText = JSON.stringify(publicJwk);
+        // Отправляем на сервер именно X25519 ключ, так как Rust ждет именно его
+        const publicText = publicKeyB64 || JSON.stringify(publicJwk);
+        
         if (upload && currentUser && currentUser.public_encryption_key !== publicText) {
             try {
                     // register per-device key instead of overwriting account-level key
