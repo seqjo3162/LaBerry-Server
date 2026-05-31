@@ -305,64 +305,44 @@ async function e2eeEnsureIdentity(upload = false) {
         let saved = null;
         try { saved = JSON.parse(localStorage.getItem(e2eeStorageKey()) || 'null'); } catch (_) { saved = null; }
 
-        let privateJwk = saved?.privateJwk || null;
-        let publicJwk = saved?.publicJwk || null;
+        let naclSecretKeyB64 = saved?.privateKeyB64;
+        let naclPublicKeyB64 = saved?.publicKeyB64;
 
-        let privateKeyB64 = saved?.privateKeyB64 || null;
-        let publicKeyB64 = saved?.publicKeyB64 || null;
+        // Если ключей нет, генерируем именно X25519 (через NaCl)
+        if (!naclSecretKeyB64 || !naclPublicKeyB64) {
+            const naclPair = nacl.box.keyPair();
+            naclSecretKeyB64 = e2eeBytesToB64u(naclPair.secretKey);
+            naclPublicKeyB64 = e2eeBytesToB64u(naclPair.publicKey);
 
-        if (!privateJwk || !publicJwk || !privateKeyB64) {
-            // 1. Старый формат (P-256) для Web Crypto API (резервный)
-            const pair = await crypto.subtle.generateKey(
-                { name: 'ECDH', namedCurve: 'P-256' },
-                true,
-                ['deriveKey']
-            );
-            privateJwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
-            publicJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
-
-            // 2. НОВЫЙ ФОРМАТ (X25519) для совместимости с Rust-сервером
-            if (window.nacl) {
-                const naclPair = nacl.box.keyPair();
-                privateKeyB64 = e2eeBytesToB64u(naclPair.secretKey);
-                publicKeyB64 = e2eeBytesToB64u(naclPair.publicKey);
-            }
-
-            try { 
-                localStorage.setItem(e2eeStorageKey(), JSON.stringify({ 
-                    privateJwk, publicJwk, privateKeyB64, publicKeyB64 
-                })); 
+            try {
+                localStorage.setItem(e2eeStorageKey(), JSON.stringify({
+                    privateKeyB64: naclSecretKeyB64,
+                    publicKeyB64: naclPublicKeyB64
+                }));
             } catch (_) {}
         }
 
-        const privateKey = await crypto.subtle.importKey(
-            'jwk',
-            privateJwk,
-            { name: 'ECDH', namedCurve: 'P-256' },
-            false,
-            ['deriveKey']
-        );
+        // Преобразуем B64 обратно в Uint8Array для использования в NaCl
+        const secretKey = e2eeB64uToBytes(naclSecretKeyB64);
+        const publicKey = e2eeB64uToBytes(naclPublicKeyB64);
 
-        // Отправляем на сервер именно X25519 ключ, так как Rust ждет именно его
-        const publicText = publicKeyB64 || JSON.stringify(publicJwk);
-        
-        if (upload && currentUser && currentUser.public_encryption_key !== publicText) {
+        // ВАЖНО: Регистрируем именно этот ключ на сервере
+        if (upload && currentUser) {
             try {
-                    // register per-device key instead of overwriting account-level key
-                    const deviceId = e2eeGetOrCreateDeviceId();
-                    await e2eeRegisterDeviceKey(deviceId, publicJwk, navigator.userAgent);
-                    // still update account object locally
-                    currentUser = { ...currentUser, ...(await api('/api/users/me') || {}), public_encryption_key: publicText };
+                const deviceId = e2eeGetOrCreateDeviceId();
+                // Отправляем именно публичный ключ X25519
+                await e2eeRegisterDeviceKey(deviceId, naclPublicKeyB64, navigator.userAgent);
+                currentUser = { ...currentUser, ...(await api('/api/users/me') || {}), public_encryption_key: naclPublicKeyB64 };
             } catch (e) {
-                console.warn('[E2EE] failed to publish public key', e);
+                console.error('[E2EE] Ошибка регистрации ключа:', e);
             }
         }
 
-        if (currentUser?.id) {
-            e2eePublicKeyCache.set(Number(currentUser.id), publicJwk);
-        }
-
-        return { privateKey, publicJwk, publicText };
+        return { 
+            secretKey, // Используй это для расшифровки через nacl.box.open
+            publicKey, 
+            publicText: naclPublicKeyB64 
+        };
     })();
 
     return e2eeIdentityPromise;
@@ -412,80 +392,58 @@ async function e2eeGetUserPublicKey(userId) {
     }
 }
 
-async function e2eeDeriveWrapKey(publicJwk, ephemeralPrivateKey = null) {
+async function e2eeDeriveWrapKey(publicJwk, ephemeralSecretKey = null) {
     if (!publicJwk) return null;
     
-    // Check if it's a base64 X25519 key
-    const isX25519 = typeof publicJwk === 'string' && publicJwk.length >= 43 && publicJwk.length <= 44 && /^[A-Za-z0-9_-]+$/.test(publicJwk);
-    
-    if (isX25519 && window.nacl) {
-        // X25519 key exchange using nacl
-        try {
-            // We need our X25519 private key
-            // For now, try to use the same storage as ECDH keys
-            const storageKey = e2eeStorageKey();
-            let saved = null;
-            try { saved = JSON.parse(localStorage.getItem(storageKey) || 'null'); } catch (_) { saved = null; }
-            const privateKeyB64 = saved?.privateKeyB64;
-            if (!privateKeyB64) {
+    try {
+        // Вытаскиваем X25519 Base64 строку (даже если прилетел старый объект)
+        let publicText = typeof publicJwk === 'object' ? (publicJwk.publicText || publicJwk.publicKeyB64) : publicJwk;
+        if (typeof publicText !== 'string' || publicText.length < 40) {
+            console.warn('[E2EE] Invalid public key format, expected base64 string');
+            return null;
+        }
+
+        // Если эфемерный ключ не передан, берем свой собственный X25519 из профиля
+        let privateKeyBytes = ephemeralSecretKey;
+        if (!privateKeyBytes) {
+            const identity = await e2eeEnsureIdentity(false);
+            if (!identity || !identity.secretKey) {
                 console.warn('[E2EE] No X25519 private key available');
                 return null;
             }
-            
-            // Perform X25519 Diffie-Hellman
-            const privateKeyBytes = e2eeB64uToBytes(privateKeyB64);
-            const publicKeyBytes = e2eeB64uToBytes(publicJwk);
-            if (privateKeyBytes.length !== 32 || publicKeyBytes.length !== 32) {
-                console.warn('[E2EE] Invalid X25519 key length');
-                return null;
-            }
-            
-            const sharedSecret = nacl.scalarMult(privateKeyBytes, publicKeyBytes);
-            if (!sharedSecret || sharedSecret.length !== 32) {
-                console.warn('[E2EE] X25519 scalarMult failed');
-                return null;
-            }
-            
-            // Derive AES-GCM key from shared secret using HKDF
-            const keyBytes = await e2eeHkdf(
-                new Uint8Array(32),
-                sharedSecret,
-                new TextEncoder().encode('laberry-wrap-key'),
-                32
-            );
-            if (!keyBytes || keyBytes.length !== 32) {
-                console.warn('[E2EE] HKDF failed for X25519');
-                return null;
-            }
-            
-            return crypto.subtle.importKey(
-                'raw', keyBytes,
-                { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
-            );
-        } catch (e) {
-            console.warn('[E2EE] X25519 derivation failed:', e);
+            privateKeyBytes = identity.secretKey;
+        }
+
+        const publicKeyBytes = e2eeB64uToBytes(publicText);
+
+        if (privateKeyBytes.length !== 32 || publicKeyBytes.length !== 32) {
+            console.warn('[E2EE] Invalid X25519 key length');
             return null;
         }
-    }
-    
-    // Standard ECDH P-256
-    const identity = await e2eeEnsureIdentity(false);
-    if (!identity) return null;
-    const privateKey = ephemeralPrivateKey || identity.privateKey;
-    
-    try {
-        const publicKey = await e2eeImportPublicKey(publicJwk);
-        if (!publicKey) return null;
-        
-        return crypto.subtle.deriveKey(
-            { name: 'ECDH', public: publicKey },
-            privateKey,
-            { name: 'AES-GCM', length: 256 },
-            false,
-            ['encrypt', 'decrypt']
+
+        // Вычисляем общий секрет X25519
+        const sharedSecret = nacl.scalarMult(privateKeyBytes, publicKeyBytes);
+        if (!sharedSecret || sharedSecret.length !== 32) {
+            console.warn('[E2EE] X25519 scalarMult failed');
+            return null;
+        }
+
+        // Пропускаем через HKDF для получения ключа AES-GCM (совместимо с Rust)
+        const keyBytes = await e2eeHkdf(
+            new Uint8Array(32),
+            sharedSecret,
+            new TextEncoder().encode('laberry-wrap-key'),
+            32
+        );
+
+        if (!keyBytes || keyBytes.length !== 32) return null;
+
+        return await crypto.subtle.importKey(
+            'raw', keyBytes,
+            { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
         );
     } catch (e) {
-        console.warn('[E2EE] ECDH derivation failed:', e);
+        console.warn('[E2EE] X25519 derivation failed:', e);
         return null;
     }
 }
@@ -563,13 +521,10 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     );
     const messageKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', messageKey));
 
-    // ephemeral sender key for this message
-    const ephemeral = await crypto.subtle.generateKey(
-        { name: 'ECDH', namedCurve: 'P-256' },
-        true,
-        ['deriveKey']
-    );
-    const ephemeralPubJwk = await crypto.subtle.exportKey('jwk', ephemeral.publicKey);
+    // Эфемерный ключ X25519 для этого сообщения
+    const ephemeralPair = nacl.box.keyPair();
+    const ephemeralPubJwk = e2eeBytesToB64u(ephemeralPair.publicKey);
+    const ephemeralSecretKey = ephemeralPair.secretKey;
 
     const myDeviceId = e2eeGetOrCreateDeviceId();
     const myPublicJwk = identity.publicJwk;
@@ -618,7 +573,7 @@ async function e2eeEncryptForCurrentChat(plaintext) {
             }
             try {
                 // Use unified derivation function
-                const wrapKey = await e2eeDeriveWrapKey(jwk, ephemeral.privateKey);
+                const wrapKey = await e2eeDeriveWrapKey(jwk, ephemeralSecretKey);
                 if (!wrapKey) continue;
                 const keyIv = crypto.getRandomValues(new Uint8Array(12));
                 const keyCt = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: keyIv }, wrapKey, messageKeyRaw));
@@ -641,12 +596,48 @@ async function e2eeEncryptForCurrentChat(plaintext) {
         console.log('[E2EE] Encryption devices for self:', Object.keys(keys[String(currentUser?.id)] || {}));
     }
 
+    console.log('[E2EE] BEFORE MESSAGE ENCRYPT');
+
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = new Uint8Array(await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv },
-        messageKey,
-        new TextEncoder().encode(String(plaintext))
-    ));
+
+    let ct;
+
+    try {
+        ct = new Uint8Array(
+            await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv },
+                messageKey,
+                new TextEncoder().encode(String(plaintext))
+            )
+        );
+
+        console.log('[E2EE] MESSAGE ENCRYPT OK');
+    } catch (e) {
+        console.error('[E2EE] MESSAGE ENCRYPT FAILED', e);
+        throw e;
+    }
+
+    console.log(
+        '[E2EE DEBUG]',
+        {
+            me: currentUser.id,
+            myDeviceId,
+            selfKeys: keys[String(currentUser.id)],
+            allKeys: keys
+        }
+    );
+
+    console.log(
+        '[E2EE] keys generated:',
+        JSON.stringify(keys, null, 2)
+    );
+
+    console.log(
+        '[E2EE] my uid:',
+        currentUser?.id,
+        'device:',
+        myDeviceId
+    );
 
     const envelope = {
         alg: 'LB-E2EE-v1',
@@ -740,14 +731,14 @@ async function e2eeDecryptText(content) {
                 if (env.ephemeral) {
                     const senderEphemeral = e2eeParsePublicKey(env.ephemeral) || env.ephemeral;
                     if (senderEphemeral) {
-                        wrapKey = await e2eeDeriveWrapKey(senderEphemeral, identity.privateKey);
+                        wrapKey = await e2eeDeriveWrapKey(senderEphemeral, identity.secretKey);
                     }
                 }
 
                 // fallback to sender static key (legacy)
                 if (!wrapKey) {
                     const senderKey = e2eeParsePublicKey(env.sender_key) || await e2eeGetUserPublicKey(env.sender);
-                    wrapKey = await e2eeDeriveWrapKey(senderKey, identity.privateKey);
+                    wrapKey = await e2eeDeriveWrapKey(senderKey, identity.secretKey);
                 }
                 
                 // Если ключ успешно создан — сохраняем в кэш

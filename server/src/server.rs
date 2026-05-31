@@ -30,7 +30,7 @@ use dashmap::DashMap;
 use chrono;
 use tracing;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashSet},
     env,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
@@ -67,11 +67,11 @@ pub struct AppState {
     pub db: SqlitePool,
     pub hub: Arc<Hub>,
     pub connected_ws: Arc<AtomicUsize>,
-    pub friends: HashMap<UserId, HashSet<UserId>>,
-    pub voice_states: HashMap<UserId, VoiceChannelId>,
-    pub admin_sessions: Arc<DashMap<String, AdminSession>>,
+    pub friends: DashMap<UserId, HashSet<UserId>>,
+    pub voice_states: DashMap<UserId, VoiceChannelId>,
+    pub admin_sessions: DashMap<String, AdminSession>,
     pub geo_guard: GeoGuardState,
-    pub trusted_proxies: Arc<Vec<IpAddr>>,
+    pub trusted_proxies: Vec<IpAddr>,
 }
 
 // ======================================================
@@ -132,16 +132,16 @@ pub async fn run_server(
         // std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 1)),
     ]);
 
-    let state = AppState {
+    let state = Arc::new(AppState {
         db,
         hub: Arc::new(hub),
         connected_ws: Arc::new(AtomicUsize::new(0)),
-        friends: HashMap::new(),
-        voice_states: HashMap::new(),
-        admin_sessions: Arc::new(DashMap::new()),
+        friends: DashMap::new(),
+        voice_states: DashMap::new(),
+        admin_sessions: DashMap::new(),
         geo_guard,
-        trusted_proxies,   // <-- добавить
-    };
+        trusted_proxies: trusted_proxies.as_ref().clone(),
+    });
 
     // One shutdown signal for both servers.
     let shutdown = Arc::new(Notify::new());
@@ -247,32 +247,31 @@ pub async fn run_server(
 
     let shutdown_main = shutdown.clone();
     let mut main_handle = if has_tls {
-        // HTTPS mode
         let tls_config = crate::tls::load_tls_config(
             &tls_cert_path.expect("has_tls ensures LB_TLS_CERT_PATH is set"),
             &tls_key_path.expect("has_tls ensures LB_TLS_KEY_PATH is set"),
         )?;
-        
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
-        
+        let svc = app.into_service();
+
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
-                    // 1. Убираем подчеркивание, чтобы использовать remote_addr
-                    Ok((socket, remote_addr)) => { 
+                    Ok((socket, remote_addr)) => {
                         let tls_acceptor = tls_acceptor.clone();
-                        let app_clone = app.clone();
-
+                        let svc = svc.clone();
                         tokio::spawn(async move {
                             match tls_acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
                                     let io = hyper_util::rt::TokioIo::new(tls_stream);
-                                    
+                                    let svc = svc.clone();
                                     let svc = service_fn(move |mut req| {
                                         req.extensions_mut().insert(axum::extract::connect_info::ConnectInfo(remote_addr));
-                                        app_clone.clone().call(req)
+                                        {
+                                            let mut svc = svc.clone();
+                                            svc.call(req.map(axum::body::Body::from))
+                                        }
                                     });
-
                                     if let Err(err) = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
                                         .serve_connection(io, svc)
                                         .await
@@ -292,20 +291,43 @@ pub async fn run_server(
                     }
                 }
             }
-
-            // Should never reach here under normal operation
             Err::<(), anyhow::Error>(anyhow::anyhow!("TLS server stopped"))
         })
     } else {
-        // HTTP mode
+        let svc = app.into_service();
         tokio::spawn(async move {
-            // Добавляем .into_make_service_with_connect_info::<SocketAddr>()
-            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-                .with_graceful_shutdown(async move {
-                    shutdown_main.notified().await;
-                })
-                .await
-                .map_err(anyhow::Error::from)
+            loop {
+                match listener.accept().await {
+                    Ok((socket, remote_addr)) => {
+                        let svc = svc.clone();
+                        tokio::spawn(async move {
+                            let io = hyper_util::rt::TokioIo::new(socket);
+                            let svc = svc.clone();
+                            let svc = service_fn(move |mut req| {
+                                req.extensions_mut()
+                                    .insert(axum::extract::connect_info::ConnectInfo(remote_addr));
+                                {
+                                    let mut svc = svc.clone();
+                                    svc.call(req.map(axum::body::Body::from))
+                                }
+                            });
+                            if let Err(err) = hyper_util::server::conn::auto::Builder::new(
+                                hyper_util::rt::TokioExecutor::new(),
+                            )
+                            .serve_connection(io, svc)
+                            .await
+                            {
+                                tracing::error!("[SERVER] HTTP connection error: {}", err);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("[SERVER] Accept error: {}", e);
+                        break;
+                    }
+                }
+            }
+            Err::<(), anyhow::Error>(anyhow::anyhow!("HTTP server stopped"))
         })
     };
 
@@ -325,7 +347,6 @@ pub async fn run_server(
 
     if admin_enabled {
         let admin_addr = admin_bind_addr()?;
-
         tracing::info!("[ADMIN] Building admin router...");
         let admin_app = build_admin_router(state);
         tracing::info!("[ADMIN] Router built ✅");
@@ -335,13 +356,41 @@ pub async fn run_server(
         tracing::info!("[ADMIN] ✅ Admin bound to {}", admin_addr);
 
         let shutdown_admin = shutdown.clone();
+
+        let svc = admin_app.into_service();
         admin_handle = Some(tokio::spawn(async move {
-            axum::serve(admin_listener, admin_app)
-                .with_graceful_shutdown(async move {
-                    shutdown_admin.notified().await;
-                })
-                .await
-                .map_err(anyhow::Error::from)
+            loop {
+                match admin_listener.accept().await {
+                    Ok((socket, remote_addr)) => {
+                        let svc = svc.clone();
+                        tokio::spawn(async move {
+                            let io = hyper_util::rt::TokioIo::new(socket);
+                            let svc = svc.clone();
+                            let svc = service_fn(move |mut req| {
+                                req.extensions_mut()
+                                    .insert(axum::extract::connect_info::ConnectInfo(remote_addr));
+                                {
+                                    let mut svc = svc.clone();
+                                    svc.call(req.map(axum::body::Body::from))
+                                }
+                            });
+                            if let Err(err) = hyper_util::server::conn::auto::Builder::new(
+                                hyper_util::rt::TokioExecutor::new(),
+                            )
+                            .serve_connection(io, svc)
+                            .await
+                            {
+                                tracing::error!("[ADMIN] Connection error: {}", err);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("[ADMIN] Accept error: {}", e);
+                        break;
+                    }
+                }
+            }
+            Err::<(), anyhow::Error>(anyhow::anyhow!("Admin server stopped"))
         }));
     }
 
@@ -370,7 +419,8 @@ pub async fn run_server(
 // ======================================================
 // 🧭 Router builder
 // ======================================================
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    let st = (*state).clone();
     tracing::info!("[ROUTER] Building routes...");
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -380,7 +430,9 @@ pub fn build_router(state: AppState) -> Router {
 
     tracing::info!("[ROUTER] Static dir: {:?}", static_dir);
 
+    let state_for_middleware = state.clone();
     let router = Router::new()
+        // ⚠️ Убрано .with_state(state.clone()) – состояние будет передаваться в каждый вложенный роутер отдельно
         .route("/", get(crate::routes::pages::index))
         .route("/login", get(crate::routes::pages::login))
         .route("/app", get(crate::routes::pages::app))
@@ -394,110 +446,106 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ws/health", get(ws_health))
         .route("/verify", get(crate::routes::auth::verify_token))
         .route("/api/system/status", get(system_status))
-        .nest("/api/auth", crate::routes::auth::router())
-        .nest("/api/users", crate::routes::users::router())
-        .nest("/api/friends", crate::routes::friends::router())
-        .nest("/api/servers", crate::routes::servers::router())
-        .nest("/api/chats", crate::routes::chats::router())
-        .nest("/api/dms", crate::routes::dms::router())
-        .nest("/api/presence", crate::routes::presence::router())
-        .nest("/api/sessions", crate::routes::sessions::router())
-        .nest("/api/messages", crate::routes::messages::global_router())
-        .nest("/api/files", crate::routes::files::router())
-        .nest("/api/gifs", crate::routes::gifs::router())
-        .nest("/api/downloads", crate::routes::downloads::router())
-        .nest("/api/profile-files", crate::routes::profile_files::router())
-        .nest("/api/embeds", crate::routes::embeds::router())
-        .nest("/api/rtc", crate::routes::rtc::router())
-        .nest("/api/2fa", crate::routes::twofa::router())
+        .nest("/api/auth", crate::routes::auth::router().with_state(st.clone()))
+        .nest("/api/users", crate::routes::users::router().with_state(st.clone()))
+        .nest("/api/friends", crate::routes::friends::router().with_state(st.clone()))
+        .nest("/api/servers", crate::routes::servers::router().with_state(st.clone()))
+        .nest("/api/chats", crate::routes::chats::router().with_state(st.clone()))
+        .nest("/api/dms", crate::routes::dms::router().with_state(st.clone()))
+        .nest("/api/presence", crate::routes::presence::router().with_state(st.clone()))
+        .nest("/api/sessions", crate::routes::sessions::router().with_state(st.clone()))
+        .nest("/api/messages", crate::routes::messages::global_router().with_state(st.clone()))
+        .nest("/api/files", crate::routes::files::router().with_state(st.clone()))
+        .nest("/api/gifs", crate::routes::gifs::router().with_state(st.clone()))
+        .nest("/api/downloads", crate::routes::downloads::router().with_state(st.clone()))
+        .nest("/api/profile-files", crate::routes::profile_files::router().with_state(st.clone()))
+        .nest("/api/embeds", crate::routes::embeds::router().with_state(st.clone()))
+        .nest("/api/rtc", crate::routes::rtc::router().with_state(st.clone()))
+        .nest("/api/2fa", crate::routes::twofa::router().with_state(st.clone()))
+        // files – уже внутри было .with_state, оставим как есть
         .nest(
             "/files",
             Router::new()
                 .route("/:file_id/raw", get(crate::routes::files::get_file_raw))
                 .route("/:file_id", get(crate::routes::files::get_file))
-                .with_state(state.clone()),
+                .with_state(st.clone()),
         )
-        // 👇 Extension ДО nest_service, чтобы ConnectInfo работал
-        .layer(axum::extract::Extension(state.clone()))
+        // admin – используем build_admin_router, который теперь возвращает Router<Arc<AppState>>
+        .nest("/admin", build_admin_router(st.clone()))
         .nest_service(
             "/static",
             ServeDir::new(static_dir.clone())
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
         )
+        // middlewares with state (they expect Arc<AppState>)
         .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            state_for_middleware.clone(),
             crate::middleware::host_guard::host_guard,
         ))
         .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            state_for_middleware,
             crate::middleware::geo_guard::geo_guard,
         ))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
 
-// Basic security headers (can be customized via env)
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("x-content-type-options"),
-    HeaderValue::from_static("nosniff"),
-))
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("x-frame-options"),
-    HeaderValue::from_static("DENY"),
-))
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("x-xss-protection"),
-    HeaderValue::from_static("1; mode=block"),
-))
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("referrer-policy"),
-    HeaderValue::from_static("strict-origin-when-cross-origin"),
-))
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("permissions-policy"),
-    HeaderValue::from_static("geolocation=(), microphone=(self), camera=(), payment=()"),
-))
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
-    HeaderValue::from_static("same-origin"),
-))
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("cross-origin-resource-policy"),
-    HeaderValue::from_static("same-origin"),
-))
-// HSTS for HTTPS deployment (1 year)
-.layer({
-    // Conditionally add HSTS only when TLS is configured to avoid issuing HSTS over plain HTTP
-    let tls_cert = env::var("LB_TLS_CERT_PATH").ok();
-    let tls_key = env::var("LB_TLS_KEY_PATH").ok();
-    if tls_cert.is_some() && tls_key.is_some() {
-        SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("strict-transport-security"),
-            HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
-        )
-    } else {
-        // No-op layer when TLS not configured
-        SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("x-no-op"),
-            HeaderValue::from_static("1"),
-        )
-    }
-})
-// Cache control for security
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("cache-control"),
-    HeaderValue::from_static("no-cache, no-store, must-revalidate, private"),
-))
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("pragma"),
-    HeaderValue::from_static("no-cache"),
-))
-.layer(SetResponseHeaderLayer::if_not_present(
-    axum::http::header::HeaderName::from_static("content-security-policy"),
-    HeaderValue::from_str(
-        &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; connect-src 'self' wss: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; frame-src 'self' https://www.youtube.com https://player.vimeo.com https://rutube.ru; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
-    ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
-))
-
-        // 🔴 SECURITY FIX: CORS Configuration with Whitelist (not wildcard)
+        // Security headers (без изменений)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-xss-protection"),
+            HeaderValue::from_static("1; mode=block"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("geolocation=(), microphone=(self), camera=(), payment=()"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer({
+            let tls_cert = env::var("LB_TLS_CERT_PATH").ok();
+            let tls_key = env::var("LB_TLS_KEY_PATH").ok();
+            if tls_cert.is_some() && tls_key.is_some() {
+                SetResponseHeaderLayer::if_not_present(
+                    axum::http::header::HeaderName::from_static("strict-transport-security"),
+                    HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+                )
+            } else {
+                SetResponseHeaderLayer::if_not_present(
+                    axum::http::header::HeaderName::from_static("x-no-op"),
+                    HeaderValue::from_static("1"),
+                )
+            }
+        })
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("cache-control"),
+            HeaderValue::from_static("no-cache, no-store, must-revalidate, private"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("pragma"),
+            HeaderValue::from_static("no-cache"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_str(
+                &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; connect-src 'self' wss: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; frame-src 'self' https://www.youtube.com https://player.vimeo.com https://rutube.ru; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
+            ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
+        ))
         .layer({
             let allowed = env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
             let mut cors = CorsLayer::new()
@@ -509,8 +557,6 @@ pub fn build_router(state: AppState) -> Router {
                 let a = allowed.trim();
                 if a == "*" {
                     tracing::warn!("⚠️  WARNING: CORS_ALLOWED_ORIGINS='*' is not recommended for production!");
-                    tracing::warn!("⚠️  Set CORS_ALLOWED_ORIGINS to specific origins (comma-separated)");
-                    tracing::warn!("⚠️  Example: https://example.com,https://app.example.com");
                     cors = cors.allow_origin(tower_http::cors::Any);
                 } else {
                     let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
@@ -523,19 +569,12 @@ pub fn build_router(state: AppState) -> Router {
                     }
                     if !origins.is_empty() {
                         cors = cors.allow_origin(origins);
-                    } else {
-                        tracing::warn!("⚠️  WARNING: No valid CORS origins configured, defaulting to same-origin only");
                     }
                 }
-            } else {
-                tracing::info!("ℹ️  CORS_ALLOWED_ORIGINS not set, defaulting to same-origin policy");
             }
             cors
         })
-
-        // 🔴 SECURITY FIX: CSRF Protection middleware
         .layer(axum::middleware::from_fn(crate::middleware::csrf_guard::csrf_guard))
-
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().include_headers(false))
@@ -547,11 +586,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .layer(CatchPanicLayer::new());
 
-    // 👇 Только теперь передаём state во все маршруты
-    let router = router.with_state(state);
-
     tracing::info!("[ROUTER] ✅ Routes ready");
-    router
 }
 
 // ======================================================
@@ -585,7 +620,7 @@ fn admin_bind_addr() -> anyhow::Result<SocketAddr> {
     Ok(SocketAddr::from((ip, port)))
 }
 
-pub fn build_admin_router(state: AppState) -> Router {
+pub fn build_admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     use axum::response::Redirect;
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -594,18 +629,16 @@ pub fn build_admin_router(state: AppState) -> Router {
         .join("static");
 
     Router::new()
-        // convenience: open http://127.0.0.1:<LB_ADMIN_PORT>/ and land in /admin/
         .route("/", get(|| async { Redirect::to("/admin/") }))
         .route("/admin", get(|| async { Redirect::to("/admin/") }))
-        .nest("/admin/", crate::routes::admin_panel::router())
+        // Преобразуем Router<AppState> → Router<Arc<AppState>>
+        .nest("/admin/", crate::routes::admin_panel::router().with_state((*state).clone()))
         .nest_service(
             "/static",
             ServeDir::new(static_dir.clone())
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
         )
-        .with_state(state)
         .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
-        // Security headers
         .layer(SetResponseHeaderLayer::if_not_present(
             axum::http::header::HeaderName::from_static("x-content-type-options"),
             HeaderValue::from_static("nosniff"),
@@ -654,24 +687,30 @@ pub fn build_admin_router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    fn test_state() -> AppState {
-        AppState {
-            db: SqlitePoolOptions::new()
-                .connect_lazy("sqlite::memory:")
-                .expect("in-memory sqlite pool"),
-            hub: Arc::new(Hub::new()),
+    fn test_state() -> Arc<AppState> {
+        let db = sqlx::SqlitePoolOptions::new()  // полный путь
+            .max_connections(1)
+            .connect_lazy("sqlite::memory:")
+            .expect("test db");
+        let hub = Hub::new(); // или мок
+        let geo_guard = GeoGuardState::from_custom_file("assets/custom_blocked_cidr")
+            .unwrap_or_else(|_| GeoGuardState::default()); // если добавишь Default
+
+        Arc::new(AppState {
+            db,
+            hub: Arc::new(hub),
             connected_ws: Arc::new(AtomicUsize::new(0)),
-            friends: HashMap::new(),
-            voice_states: HashMap::new(),
-            admin_sessions: Arc::new(DashMap::new()),
-            geo_guard: GeoGuardState {
-                blocked_networks: Arc::new(vec![]),
-                allowed_domains: Arc::new(vec!["laberry.ru".to_string()]),
-            },
-            trusted_proxies: Arc::new(vec![]), 
-        }
+            friends: DashMap::new(),
+            voice_states: DashMap::new(),
+            admin_sessions: DashMap::new(),
+            geo_guard,
+            trusted_proxies: vec![
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ],
+        })
     }
 
     #[tokio::test]
@@ -838,7 +877,7 @@ async fn ws_main(
 
     let db = st.db.clone();
     let hub = Arc::clone(&st.hub);
-    let connected = st.connected_ws.clone();
+    let connected = Arc::clone(&st.connected_ws);
 
     ws.on_upgrade(move |mut socket| async move {
         let prev = connected.fetch_add(1, Ordering::Relaxed) + 1;

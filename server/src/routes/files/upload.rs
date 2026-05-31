@@ -1182,8 +1182,8 @@ pub(crate) async fn upload_file(
         }
     }
 
-    let path = final_path;
-    let stored_filename = final_filename;
+    let path = final_path.to_path_buf();
+    let stored_filename = final_filename.to_owned();
 
     let created_at = auth::now_iso();
     let expires_at = match temporary_file_expires_at(&st).await {

@@ -348,7 +348,7 @@ async fn delete_message(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    for (storage_path, filename) in file_refs {
+    for (storage_path, filename) in &file_refs {
         crate::routes::files::cleanup_file_artifacts_if_unreferenced(&st, &storage_path, &filename).await;
     }
 

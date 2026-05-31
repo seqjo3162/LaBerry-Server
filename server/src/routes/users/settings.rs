@@ -794,7 +794,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     .ok()
     .flatten();
 
-    let Some(pending_email) = pending.and_then(|x| sanitize_email(&x)) else {
+    let Some(pending_email) = pending.as_deref().and_then(sanitize_email) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"detail":"No pending email"})),
