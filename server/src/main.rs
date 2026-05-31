@@ -26,9 +26,84 @@ fn install_panic_logger() {
     }));
 }
 
+fn load_env_file() {
+    // Load .env from workspace root (cargo run) or current dir.
+    if dotenvy::dotenv().is_err() {
+        let _ = dotenvy::from_filename("../.env");
+    }
+
+    repair_admin_secrets_from_dotenv_file();
+
+    // Legacy aliases from .env.example / older configs.
+    if std::env::var("LB_HOST").is_err() {
+        if let Ok(v) = std::env::var("HOST") {
+            std::env::set_var("LB_HOST", v);
+        }
+    }
+    if std::env::var("LB_PORT").is_err() {
+        if let Ok(v) = std::env::var("PORT") {
+            std::env::set_var("LB_PORT", v);
+        }
+    }
+    if std::env::var("LB_DB_PATH").is_err() {
+        if let Ok(v) = std::env::var("DB_PATH") {
+            std::env::set_var("LB_DB_PATH", v);
+        }
+    }
+}
+
+/// dotenvy expands `$` in values; Argon2 hashes break. Re-read the raw line when needed.
+fn repair_admin_secrets_from_dotenv_file() {
+    let hash_ok = std::env::var("LB_ADMIN_PASSWORD_HASH")
+        .ok()
+        .map(|v| admin_secret_looks_valid(&v))
+        .unwrap_or(false);
+    if hash_ok {
+        return;
+    }
+
+    for path in [".env", "../.env"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Some(raw) = read_raw_dotenv_value(&text, "LB_ADMIN_PASSWORD_HASH") {
+                if admin_secret_looks_valid(&raw) {
+                    std::env::set_var("LB_ADMIN_PASSWORD_HASH", raw);
+                    tracing::info!("[ADMIN] Repaired LB_ADMIN_PASSWORD_HASH from {path}");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn admin_secret_looks_valid(value: &str) -> bool {
+    let v = value.trim().trim_matches('"').trim_matches('\'');
+    v.starts_with("$argon2")
+}
+
+fn read_raw_dotenv_value(content: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || !line.starts_with(&prefix) {
+            continue;
+        }
+        let mut v = line[prefix.len()..].trim().to_string();
+        if v.len() >= 2 {
+            if (v.starts_with('\'') && v.ends_with('\'')) || (v.starts_with('"') && v.ends_with('"')) {
+                v = v[1..v.len() - 1].to_string();
+            }
+        }
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     install_panic_logger();
+    load_env_file();
 
     let (tx, rx) = oneshot::channel::<()>();
 

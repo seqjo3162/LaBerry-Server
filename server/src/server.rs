@@ -6,6 +6,7 @@ use crate::{
     ws::{Hub, UserId, VoiceChannelId},
     middleware::geo_guard::GeoGuardState,
 };
+use axum::extract::connect_info::ConnectInfo;
 
 use axum::{
     extract::{
@@ -15,13 +16,10 @@ use axum::{
     },
     http::{header, HeaderMap, StatusCode, Method, HeaderValue},
     response::IntoResponse,
-    routing::get,
+    routing::{any, get},
     Json,
     Router,
 };
-use hyper::service::service_fn;
-use tower::Service;
-
 
 use serde::Deserialize;
 use serde_json::json;
@@ -52,6 +50,8 @@ use tower_http::{
     set_header::SetResponseHeaderLayer,
     LatencyUnit,
 };
+use hyper::service::service_fn;
+use tower::Service;
 
 // ======================================================
 // 🧩 Application State
@@ -132,7 +132,7 @@ pub async fn run_server(
         // std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 1)),
     ]);
 
-    let state = Arc::new(AppState {
+    let state = AppState {
         db,
         hub: Arc::new(hub),
         connected_ws: Arc::new(AtomicUsize::new(0)),
@@ -141,7 +141,7 @@ pub async fn run_server(
         admin_sessions: DashMap::new(),
         geo_guard,
         trusted_proxies: trusted_proxies.as_ref().clone(),
-    });
+    };
 
     // One shutdown signal for both servers.
     let shutdown = Arc::new(Notify::new());
@@ -225,111 +225,74 @@ pub async fn run_server(
     // ------------------------------
     // Main (public) server
     // ------------------------------
+    let tls_cert_path = env::var("LB_TLS_CERT_PATH").ok();
+    let tls_key_path = env::var("LB_TLS_KEY_PATH").ok();
+    let has_tls = tls_cert_path.is_some() && tls_key_path.is_some();
+
+    if has_tls {
+        tracing::info!("[SERVER] 🔐 TLS/HTTPS enabled");
+    } else {
+        tracing::info!("[SERVER] ⚠️  TLS/HTTPS disabled");
+    }
+
     tracing::info!("[SERVER] Building main router...");
     let app = build_router(state.clone());
     tracing::info!("[SERVER] Main router built ✅");
 
-    // Check for TLS configuration
-    let tls_cert_path = env::var("LB_TLS_CERT_PATH").ok();
-    let tls_key_path = env::var("LB_TLS_KEY_PATH").ok();
-    
-    let has_tls = tls_cert_path.is_some() && tls_key_path.is_some();
-    
-    if has_tls {
-        tracing::info!("[SERVER] 🔐 TLS/HTTPS enabled");
-    } else {
-        tracing::info!("[SERVER] ⚠️  TLS/HTTPS disabled - for production with E2EE, use HTTPS!");
-    }
-
-    tracing::info!("[SERVER] Binding main TCP listener...");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("[SERVER] ✅ Main bound to {}", addr);
+    let _shutdown_main = shutdown.clone();
 
-    let shutdown_main = shutdown.clone();
-    let mut main_handle = if has_tls {
-        let tls_config = crate::tls::load_tls_config(
-            &tls_cert_path.expect("has_tls ensures LB_TLS_CERT_PATH is set"),
-            &tls_key_path.expect("has_tls ensures LB_TLS_KEY_PATH is set"),
-        )?;
-        let tls_acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
-        let svc = app.into_service();
+    let svc = app.into_service();
+    let mut main_handle = tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((socket, remote_addr)) => {
+                    let svc = svc.clone();
+                    tokio::spawn(async move {
+                        let io = hyper_util::rt::TokioIo::new(socket);
 
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((socket, remote_addr)) => {
-                        let tls_acceptor = tls_acceptor.clone();
-                        let svc = svc.clone();
-                        tokio::spawn(async move {
-                            match tls_acceptor.accept(socket).await {
-                                Ok(tls_stream) => {
-                                    let io = hyper_util::rt::TokioIo::new(tls_stream);
-                                    let svc = svc.clone();
-                                    let svc = service_fn(move |mut req| {
-                                        req.extensions_mut().insert(axum::extract::connect_info::ConnectInfo(remote_addr));
-                                        {
-                                            let mut svc = svc.clone();
-                                            svc.call(req.map(axum::body::Body::from))
-                                        }
-                                    });
-                                    if let Err(err) = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                                        .serve_connection(io, svc)
-                                        .await
-                                    {
-                                        tracing::error!("[SERVER] TLS connection error: {}", err);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("[SERVER] TLS accept error: {}", e);
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        tracing::error!("[SERVER] Accept error: {}", e);
-                        break;
-                    }
-                }
-            }
-            Err::<(), anyhow::Error>(anyhow::anyhow!("TLS server stopped"))
-        })
-    } else {
-        let svc = app.into_service();
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((socket, remote_addr)) => {
-                        let svc = svc.clone();
-                        tokio::spawn(async move {
-                            let io = hyper_util::rt::TokioIo::new(socket);
-                            let svc = svc.clone();
-                            let svc = service_fn(move |mut req| {
+                        let service = service_fn(move |mut req| {
+                            let mut svc = svc.clone();
+                            async move {
                                 req.extensions_mut()
-                                    .insert(axum::extract::connect_info::ConnectInfo(remote_addr));
-                                {
-                                    let mut svc = svc.clone();
-                                    svc.call(req.map(axum::body::Body::from))
-                                }
-                            });
-                            if let Err(err) = hyper_util::server::conn::auto::Builder::new(
-                                hyper_util::rt::TokioExecutor::new(),
-                            )
-                            .serve_connection(io, svc)
-                            .await
-                            {
-                                tracing::error!("[SERVER] HTTP connection error: {}", err);
+                                    .insert(ConnectInfo(remote_addr));
+
+                                let req = req.map(axum::body::Body::new);
+
+                                let resp = match svc.call(req).await {
+                                    Ok(resp) => resp,
+                                    Err(err) => {
+                                        tracing::error!("[SERVER] Service error: {}", err);
+                                        axum::response::Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .body(axum::body::Body::from("internal server error"))
+                                            .unwrap()
+                                    }
+                                };
+
+                                Ok::<_, std::convert::Infallible>(resp)
                             }
                         });
-                    }
-                    Err(e) => {
-                        tracing::error!("[SERVER] Accept error: {}", e);
-                        break;
-                    }
+
+                        if let Err(err) = hyper_util::server::conn::auto::Builder::new(
+                            hyper_util::rt::TokioExecutor::new(),
+                        )
+                        .serve_connection(io, service)
+                        .await
+                        {
+                            tracing::error!("[SERVER] Connection error: {}", err);
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("[SERVER] Accept error: {}", e);
+                    break;
                 }
             }
-            Err::<(), anyhow::Error>(anyhow::anyhow!("HTTP server stopped"))
-        })
-    };
+        }
+
+        Err::<(), anyhow::Error>(anyhow::anyhow!("HTTP server stopped"))
+    });
 
     // ------------------------------
     // Admin server (local-only)
@@ -337,47 +300,59 @@ pub async fn run_server(
     let admin_enabled = env_bool("LB_ENABLE_ADMIN_PANEL", false)
         || std::env::var("LB_ADMIN_PASSWORD").ok().is_some()
         || std::env::var("LB_ADMIN_PASSWORD_HASH").ok().is_some();
-    tracing::info!("[ADMIN] env LB_ENABLE_ADMIN_PANEL={:?} LB_ADMIN_HOST={:?} LB_ADMIN_PORT={:?} -> enabled={}",
-        std::env::var("LB_ENABLE_ADMIN_PANEL").ok(),
-        std::env::var("LB_ADMIN_HOST").ok(),
-        std::env::var("LB_ADMIN_PORT").ok(),
-        admin_enabled
-    );
+
     let mut admin_handle = None;
 
     if admin_enabled {
         let admin_addr = admin_bind_addr()?;
+        let pwd_ok = crate::routes::admin_panel::admin_password_is_configured();
+        tracing::info!(
+            "[ADMIN] Enabled (password configured: {pwd_ok}). Main-app gateway: /admin/* -> admin port"
+        );
         tracing::info!("[ADMIN] Building admin router...");
-        let admin_app = build_admin_router(state);
-        tracing::info!("[ADMIN] Router built ✅");
-
-        tracing::info!("[ADMIN] Binding admin TCP listener...");
+        let admin_app = build_admin_router(state.clone()).with_state(state.clone());
         let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
-        tracing::info!("[ADMIN] ✅ Admin bound to {}", admin_addr);
-
-        let shutdown_admin = shutdown.clone();
-
+        tracing::info!(
+            "[ADMIN] Listening on {} (login: {}/admin/login)",
+            admin_addr,
+            crate::routes::pages::admin_panel_base_url()
+        );
         let svc = admin_app.into_service();
-        admin_handle = Some(tokio::spawn(async move {
+        let ah = tokio::spawn(async move {
             loop {
                 match admin_listener.accept().await {
                     Ok((socket, remote_addr)) => {
                         let svc = svc.clone();
                         tokio::spawn(async move {
                             let io = hyper_util::rt::TokioIo::new(socket);
-                            let svc = svc.clone();
-                            let svc = service_fn(move |mut req| {
-                                req.extensions_mut()
-                                    .insert(axum::extract::connect_info::ConnectInfo(remote_addr));
-                                {
-                                    let mut svc = svc.clone();
-                                    svc.call(req.map(axum::body::Body::from))
+
+                            let service = service_fn(move |mut req| {
+                                let mut svc = svc.clone();
+                                async move {
+                                    req.extensions_mut()
+                                        .insert(ConnectInfo(remote_addr));
+
+                                    let req = req.map(axum::body::Body::new);
+
+                                    let resp = match svc.call(req).await {
+                                        Ok(resp) => resp,
+                                        Err(err) => {
+                                            tracing::error!("[ADMIN] Service error: {}", err);
+                                            axum::response::Response::builder()
+                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                .body(axum::body::Body::from("internal server error"))
+                                                .unwrap()
+                                        }
+                                    };
+
+                                    Ok::<_, std::convert::Infallible>(resp)
                                 }
                             });
+
                             if let Err(err) = hyper_util::server::conn::auto::Builder::new(
                                 hyper_util::rt::TokioExecutor::new(),
                             )
-                            .serve_connection(io, svc)
+                            .serve_connection(io, service)
                             .await
                             {
                                 tracing::error!("[ADMIN] Connection error: {}", err);
@@ -390,11 +365,13 @@ pub async fn run_server(
                     }
                 }
             }
+
             Err::<(), anyhow::Error>(anyhow::anyhow!("Admin server stopped"))
-        }));
+        });
+        admin_handle = Some(ah);
     }
 
-    // Wait until one of servers stops, then stop the other.
+    // Wait for shutdown
     if let Some(mut ah) = admin_handle {
         tokio::select! {
             res = &mut main_handle => {
@@ -419,8 +396,8 @@ pub async fn run_server(
 // ======================================================
 // 🧭 Router builder
 // ======================================================
-pub fn build_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    let st = (*state).clone();
+pub fn build_router(state: AppState) -> Router<()> {
+    let st = state.clone();
     tracing::info!("[ROUTER] Building routes...");
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -431,6 +408,10 @@ pub fn build_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     tracing::info!("[ROUTER] Static dir: {:?}", static_dir);
 
     let state_for_middleware = state.clone();
+    let admin_gateway = Router::new()
+        .route("/", get(crate::routes::pages::admin_hint))
+        .fallback(any(crate::routes::pages::admin_redirect_fallback));
+
     let router = Router::new()
         // ⚠️ Убрано .with_state(state.clone()) – состояние будет передаваться в каждый вложенный роутер отдельно
         .route("/", get(crate::routes::pages::index))
@@ -439,8 +420,7 @@ pub fn build_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/start", get(crate::routes::pages::start))
         .route("/cookie-agreement", get(crate::routes::pages::cookie_agreement))
         .route("/license-agreement", get(crate::routes::pages::license_agreement))
-        .route("/admin", get(crate::routes::pages::admin_hint))
-        .route("/admin/", get(crate::routes::pages::admin_hint))
+        .nest("/admin", admin_gateway)
         .route("/health", get(|| async { "OK" }))
         .route("/ws", get(ws_main))
         .route("/ws/health", get(ws_health))
@@ -470,8 +450,7 @@ pub fn build_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .route("/:file_id", get(crate::routes::files::get_file))
                 .with_state(st.clone()),
         )
-        // admin – используем build_admin_router, который теперь возвращает Router<Arc<AppState>>
-        .nest("/admin", build_admin_router(st.clone()))
+        // Admin panel runs on the dedicated admin listener (see run_server); /admin here is only a hint page.
         .nest_service(
             "/static",
             ServeDir::new(static_dir.clone())
@@ -584,9 +563,11 @@ pub fn build_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
                         .latency_unit(LatencyUnit::Millis),
                 ),
         )
-        .layer(CatchPanicLayer::new());
+        .layer(CatchPanicLayer::new())
+        .with_state(state);
 
     tracing::info!("[ROUTER] ✅ Routes ready");
+    router
 }
 
 // ======================================================
@@ -620,7 +601,7 @@ fn admin_bind_addr() -> anyhow::Result<SocketAddr> {
     Ok(SocketAddr::from((ip, port)))
 }
 
-pub fn build_admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+pub fn build_admin_router(state: AppState) -> Router<AppState> {
     use axum::response::Redirect;
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -629,10 +610,8 @@ pub fn build_admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .join("static");
 
     Router::new()
-        .route("/", get(|| async { Redirect::to("/admin/") }))
-        .route("/admin", get(|| async { Redirect::to("/admin/") }))
-        // Преобразуем Router<AppState> → Router<Arc<AppState>>
-        .nest("/admin/", crate::routes::admin_panel::router().with_state((*state).clone()))
+        .route("/", get(|| async { Redirect::to("/admin/login") }))
+        .nest("/admin", crate::routes::admin_panel::router().with_state(state.clone()))
         .nest_service(
             "/static",
             ServeDir::new(static_dir.clone())
@@ -689,16 +668,16 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    fn test_state() -> Arc<AppState> {
-        let db = sqlx::SqlitePoolOptions::new()  // полный путь
+    fn test_state() -> AppState {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect_lazy("sqlite::memory:")
             .expect("test db");
-        let hub = Hub::new(); // или мок
+        let hub = Hub::new();
         let geo_guard = GeoGuardState::from_custom_file("assets/custom_blocked_cidr")
-            .unwrap_or_else(|_| GeoGuardState::default()); // если добавишь Default
+            .expect("test requires geo file");
 
-        Arc::new(AppState {
+        AppState {
             db,
             hub: Arc::new(hub),
             connected_ws: Arc::new(AtomicUsize::new(0)),
@@ -710,7 +689,7 @@ mod tests {
                 IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
                 IpAddr::V6(Ipv6Addr::LOCALHOST),
             ],
-        })
+        }
     }
 
     #[tokio::test]

@@ -123,7 +123,7 @@ pub async fn csrf_guard(
     }
     
     // Skip admin panel endpoints (they use their own session-based CSRF)
-    if path.starts_with("/admin-panel/") {
+    if path.starts_with("/admin") || path.starts_with("/admin-panel/") {
         return Ok(next.run(req).await);
     }
     

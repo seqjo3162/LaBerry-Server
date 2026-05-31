@@ -117,8 +117,19 @@ pub(crate) fn test_server_re() -> Regex {
         .unwrap_or_else(|_| Regex::new("^test_").unwrap())
 }
 
+fn admin_env_trim(key: &str) -> Option<String> {
+    env::var(key).ok().map(|v| {
+        let v = v.trim();
+        v.trim_matches('"').trim_matches('\'').to_string()
+    }).filter(|s| !s.is_empty())
+}
+
 fn admin_password_configured() -> bool {
-    env::var("LB_ADMIN_PASSWORD_HASH").ok().is_some() || env::var("LB_ADMIN_PASSWORD").ok().is_some()
+    admin_env_trim("LB_ADMIN_PASSWORD_HASH").is_some() || admin_env_trim("LB_ADMIN_PASSWORD").is_some()
+}
+
+pub(crate) fn admin_password_is_configured() -> bool {
+    admin_password_configured()
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -135,14 +146,14 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 fn verify_admin_password(pw: &str) -> anyhow::Result<()> {
-    if let Ok(plain) = env::var("LB_ADMIN_PASSWORD") {
+    if let Some(plain) = admin_env_trim("LB_ADMIN_PASSWORD") {
         if constant_time_eq(pw, &plain) {
             return Ok(());
         }
         anyhow::bail!("Неверный пароль администратора");
     }
 
-    if let Ok(hash) = env::var("LB_ADMIN_PASSWORD_HASH") {
+    if let Some(hash) = admin_env_trim("LB_ADMIN_PASSWORD_HASH") {
         let parsed = PasswordHash::new(&hash).context("Некорректный LB_ADMIN_PASSWORD_HASH")?;
         let argon2 = argon2::Argon2::default();
         argon2
@@ -291,11 +302,14 @@ fn cookie_get(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn set_cookie(headers: &mut HeaderMap, cookie: String) {
-    // allow multiple Set-Cookie
-    headers.append(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
+    match HeaderValue::from_str(&cookie) {
+        Ok(v) => {
+            headers.append(header::SET_COOKIE, v);
+        }
+        Err(e) => {
+            tracing::error!("[ADMIN] Invalid Set-Cookie header: {e}");
+        }
+    }
 }
 
 fn url_encode_component(s: &str) -> String {
@@ -407,6 +421,13 @@ pub(super) fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
     } else {
         ""
     };
+    let show_logout = !title.contains("Вход");
+    let logout_html = if show_logout {
+        "<form method='post' action='/admin/logout'><button type='submit'>Выйти</button></form>"
+    } else {
+        ""
+    };
+
     let html = format!(
         r#"<!doctype html>
 <html lang="ru">
@@ -708,9 +729,7 @@ button:hover {{ background:#202c57; }}
   <div class='brand'>Админ-панель</div>
   <nav class='nav'>{nav}</nav>
   <div class='utc-note'>Время везде: UTC</div>
-  <form method='post' action='/admin/logout'>
-    <button type='submit'>Выйти</button>
-  </form>
+  {logout_html}
 </header>
 <main class='{main_class}'>
 {msg_html}
@@ -724,7 +743,8 @@ button:hover {{ background:#202c57; }}
         body = body,
         main_class = main_class,
         center_script = center_script,
-        users_script = users_script
+        users_script = users_script,
+        logout_html = logout_html
     );
 
     Html(html)
@@ -832,7 +852,7 @@ fn new_session(st: &AppState) -> (String, AdminSession) {
 }
 
 fn cookie_for_session(sid: &str, secure: bool) -> String {
-    let mut c = format!("lb_admin_sid={}; Path=/admin; HttpOnly; SameSite=Strict", sid);
+    let mut c = format!("lb_admin_sid={sid}; Path=/; HttpOnly; SameSite=Lax");
     if secure {
         c.push_str("; Secure");
     }
@@ -840,7 +860,7 @@ fn cookie_for_session(sid: &str, secure: bool) -> String {
 }
 
 fn cookie_clear(secure: bool) -> String {
-    let mut c = "lb_admin_sid=deleted; Path=/admin; Max-Age=0; HttpOnly; SameSite=Strict".to_string();
+    let mut c = "lb_admin_sid=deleted; Path=/; Max-Age=0; HttpOnly; SameSite=Lax".to_string();
     if secure {
         c.push_str("; Secure");
     }
@@ -895,6 +915,7 @@ async fn login_get(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<So
     let body = format!(
         r#"<div class='card'>
 <h2>Вход</h2>
+<p class='small'>Admin listener: <code>{base}</code></p>
 <form method='post' action='/admin/login'>
   <div class='small'>Пароль администратора</div>
   <input type='password' name='password' autocomplete='current-password' required />
@@ -903,6 +924,7 @@ async fn login_get(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<So
 </form>
 {warn}
 </div>"#,
+        base = escape_html(&crate::routes::pages::admin_panel_base_url()),
         warn = warn
     );
 
@@ -928,12 +950,15 @@ async fn login_post(
     }
 
     if let Err(err) = verify_admin_password(&form.password) {
+        tracing::warn!("[ADMIN] Login failed: {err}");
         return admin_redirect_with_msg("/admin/login", &format!("{}", err)).into_response();
     }
 
     let (sid, _sess) = new_session(&st);
+    let cookie = cookie_for_session(&sid, admin_cookie_secure(&headers));
+    tracing::info!("[ADMIN] Login successful");
     let mut h = HeaderMap::new();
-    set_cookie(&mut h, cookie_for_session(&sid, admin_cookie_secure(&headers)));
+    set_cookie(&mut h, cookie);
     (h, Redirect::to("/admin/center")).into_response()
 }
 

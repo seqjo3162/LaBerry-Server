@@ -216,6 +216,8 @@ pub struct SearchQuery {
 #[derive(Deserialize)]
 pub struct RegisterDeviceKeyBody {
     pub device_id: String,
+    /// X25519 public key (base64url) or JSON string containing it
+    pub public_jwk: Option<String>,
     /// Опциональная метка устройства (например "iPhone 15")
     pub label: Option<String>,
 }
@@ -223,8 +225,24 @@ pub struct RegisterDeviceKeyBody {
 #[derive(Serialize)]
 pub struct DeviceKeyView {
     pub device_id: String,
+    pub public_jwk: Option<String>,
     pub label: Option<String>,
     pub last_seen: Option<String>,
+}
+
+fn normalize_client_public_key(raw: &str) -> Option<String> {
+    use crate::e2ee::E2eeKeyPair;
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(s) = parsed.as_str() {
+            return E2eeKeyPair::from_public_b64(s).map(|k| k.public_key_b64);
+        }
+    }
+    E2eeKeyPair::from_public_b64(trimmed).map(|k| k.public_key_b64)
 }
 
 pub fn sanitize_email(s: &str) -> Option<String> {
@@ -554,9 +572,13 @@ async fn register_device_key(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid device_id format"}))).into_response();
     }
 
-    // Получаем или генерируем E2EE keypair
+    let client_pub = body
+        .public_jwk
+        .as_deref()
+        .and_then(normalize_client_public_key);
+
     let existing_key: Option<String> = sqlx::query_scalar(
-        "SELECT public_encryption_key FROM users WHERE id = ? LIMIT 1"
+        "SELECT public_encryption_key FROM users WHERE id = ? LIMIT 1",
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -564,15 +586,17 @@ async fn register_device_key(
     .ok()
     .flatten();
 
-    let keypair = if let Some(b64) = existing_key {
-        // Пытаемся восстановить из публичного ключа
-        E2eeKeyPair::from_public_b64(&b64).unwrap_or_else(E2eeKeyPair::generate)
+    let pub_key_b64 = if let Some(b64) = client_pub {
+        b64
+    } else if let Some(b64) = existing_key {
+        E2eeKeyPair::from_public_b64(&b64)
+            .map(|k| k.public_key_b64)
+            .unwrap_or_else(|| E2eeKeyPair::generate().public_key_b64)
     } else {
-        E2eeKeyPair::generate()
+        E2eeKeyPair::generate().public_key_b64
     };
 
-    // Сохраняем ТОЛЬКО публичный ключ на сервере
-    let pub_key_b64 = keypair.public_key_b64.clone();
+    let keypair = E2eeKeyPair::from_public_b64(&pub_key_b64).unwrap_or_else(E2eeKeyPair::generate);
     let _ = sqlx::query(
         "UPDATE users SET public_encryption_key = ? WHERE id = ?"
     )
@@ -585,12 +609,13 @@ async fn register_device_key(
     let label = body.label.as_ref().map(|s| s.trim().to_string());
     let _ = sqlx::query(
         r#"
-        INSERT OR REPLACE INTO user_device_keys(device_id, user_id, label, created_at, last_seen)
-        VALUES(?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO user_device_keys(device_id, user_id, public_jwk, label, created_at, last_seen)
+        VALUES(?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(did)
     .bind(me.id)
+    .bind(&pub_key_b64)
     .bind(label)
     .bind(&now)
     .bind(&now)
@@ -616,7 +641,7 @@ async fn get_user_device_keys(
     let db = &st.db;
 
     let rows = sqlx::query(
-        r#"SELECT device_id, label, last_seen FROM user_device_keys WHERE user_id = ?"#,
+        r#"SELECT device_id, public_jwk, label, last_seen FROM user_device_keys WHERE user_id = ?"#,
     )
     .bind(id)
     .fetch_all(db)
@@ -624,13 +649,27 @@ async fn get_user_device_keys(
     .ok()
     .unwrap_or_default();
 
+    let account_key: Option<String> = sqlx::query_scalar(
+        "SELECT public_encryption_key FROM users WHERE id = ? LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+
     let mut out: Vec<DeviceKeyView> = Vec::new();
     for r in rows.into_iter() {
         let device_id: String = r.get("device_id");
+        let mut public_jwk: Option<String> = r.try_get("public_jwk").ok();
+        if public_jwk.as_deref().unwrap_or("").trim().is_empty() {
+            public_jwk = account_key.clone();
+        }
         let label: Option<String> = r.get("label");
         let last_seen: Option<String> = r.get("last_seen");
         out.push(DeviceKeyView {
             device_id,
+            public_jwk,
             label,
             last_seen,
         });

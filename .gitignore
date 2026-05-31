@@ -160,3 +160,4 @@ assets/delegated-ripencc-latest
 /coturn
 /turn
 turn/turnserver.conf
+cookies.txt

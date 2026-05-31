@@ -1,5 +1,9 @@
 use std::path::PathBuf;
-use axum::response::Html;
+
+use axum::{
+    http::Uri,
+    response::{Html, IntoResponse, Redirect, Response},
+};
 
 /// Простой SPA-роутер — возвращает index.html для "/" и "/app"
 pub async fn index() -> Html<String> {
@@ -27,10 +31,44 @@ pub async fn license_agreement() -> Html<String> {
 }
 
 
-pub async fn admin_hint() -> Html<String> {
+pub fn admin_panel_base_url() -> String {
     let host = std::env::var("LB_ADMIN_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("LB_ADMIN_PORT").unwrap_or_else(|_| "5002".to_string());
-    let url = format!("http://{}:{}/admin/", host, port);
+    format!("http://{}:{}", host, port)
+}
+
+pub fn admin_panel_url(path: &str) -> String {
+    let path = path.trim();
+    let path = if path.is_empty() || path == "/" {
+        "/admin/".to_string()
+    } else if path.starts_with("/admin/") {
+        path.to_string()
+    } else if path.starts_with("/admin") {
+        path.to_string()
+    } else if path.starts_with('/') {
+        format!("/admin{}", path)
+    } else {
+        format!("/admin/{}", path)
+    };
+    format!("{}{}", admin_panel_base_url(), path)
+}
+
+/// Redirect any /admin/* path on the main listener to the admin port.
+pub async fn admin_redirect_fallback(uri: Uri, method: axum::http::Method) -> Response {
+    let target = admin_panel_url(uri.path());
+    if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
+        return Redirect::temporary(&target).into_response();
+    }
+    Response::builder()
+        .status(axum::http::StatusCode::TEMPORARY_REDIRECT)
+        .header(axum::http::header::LOCATION, target)
+        .body(axum::body::Body::empty())
+        .expect("admin redirect response")
+}
+
+pub async fn admin_hint() -> Html<String> {
+    let url = admin_panel_url("/admin/");
+    let login_url = admin_panel_url("/admin/login");
 
     Html(format!(
         r#"<!doctype html>
@@ -53,14 +91,20 @@ code {{ background:#0f1220; padding:2px 6px; border-radius:8px; border:1px solid
     <h2>Admin panel</h2>
     <div>Admin panel is served by a dedicated admin listener (local-only by default).</div>
     <div style="height:10px"></div>
-    <div>Open: <a href="{url}">{url}</a></div>
+    <div>Main app is on port <code>LB_PORT</code> (default 5001). The admin UI is <strong>not</strong> on that port.</div>
     <div style="height:10px"></div>
-    <div class="small">If you are behind a reverse proxy, forward <code>/admin</code> to the admin listener.</div>
+    <div>Open admin panel: <a href="{login_url}">{login_url}</a></div>
+    <div style="height:8px"></div>
+    <div class="small">Home: <a href="{url}">{url}</a></div>
+    <div style="height:10px"></div>
+    <div class="small">If you use a reverse proxy, forward <code>/admin</code> to the admin listener (port {port}).</div>
   </div>
 </main>
 </body>
 </html>"#,
-        url = url
+        url = url,
+        login_url = login_url,
+        port = std::env::var("LB_ADMIN_PORT").unwrap_or_else(|_| "5002".to_string())
     ))
 }
 
