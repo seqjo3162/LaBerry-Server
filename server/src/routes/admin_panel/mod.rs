@@ -847,7 +847,9 @@ fn new_session(st: &AppState) -> (String, AdminSession) {
 
 fn cookie_for_session(sid: &str, secure: bool) -> String {
     // Make admin session cookie persistent for 8 hours to improve redirect behavior
-    let mut c = format!("lb_admin_sid={sid}; Path=/; Max-Age=28800; HttpOnly; SameSite=Lax");
+    // Use SameSite=None when secure cookies are required by the browser environment.
+    let same_site = if secure { "None" } else { "Lax" };
+    let mut c = format!("lb_admin_sid={sid}; Path=/; Max-Age=28800; HttpOnly; SameSite={same_site}");
     if secure {
         c.push_str("; Secure");
     }
@@ -855,7 +857,8 @@ fn cookie_for_session(sid: &str, secure: bool) -> String {
 }
 
 fn cookie_clear(secure: bool) -> String {
-    let mut c = "lb_admin_sid=deleted; Path=/; Max-Age=0; HttpOnly; SameSite=Lax".to_string();
+    let same_site = if secure { "None" } else { "Lax" };
+    let mut c = format!("lb_admin_sid=deleted; Path=/; Max-Age=0; HttpOnly; SameSite={same_site}");
     if secure {
         c.push_str("; Secure");
     }
