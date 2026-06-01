@@ -1,4 +1,5 @@
 use axum::extract::ws::{Message, WebSocket};
+use futures_util::{SinkExt, StreamExt};
 use dashmap::DashMap;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -310,9 +311,14 @@ impl Hub {
                 for tx in user_conns.value().iter() {
                     // We still clone here but it's Arc clone (cheap), not Value clone (expensive)
                     let payload_for_send = (*payload_arc).clone();
-                    if let Err(e) = tx.value().try_send(payload_for_send) {
+                    if let Err(e) = tx.value().try_send(payload_for_send.clone()) {
                         if matches!(e, mpsc::error::TrySendError::Full(_)) {
-                            ws_debug!("[BACKPRESSURE] Channel full for user, slow client detected");
+                            ws_debug!("[BACKPRESSURE] Channel full for user, scheduling async send");
+                            let tx_clone = tx.value().clone();
+                            // spawn a background task to await send so we don't block here
+                            tokio::spawn(async move {
+                                let _ = tx_clone.send(payload_for_send).await;
+                            });
                         }
                     }
                 }
@@ -328,9 +334,13 @@ impl Hub {
                 }
                 for tx in user_conns.value().iter() {
                     let payload_for_send = (*payload_arc).clone();
-                    if let Err(e) = tx.value().try_send(payload_for_send) {
+                    if let Err(e) = tx.value().try_send(payload_for_send.clone()) {
                         if matches!(e, mpsc::error::TrySendError::Full(_)) {
-                            ws_debug!("[BACKPRESSURE] Channel full, slow client detected");
+                            ws_debug!("[BACKPRESSURE] Channel full, scheduling async send");
+                            let tx_clone = tx.value().clone();
+                            tokio::spawn(async move {
+                                let _ = tx_clone.send(payload_for_send).await;
+                            });
                         }
                     }
                 }
@@ -348,6 +358,14 @@ impl Hub {
         if let Some(conns) = self.presence.get(&user_id) {
             for tx in conns.iter() {
                 if tx.value().try_send(payload.clone()).is_ok() {
+                    sent = true;
+                } else {
+                    // schedule async send in background, still count as delivered attempt
+                    let tx_clone = tx.value().clone();
+                    let p = payload.clone();
+                    tokio::spawn(async move {
+                        let _ = tx_clone.send(p).await;
+                    });
                     sent = true;
                 }
             }
@@ -390,7 +408,13 @@ impl Hub {
     pub fn broadcast_presence(&self, payload: &Value) {
         for user_conns in self.presence.iter() {
             for tx in user_conns.value().iter() {
-                let _ = tx.value().try_send(payload.clone());
+                if tx.value().try_send(payload.clone()).is_err() {
+                    let tx_clone = tx.value().clone();
+                    let p = payload.clone();
+                    tokio::spawn(async move {
+                        let _ = tx_clone.send(p).await;
+                    });
+                }
             }
         }
     }
@@ -578,6 +602,33 @@ pub async fn handle(
     // This prevents memory issues from slow clients and backpressure builds up properly
     let (tx, mut rx) = mpsc::channel::<Value>(WS_CHANNEL_BUFFER);
 
+    // Split socket: writer task will own the sink and send messages concurrently
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Writer task: consumes `rx` and sends payloads to the client, also handles simple ping heartbeat
+    let hub_clone_for_writer = hub.clone();
+    let writer_conn_id = conn_id;
+    let writer = tokio::spawn(async move {
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            tokio::select! {
+                Some(payload) = rx.recv() => {
+                    if ws_sender.send(Message::Text(payload.to_string())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    if !hub_clone_for_writer.is_conn_active(writer_conn_id) {
+                        break;
+                    }
+                    if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     // ======================
     // WAIT FOR USER TO BE AVAILABLE (PREVENT RAPID RECONNECTS)
     // ======================
@@ -618,23 +669,17 @@ pub async fn handle(
     // ======================
     ws_debug!("[WS] user={} conn={} entering main loop", user_id, conn_id);
     
+    // Main task: only reads incoming messages from the client
     loop {
-        tokio::select! {
-            Some(payload) = rx.recv() => {
-                if socket.send(Message::Text(payload.to_string())).await.is_err() {
-                    break;
-                }
-            }
-
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
-                }
-            }
+        match ws_receiver.next().await {
+            Some(Ok(Message::Close(_))) | None => break,
+            Some(Ok(_)) => {}
+            Some(Err(_)) => break,
         }
     }
+
+    // Ensure writer stops
+    let _ = writer.abort();
 
     // ======================
     // CLEANUP (idempotent)

@@ -1,4 +1,5 @@
 use axum::extract::ws::{Message, WebSocket};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use sqlx::{SqlitePool, Row};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +26,14 @@ pub async fn handle_single_ws(
     let (tx, mut rx) = mpsc::channel::<Value>(WS_CHANNEL_BUFFER);
 
     // multi-device: allow several WS connections per user
+
+    // Split socket into sender/receiver so writes run in a separate task
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Shared last-seen timestamp for heartbeat logic (ms since epoch)
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+    let last_seen_ts = Arc::new(AtomicU64::new(chrono::Utc::now().timestamp_millis() as u64));
 
     hub.presence_join(user_id, conn_id, tx.clone());
     let became_online = hub.user_conn_ids(user_id).len() == 1;
@@ -64,80 +73,89 @@ pub async fn handle_single_ws(
         "timestamp": chrono::Utc::now().timestamp_millis()
     }));
 
-    let mut heartbeat = interval(Duration::from_secs(10));
-    let mut last_seen = Instant::now();
+    // Writer task: owns WS sink and sends outgoing payloads + heartbeat pings
+    let hub_for_writer = hub.clone();
+    let last_seen_writer = Arc::clone(&last_seen_ts);
+    let writer_conn = conn_id;
+    let writer = tokio::spawn(async move {
+        let mut heartbeat = interval(Duration::from_secs(10));
+        loop {
+            tokio::select! {
+                Some(payload) = rx.recv() => {
+                    let should_close = payload
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "force_logout")
+                        .unwrap_or(false);
 
-    'main: loop {
-        tokio::select! {
-            Some(payload) = rx.recv() => {
-                let should_close = payload
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .map(|t| t == "force_logout")
-                    .unwrap_or(false);
+                    if ws_sender.send(Message::Text(payload.to_string())).await.is_err() {
+                        break;
+                    }
 
-                if socket.send(Message::Text(payload.to_string())).await.is_err() {
-                    break 'main;
+                    if should_close {
+                        break;
+                    }
                 }
+                _ = heartbeat.tick() => {
+                    if !hub_for_writer.is_conn_active(writer_conn) {
+                        break;
+                    }
+                    if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
+                        break;
+                    }
 
-                if should_close {
-                    break 'main;
+                    // Check last seen timestamp (in ms)
+                    let last = last_seen_writer.load(AtomicOrdering::Relaxed) as i64;
+                    let now = chrono::Utc::now().timestamp_millis();
+                    if now - last > 90_000 {
+                        break;
+                    }
                 }
             }
+        }
+    });
 
-            _ = heartbeat.tick() => {
+    // Main loop: only reads incoming messages from the client and updates last_seen
+    'main: loop {
+        match ws_receiver.next().await {
+            Some(Ok(Message::Text(text))) => {
+                // update last_seen
+                last_seen_ts.store(chrono::Utc::now().timestamp_millis() as u64, AtomicOrdering::Relaxed);
+
                 if !hub.is_conn_active(conn_id) {
                     break 'main;
                 }
 
-                // WS ping frame (не JSON)
-                if socket.send(Message::Ping(Vec::new())).await.is_err() {
-                    break 'main;
+                // клиентский JSON ping: {type:"ping", t|timestamp:number}
+                if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                    if v.get("type").and_then(|t| t.as_str()) == Some("ping") {
+                        let t = v.get("t")
+                            .and_then(|x| x.as_i64())
+                            .or_else(|| v.get("timestamp").and_then(|x| x.as_i64()))
+                            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+
+                        let _ = tx.try_send(json!({"type":"pong","t": t}));
+                        continue;
+                    }
                 }
 
-                if last_seen.elapsed() > Duration::from_secs(90) {
-                    break 'main;
-                }
+                handle_incoming_message(&text, &db, &hub, user_id, conn_id, &username, &tx).await;
             }
 
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        last_seen = Instant::now();
-
-                        if !hub.is_conn_active(conn_id) {
-                            break 'main;
-                        }
-
-                        // клиентский JSON ping: {type:"ping", t|timestamp:number}
-                        if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                            if v.get("type").and_then(|t| t.as_str()) == Some("ping") {
-                                let t = v.get("t")
-                                    .and_then(|x| x.as_i64())
-                                    .or_else(|| v.get("timestamp").and_then(|x| x.as_i64()))
-                                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-
-                                let _ = tx.try_send(json!({"type":"pong","t": t}));
-                                continue;
-                            }
-                        }
-
-                        handle_incoming_message(&text, &db, &hub, user_id, conn_id, &username, &tx).await;
-                    }
-
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
-                        last_seen = Instant::now();
-                    }
-
-                    Some(Ok(Message::Close(_))) | None => break 'main,
-
-                    Some(Ok(Message::Binary(_))) => {}
-
-                    Some(Err(_)) => break 'main,
-                }
+            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                last_seen_ts.store(chrono::Utc::now().timestamp_millis() as u64, AtomicOrdering::Relaxed);
             }
+
+            Some(Ok(Message::Close(_))) | None => break 'main,
+
+            Some(Ok(Message::Binary(_))) => {}
+
+            Some(Err(_)) => break 'main,
         }
     }
+
+    // Ensure writer stops
+    let _ = writer.abort();
 
     hub.cleanup_conn(user_id, conn_id).await;
 
@@ -163,7 +181,7 @@ pub async fn handle_single_ws(
             "timestamp": chrono::Utc::now().timestamp_millis()
         }));
     }
-    let _ = socket.send(Message::Close(None)).await;
+    // socket was split earlier; writer task owns the sink and will close when dropped.
 }
 
 async fn handle_incoming_message(
