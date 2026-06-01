@@ -935,7 +935,6 @@ pub async fn send(
             .bind(me.id)
             .execute(db)
             .await;
-        }
     }
 
     // WS broadcast
