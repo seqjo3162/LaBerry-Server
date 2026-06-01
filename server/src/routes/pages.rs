@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use axum::{
-    http::{self, HeaderMap, Uri},
+    http::{HeaderMap, Uri},
     response::{Html, IntoResponse, Redirect, Response},
 };
 
@@ -104,7 +104,7 @@ pub fn admin_panel_url_for_request(headers: &HeaderMap, path: &str) -> String {
         return format!("{}://{}:{}{}", scheme, host, port, path);
     }
 
-    admin_panel_url(path)
+    admin_panel_url(&path)
 }
 
 /// Redirect any /admin/* path on the main listener to the admin port.
