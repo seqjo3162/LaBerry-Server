@@ -963,9 +963,7 @@ async fn login_post(
         .body(Body::empty())
         .expect("admin login redirect response");
 
-    if let Some(headers_mut) = response.headers_mut() {
-        set_cookie(headers_mut, cookie);
-    }
+    set_cookie(response.headers_mut(), cookie);
 
     response
 }
@@ -977,9 +975,16 @@ async fn logout_post(State(st): State<AppState>, headers: HeaderMap) -> impl Int
     if let Some((sid, _)) = session_get(&st, &headers) {
         st.admin_sessions.remove(&sid);
     }
-    let mut h = HeaderMap::new();
-    set_cookie(&mut h, cookie_clear(admin_cookie_secure(&headers)));
-    (h, Redirect::to("/admin/login")).into_response()
+
+    let mut response = Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/admin/login")
+        .body(Body::empty())
+        .expect("admin logout redirect response");
+
+    set_cookie(response.headers_mut(), cookie_clear(admin_cookie_secure(&headers)));
+
+    response
 }
 
 // =============================
