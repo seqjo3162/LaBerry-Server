@@ -2,9 +2,10 @@ use crate::{auth, middleware::rate_limit, server::{AdminSession, AppState}};
 
 use anyhow::Context;
 use axum::{
+    body::Body,
     extract::{Form, Path, Query, State, ConnectInfo},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Router,
 };
@@ -955,9 +956,18 @@ async fn login_post(
     let (sid, _sess) = new_session(&st);
     let cookie = cookie_for_session(&sid, admin_cookie_secure(&headers));
     tracing::info!("[ADMIN] Login successful");
-    let mut h = HeaderMap::new();
-    set_cookie(&mut h, cookie);
-    (h, Redirect::to("/admin/center")).into_response()
+
+    let mut response = Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/admin/center")
+        .body(Body::empty())
+        .expect("admin login redirect response");
+
+    if let Some(headers_mut) = response.headers_mut() {
+        set_cookie(headers_mut, cookie);
+    }
+
+    response
 }
 
 async fn logout_post(State(st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
