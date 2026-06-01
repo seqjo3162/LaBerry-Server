@@ -591,7 +591,7 @@ impl Hub {
 // ======================================================
 
 pub async fn handle(
-    mut socket: WebSocket,
+    socket: WebSocket,
     _db: SqlitePool,
     hub: Arc<Hub>,
     user_id: UserId,

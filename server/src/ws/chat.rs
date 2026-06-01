@@ -4,7 +4,6 @@ use serde_json::{json, Value};
 use sqlx::{SqlitePool, Row};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
@@ -16,7 +15,7 @@ use crate::ws::{
 static CONN_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub async fn handle_single_ws(
-    mut socket: WebSocket,
+    socket: WebSocket,
     db: SqlitePool,
     hub: Arc<Hub>,
     user_id: UserId,
