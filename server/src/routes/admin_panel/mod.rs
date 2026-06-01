@@ -1503,7 +1503,7 @@ async fn center_page(
         <div class='center-note-line'>• время в админке показывается в UTC.</div>
     </div></div>
 </div>"#,
-        users_total=users_total, servers_total=servers_total, messages_total=messages_total, banned_total=banned_total,
+        users_total=users_total, servers_total=servers_total, banned_total=banned_total,
     );
 
     // homie panel hidden from center UI
