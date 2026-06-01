@@ -480,6 +480,19 @@ async fn delete_chat(
             .into_response();
     }
 
+    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE chat_id = ?")
+        .bind(chat_id)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| {
+            let storage_path = r.try_get::<String, _>("storage_path").ok()?;
+            let filename = r.try_get::<String, _>("filename").ok()?;
+            Some((storage_path, filename))
+        })
+        .collect::<Vec<_>>();
+
     // delete reactions first (no cascade)
     let _ = sqlx::query(
         r#"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?)"#,
@@ -517,6 +530,10 @@ async fn delete_chat(
         .bind(chat_id)
         .execute(db)
         .await;
+
+    for (storage_path, filename) in file_rows {
+        crate::routes::files::cleanup_file_artifacts_if_unreferenced(&st, &storage_path, &filename).await;
+    }
 
     // keep invariant
     ensure_default_channels(db, server_id).await;
@@ -1354,6 +1371,19 @@ async fn delete_server(
         return StatusCode::FORBIDDEN.into_response();
     }
 
+    let server_file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE chat_id IN (SELECT id FROM chats WHERE server_id = ?)")
+        .bind(server_id)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| {
+            let storage_path = r.try_get::<String, _>("storage_path").ok()?;
+            let filename = r.try_get::<String, _>("filename").ok()?;
+            Some((storage_path, filename))
+        })
+        .collect::<Vec<_>>();
+
     let mut tx = match db.begin().await {
         Ok(t) => t,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1410,6 +1440,10 @@ async fn delete_server(
 
     if tx.commit().await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    for (storage_path, filename) in server_file_rows {
+        crate::routes::files::cleanup_file_artifacts_if_unreferenced(&st, &storage_path, &filename).await;
     }
 
     StatusCode::NO_CONTENT.into_response()

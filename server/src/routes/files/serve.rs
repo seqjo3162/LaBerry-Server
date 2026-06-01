@@ -100,9 +100,9 @@ pub(crate) async fn get_preview(
     State(st): State<AppState>,
     axum::extract::Path(file_id): axum::extract::Path<i64>,
     Query(dl): Query<super::DlQuery>,
-    me: AuthUser,
+    me: Option<AuthUser>,
 ) -> axum::response::Response {
-    let user_id = match resolve_user_id_for_file_request(&st, Some(&me), file_id, dl.dl.as_deref()).await {
+    let user_id = match resolve_user_id_for_file_request(&st, me.as_ref(), file_id, dl.dl.as_deref()).await {
         Ok(uid) => uid,
         Err(code) => return (code, "unauthorized").into_response(),
     };
@@ -147,9 +147,9 @@ pub(crate) async fn get_archive(
     State(st): State<AppState>,
     axum::extract::Path(file_id): axum::extract::Path<i64>,
     Query(dl): Query<super::DlQuery>,
-    me: AuthUser,
+    me: Option<AuthUser>,
 ) -> axum::response::Response {
-    let user_id = match resolve_user_id_for_file_request(&st, Some(&me), file_id, dl.dl.as_deref()).await {
+    let user_id = match resolve_user_id_for_file_request(&st, me.as_ref(), file_id, dl.dl.as_deref()).await {
         Ok(uid) => uid,
         Err(code) => return (code, "unauthorized").into_response(),
     };
