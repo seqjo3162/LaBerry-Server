@@ -64,6 +64,7 @@ const E2EE_PREFIX = '[[e2ee:v1|';
 const E2EE_SUFFIX = ']]';
 const E2EE_TRUSTED_KEYS_PREFIX = 'lb:e2ee:trusted_public_keys:v1';
 let e2eeIdentityPromise = null;
+let e2eeIdentityUserId = null;
 const e2eePublicKeyCache = new Map();
 
 function e2eeAvailable() {
@@ -396,9 +397,16 @@ async function e2eeGetUserDeviceKeys(userId) {
 
 async function e2eeEnsureIdentity(upload = false) {
     if (!e2eeAvailable()) return null;
+    const currentId = Number(currentUser?.id);
+    if (e2eeIdentityPromise && e2eeIdentityUserId !== currentId) {
+        // User switched accounts in the same session: reset stale identity promise.
+        e2eeIdentityPromise = null;
+        e2eeIdentityUserId = null;
+    }
     if (e2eeIdentityPromise) return e2eeIdentityPromise;
 
     e2eeIdentityPromise = (async () => {
+        e2eeIdentityUserId = Number(currentUser?.id);
         let saved = null;
         try { saved = JSON.parse(localStorage.getItem(e2eeStorageKey()) || 'null'); } catch (_) { saved = null; }
 
@@ -3011,7 +3019,13 @@ async function loadMe() {
         if (!me || typeof me !== 'object') {
             throw new Error('Invalid /api/users/me response');
         }
+        const previousUserId = Number(currentUser?.id);
         currentUser = me;
+        if (Number(currentUser?.id) !== previousUserId) {
+            e2eeIdentityPromise = null;
+            e2eeIdentityUserId = null;
+            e2eePublicKeyCache.clear();
+        }
         const displayName = (me.nickname || me.username || '').toString();
         $("userName").textContent = displayName || 'Unknown';
         const avatarTextEl = $("avatarText");
