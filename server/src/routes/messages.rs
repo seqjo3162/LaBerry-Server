@@ -5,6 +5,7 @@ use axum::{
     routing::{get, put},
     Json, Router,
 };
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -17,6 +18,8 @@ use crate::server::AppState;
 use crate::ws::RoomId;
 
 const MAX_MESSAGE_CHARS: usize = 65535;
+
+static RE_FILE_REFERENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[file[:=](\d+)\|").unwrap());
 
 fn encrypted_or_file_reference(content: &str) -> bool {
     content.starts_with("[[e2ee:v1|")
@@ -906,17 +909,16 @@ pub async fn send(
     let message_id = r.last_insert_rowid();
 
     // привязка загруженных файлов к этому сообщению (если есть маркеры)
-    if let Ok(re) = Regex::new(r"\[\[file[:=](\d+)\|") {
-        let mut file_ids: Vec<i64> = re
-            .captures_iter(&content)
-            .filter_map(|c| c.get(1).and_then(|m| m.as_str().parse::<i64>().ok()))
-            .collect();
-        file_ids.sort_unstable();
-        file_ids.dedup();
+    let mut file_ids: Vec<i64> = RE_FILE_REFERENCE
+        .captures_iter(&content)
+        .filter_map(|c| c.get(1).and_then(|m| m.as_str().parse::<i64>().ok()))
+        .collect();
+    file_ids.sort_unstable();
+    file_ids.dedup();
 
-        for fid in file_ids {
-            let _ = sqlx::query(
-                r#"
+    for fid in file_ids {
+        let _ = sqlx::query(
+            r#"
                 UPDATE files
                 SET message_id = ?,
                     storage_kind = 'message',
@@ -926,7 +928,7 @@ pub async fn send(
                   AND uploaded_by = ?
                   AND (message_id IS NULL OR message_id = 0)
                 "#,
-            )
+        )
             .bind(message_id)
             .bind(fid)
             .bind(chat_id)

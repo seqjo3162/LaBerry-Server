@@ -915,14 +915,38 @@ async fn login_get(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<So
         r#"<div class='card'>
 <h2>Вход</h2>
 <p class='small'>Admin listener: <code>{base}</code></p>
-<form method='post' action='/admin/login'>
+<form id='admin-login-form' method='post' action='/admin/login'>
   <div class='small'>Пароль администратора</div>
   <input type='password' name='password' autocomplete='current-password' required />
   <div style='height:10px'></div>
   <button type='submit'>Войти</button>
 </form>
 {warn}
-</div>"#,
+</div>
+<script>
+(function() {{
+  const form = document.getElementById('admin-login-form');
+  if (!form) return;
+  form.addEventListener('submit', async function (event) {{
+    event.preventDefault();
+    const submit = form.querySelector('button[type=submit]');
+    if (submit) submit.disabled = true;
+    const data = new FormData(form);
+    const response = await fetch(form.action, {{
+      method: 'POST',
+      body: data,
+      redirect: 'manual',
+      credentials: 'same-origin',
+    }});
+    const location = response.headers.get('location');
+    if (location) {{
+      window.location.href = location;
+      return;
+    }}
+    window.location.reload();
+  }});
+}})();
+</script>"#,
         base = escape_html(&crate::routes::pages::admin_panel_base_url()),
         warn = warn
     );
