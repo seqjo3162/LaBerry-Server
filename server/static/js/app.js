@@ -5847,8 +5847,10 @@ async function openDmChat(chatId, otherName) {
     setUiModeDm();
     setDmHomeActive('');
     await loadDmList(); // refresh active state + order
-    await openChat(chatId, otherName);
-    renderDmProfile(chatId).catch((e) => console.warn('[DM] render profile failed', e));
+    const cid = Number(chatId);
+    if (!Number.isFinite(cid) || cid <= 0) return;
+    await openChat(cid, otherName);
+    renderDmProfile(cid).catch((e) => console.warn('[DM] render profile failed', e));
 }
 
 window.lbLoadDmList = loadDmList;
@@ -5863,10 +5865,15 @@ window.addEventListener('laberry:dm-open', (ev) => {
 
 
 async function openChat(chatId, title) {
+    const cid = Number(chatId);
+    if (!Number.isFinite(cid) || cid <= 0) {
+        console.warn('[UI] Invalid chatId in openChat:', chatId);
+        return;
+    }
+
     // If voice view is open in split mode for the same channel, do not close it.
     // Otherwise, switching chats should close voice layout.
     try {
-        const cid = Number(chatId);
         const vid = Number(currentVoiceViewChannelId || 0);
         if (!vid || cid !== vid) closeVoiceView();
     } catch (_) {}
@@ -5878,7 +5885,7 @@ async function openChat(chatId, title) {
         if (friendsView) friendsView.hidden = true;
         if (utilityView) utilityView.hidden = true;
     } catch (_) {}
-    appLog(`[UI] Opening chat ${chatId} (${title})`);
+    appLog(`[UI] Opening chat ${cid} (${title})`);
     const seq = ++openChatSeq;
 
     // unlock composer if it was locked by voice
@@ -5888,31 +5895,31 @@ async function openChat(chatId, title) {
         if (composer) composer.hidden = false;
     } catch (_) {}
     
-    currentChatId = chatId;
+    currentChatId = cid;
     // prevent cross-chat reply leaks
     clearReplyTo();
-    try { chatNameById.set(chatId, title || `#${chatId}`); } catch (_) {}
-    sessionStorage.setItem("lastChatId", chatId.toString());
+    try { chatNameById.set(cid, title || `#${cid}`); } catch (_) {}
+    sessionStorage.setItem("lastChatId", cid.toString());
 
     // remember last opened TEXT (non-voice) chat for this server
     try {
-        const kind = (chatKindById.get(chatId) || 'text').toString();
+        const kind = (chatKindById.get(cid) || 'text').toString();
         if (currentServerId && kind !== 'voice') {
-            lastTextChatByServer.set(Number(currentServerId), { id: Number(chatId), name: (title || '').toString() });
+            lastTextChatByServer.set(Number(currentServerId), { id: cid, name: (title || '').toString() });
         }
     } catch (_) {}
     
     const chatTitleElement = $("chat-title");
     if (chatTitleElement) {
         const isDm = !currentServerId;
-        const dmMeta = isDm ? (dmMetaByChatId.get(Number(chatId)) || {}) : {};
+        const dmMeta = isDm ? (dmMetaByChatId.get(cid) || {}) : {};
         chatTitleElement.textContent = isDm ? (dmMeta.isGroup ? `${title}` : `@ ${title}`) : `# ${title}`;
     }
 
     const dmCallBtn = document.getElementById('dmCallBtn');
     if (dmCallBtn) {
         const isDm = !currentServerId;
-        const dmMeta = isDm ? (dmMetaByChatId.get(Number(chatId)) || {}) : {};
+        const dmMeta = isDm ? (dmMetaByChatId.get(cid) || {}) : {};
         dmCallBtn.hidden = !isDm || !!dmMeta.isGroup;
     }
     syncDmProfilePanelButtons();
@@ -5921,13 +5928,13 @@ async function openChat(chatId, title) {
     
     document.querySelectorAll('.item.channel').forEach(item => {
         const itemId = parseInt(item.dataset.channelId);
-        item.classList.toggle('active', itemId === chatId);
+        item.classList.toggle('active', itemId === cid);
     });
 
 
     document.querySelectorAll('#dmList .item.dm').forEach(item => {
         const itemId = parseInt(item.dataset.chatId);
-        item.classList.toggle('active', !currentServerId && itemId === chatId);
+        item.classList.toggle('active', !currentServerId && itemId === cid);
     });
     
     if (window.innerWidth <= 900 || isTouchUi()) {
@@ -5941,12 +5948,12 @@ async function openChat(chatId, title) {
         messagesContainer.innerHTML = '';
     }
 
-    chatPaging = { chatId, minId: null, hasMore: true, loading: false };
+    chatPaging = { chatId: cid, minId: null, hasMore: true, loading: false };
     
     try {
         const msgsUrl = currentServerId
-            ? `/api/servers/${currentServerId}/chats/${chatId}/messages?limit=${MESSAGES_PAGE_SIZE}`
-            : `/api/dms/${chatId}/messages?limit=${MESSAGES_PAGE_SIZE}`;
+            ? `/api/servers/${currentServerId}/chats/${cid}/messages?limit=${MESSAGES_PAGE_SIZE}`
+            : `/api/dms/${cid}/messages?limit=${MESSAGES_PAGE_SIZE}`;
 
         const rawMsgs = await api(msgsUrl);
         const msgs = Array.isArray(rawMsgs)
@@ -5954,7 +5961,7 @@ async function openChat(chatId, title) {
             : rawMsgs;
 
         if (seq !== openChatSeq) {
-            appLog(`[UI] openChat(${chatId}) stale response ignored (seq=${seq}, current=${openChatSeq})`);
+            appLog(`[UI] openChat(${cid}) stale response ignored (seq=${seq}, current=${openChatSeq})`);
             return;
         }
         
@@ -5972,20 +5979,20 @@ async function openChat(chatId, title) {
                 wireMessagesAutoScroll();
 
                 const latestId = msgs[msgs.length - 1]?.id ?? null;
-                const lastSeen = currentServerId ? getLastSeenId(currentServerId, chatId) : null;
+                const lastSeen = currentServerId ? getLastSeenId(currentServerId, cid) : null;
 
                 if (lastSeen !== null && latestId !== null && Number(latestId) > Number(lastSeen)) {
-                    const unread = msgs.filter(x => (x?.id ?? 0) > Number(lastSeen)).length || (currentServerId ? (getUnreadCount(currentServerId, chatId) || 1) : 1);
-                    if (currentServerId) setUnreadCount(currentServerId, chatId, unread);
+                    const unread = msgs.filter(x => (x?.id ?? 0) > Number(lastSeen)).length || (currentServerId ? (getUnreadCount(currentServerId, cid) || 1) : 1);
+                    if (currentServerId) setUnreadCount(currentServerId, cid, unread);
                     setStickToBottom(false);
                     insertNewMarkerAfter(messagesContainer, lastSeen);
                     scrollToMessageId(messagesContainer, lastSeen);
                 } else {
                     removeNewMarker(messagesContainer);
                     if (currentServerId) {
-                        clearUnreadCount(currentServerId, chatId);
-                        updateChannelListItemOnMessage(chatId, 0);
-                        if (latestId !== null) setLastSeenId(currentServerId, chatId, latestId);
+                        clearUnreadCount(currentServerId, cid);
+                        updateChannelListItemOnMessage(cid, 0);
+                        if (latestId !== null) setLastSeenId(currentServerId, cid, latestId);
                     }
                     setStickToBottom(true);
                     scrollToBottomSafe(messagesContainer, 6);
@@ -6010,8 +6017,8 @@ async function openChat(chatId, title) {
                 messagesContainer.appendChild(emptyMsg);
                 wireMessagesAutoScroll();
                 removeNewMarker(messagesContainer);
-                clearUnreadCount(currentServerId, chatId);
-                        updateChannelListItemOnMessage(chatId, 0);
+                clearUnreadCount(currentServerId, cid);
+                updateChannelListItemOnMessage(cid, 0);
                 setStickToBottom(true);
                 scrollToBottomSafe(messagesContainer, 3);
                 updateJumpBtn();
@@ -6020,7 +6027,7 @@ async function openChat(chatId, title) {
         
         // Join room via WS. If WS isn't connected yet, websocket-manager will queue the message.
         if (wsManager && typeof wsManager.joinRoom === 'function') {
-            wsManager.joinRoom(chatId);
+            wsManager.joinRoom(cid);
         }
     } catch (e) {
         console.error("[UI] Failed to load messages", e);
@@ -6108,7 +6115,8 @@ function setupWebSocketHandlers() {
             if (!Number.isFinite(roomId)) return;
             const mid = parseMaybeNumber(data.id) || parseMaybeNumber(data.message_id);
             if (!mid) return;
-            if (roomId === currentChatId) {
+            const currentChatNumeric = Number(currentChatId);
+            if (roomId === currentChatNumeric) {
                 const el = document.querySelector(`.message[data-msg-id="${mid}"]`);
                 try { el && el.remove(); } catch (_) {}
             }
@@ -6121,7 +6129,8 @@ function setupWebSocketHandlers() {
             const roomId = typeof data.room_id === 'string' ? parseInt(data.room_id, 10) : data.room_id;
             if (!Number.isFinite(roomId)) return;
             const mid = parseMaybeNumber(data.message_id);
-            if (roomId === currentChatId && mid) {
+            const currentChatNumeric = Number(currentChatId);
+            if (roomId === currentChatNumeric && mid) {
                 refreshMessageReactions(mid, { force: true });
             }
             return;
@@ -6131,6 +6140,7 @@ function setupWebSocketHandlers() {
 
         const roomId = typeof data.room_id === 'string' ? parseInt(data.room_id, 10) : data.room_id;
         if (!Number.isFinite(roomId)) return;
+        const currentChatNumeric = Number(currentChatId);
 
         const messageData = await prepareMessageForDisplay(data);
         const sender = (messageData.sender_username || messageData.sender_id || 'Unknown').toString();
@@ -6145,7 +6155,7 @@ function setupWebSocketHandlers() {
         const myName = (currentUser?.username || currentUser?.nickname || '').toString();
         if (myName && sender === myName) {
             // still append if it's current chat and missing
-            if (roomId === currentChatId) {
+            if (roomId === currentChatNumeric) {
                 addMessage({
                     id: messageData.id,
                     chat_id: roomId,
@@ -6180,7 +6190,7 @@ function setupWebSocketHandlers() {
         }
 
         // server channel unread updates
-        if (currentServerId && roomId !== currentChatId) {
+        if (currentServerId && roomId !== currentChatNumeric) {
             const kind = (chatKindById.get(roomId) || 'text').toString();
             if (kind !== 'voice') {
                 incUnreadCount(currentServerId, roomId, 1);
@@ -6190,7 +6200,7 @@ function setupWebSocketHandlers() {
         }
 
         // append to current chat
-        if (roomId === currentChatId) {
+        if (roomId === currentChatNumeric) {
             addMessage({
                 id: messageData.id,
                 chat_id: roomId,
@@ -6387,8 +6397,11 @@ function initWebSocket() {
                 }
                 
                 if (currentChatId && wsManager.isConnected && wsManager.joinRoom) {
-                    appLog(`[WS] Rejoining room ${currentChatId} after reconnect`);
-                    wsManager.joinRoom(currentChatId);
+                    const chatId = Number(currentChatId);
+                    if (Number.isFinite(chatId) && chatId > 0) {
+                        appLog(`[WS] Rejoining room ${chatId} after reconnect`);
+                        wsManager.joinRoom(chatId);
+                    }
                 }
             }).catch(error => {
                 console.error('[APP] WebSocket connection failed:', error);
