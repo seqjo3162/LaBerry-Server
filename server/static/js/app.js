@@ -247,7 +247,18 @@ function e2eeSaveTrustedKeys(map) {
     } catch (_) {}
 }
 
-async function e2eeTrustPublicKey(userId, username, jwk) {
+function e2eeResetTrustedKeyForUser(userId) {
+    const id = String(userId);
+    const trusted = e2eeLoadTrustedKeys();
+    if (trusted[id]) {
+        delete trusted[id];
+        e2eeSaveTrustedKeys(trusted);
+        e2eePublicKeyCache.delete(Number(userId));
+        console.log(`[E2EE] Reset trusted key for user ${userId}`);
+    }
+}
+
+async function e2eeTrustPublicKey(userId, username, jwk, allowUpdate = false) {
     const id = Number(userId);
     if (!Number.isFinite(id) || id <= 0 || id === Number(currentUser?.id)) return;
     const fingerprint = await e2eeFingerprintPublicKey(jwk);
@@ -256,6 +267,16 @@ async function e2eeTrustPublicKey(userId, username, jwk) {
     const trusted = e2eeLoadTrustedKeys();
     const prev = trusted[String(id)];
     if (prev?.fingerprint && prev.fingerprint !== fingerprint) {
+        if (allowUpdate) {
+            console.warn(`[E2EE] Public key changed for ${username || `#${id}`}; updating trusted key`);
+            trusted[String(id)] = {
+                fingerprint,
+                username: username || '',
+                trusted_at: new Date().toISOString(),
+            };
+            e2eeSaveTrustedKeys(trusted);
+            return;
+        }
         const err = new Error('e2ee_public_key_changed');
         err.code = 'e2ee_public_key_changed';
         err.username = username || `#${id}`;
@@ -458,7 +479,16 @@ async function e2eeGetUserPublicKey(userId) {
             }
         }
         if (pubKey) {
-            await e2eeTrustPublicKey(id, u?.username, pubKey);
+            try {
+                await e2eeTrustPublicKey(id, u?.username, pubKey);
+            } catch (e) {
+                if (e?.code === 'e2ee_public_key_changed') {
+                    console.warn(`[E2EE] Public key changed for ${u?.username || `#${id}`}; accepting new key`);
+                    await e2eeTrustPublicKey(id, u?.username, pubKey, true);
+                } else {
+                    throw e;
+                }
+            }
             e2eePublicKeyCache.set(id, pubKey);
             return pubKey;
         }
@@ -469,7 +499,16 @@ async function e2eeGetUserPublicKey(userId) {
             // Try both public_jwk and publicKeyB64 fields
             const first = devs[0].public_jwk || devs[0].publicKeyB64 || devs[0].public_key;
             if (first) {
-                await e2eeTrustPublicKey(id, u?.username, first);
+                try {
+                    await e2eeTrustPublicKey(id, u?.username, first);
+                } catch (e) {
+                    if (e?.code === 'e2ee_public_key_changed') {
+                        console.warn(`[E2EE] Public key changed for ${u?.username || `#${id}`}; accepting new key`);
+                        await e2eeTrustPublicKey(id, u?.username, first, true);
+                    } else {
+                        throw e;
+                    }
+                }
                 e2eePublicKeyCache.set(id, first);
                 return first;
             }
@@ -859,7 +898,41 @@ async function e2eeDecryptText(content) {
                 );
                 return new TextDecoder().decode(plain);
             } catch (e) {
+                if (e?.code === 'e2ee_public_key_changed') {
+                    // Если ключ отправителя изменился, очищаем кэш и пытаемся снова
+                    console.warn('[E2EE] Sender key changed, clearing cache and retrying:', e?.username);
+                    const senderId = env.sender;
+                    if (Number.isFinite(senderId) && senderId > 0) {
+                        e2eePublicKeyCache.delete(senderId);
+                    }
+                }
                 lastError = e;
+            }
+        }
+
+        // Если в последний раз произошла ошибка public_key_changed, пытаемся снова с очищенным кэшем
+        if (lastError?.code === 'e2ee_public_key_changed') {
+            console.log('[E2EE] Retrying decryption after key change...');
+            try {
+                const retryUserKeyMap = e2eeLookupRecipientKeys(env, currentUser.id, myDeviceId);
+                const retryWrappedCandidates = e2eeCollectWrappedKeyCandidates(retryUserKeyMap, myDeviceId);
+                
+                for (const wrapped of retryWrappedCandidates) {
+                    try {
+                        const messageKey = await e2eeUnwrapMessageKey(wrapped, env, identity);
+                        if (!messageKey) continue;
+                        const plain = await crypto.subtle.decrypt(
+                            { name: 'AES-GCM', iv: e2eeB64uToBytes(env.iv) },
+                            messageKey,
+                            e2eeB64uToBytes(env.ct)
+                        );
+                        return new TextDecoder().decode(plain);
+                    } catch (retryErr) {
+                        // Ignore and continue
+                    }
+                }
+            } catch (_) {
+                // Fall through to final error message
             }
         }
 
