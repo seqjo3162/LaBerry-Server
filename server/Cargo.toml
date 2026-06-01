@@ -42,6 +42,7 @@ mime = "0.3"
 sysinfo = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
 
 # thumbnails + image dimension checks
 image = "0.25"
