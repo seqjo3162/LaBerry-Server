@@ -289,14 +289,21 @@ pub(crate) async fn cleanup_expired_files(st: &AppState) {
     .fetch_all(&st.db)
     .await
     .unwrap_or_default();
+    if !rows.is_empty() {
+        tracing::info!("[CLEANUP] Found {} expired temporary file(s)", rows.len());
+    }
 
     for row in rows {
+        tracing::info!("[CLEANUP] Processing expired file id={} chat_id={} path={}", row.id, row.chat_id, row.storage_path);
         if heal_message_file_if_referenced(st, row.id, row.chat_id, &row.storage_path).await {
+            tracing::info!("[CLEANUP] File id={} healed and attached to message, skipping deletion", row.id);
             continue;
         }
         if thumb_only_file_can_be_shown(st, row.id, row.chat_id, &row.filename, &row.storage_path).await {
+            tracing::info!("[CLEANUP] File id={} is thumb-only referenced, keeping thumb, skipping deletion", row.id);
             continue;
         }
+        tracing::info!("[CLEANUP] Marking file id={} as expired", row.id);
         mark_file_expired(st, row.id, &row.storage_path, &row.filename).await;
     }
 

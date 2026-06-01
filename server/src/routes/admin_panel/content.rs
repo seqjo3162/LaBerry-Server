@@ -972,6 +972,52 @@ pub(super) async fn db_cleanup_expired_files_post(
     admin_redirect_with_msg(&return_to, "Готово. Просроченные файлы и мусорные thumbs очищены.").into_response()
 }
 
+pub(super) async fn db_list_expired_files_get(
+    State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
+        return e.into_response();
+    }
+    let (_sid, _sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, filename, storage_path, storage_kind, expires_at, deleted_at, uploaded_by, chat_id
+        FROM files
+        WHERE expires_at IS NOT NULL
+          AND expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+        ORDER BY expires_at ASC
+        LIMIT 1000
+        "#,
+    )
+    .fetch_all(&st.db)
+    .await
+    .unwrap_or_default();
+
+    let out: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+        serde_json::json!({
+            "id": r.get::<i64, _>("id"),
+            "filename": r.get::<String, _>("filename"),
+            "storage_path": r.get::<String, _>("storage_path"),
+            "storage_kind": r.get::<String, _>("storage_kind"),
+            "expires_at": r.try_get::<String, _>("expires_at").ok(),
+            "deleted_at": r.try_get::<String, _>("deleted_at").ok(),
+            "uploaded_by": r.try_get::<i64, _>("uploaded_by").ok(),
+            "chat_id": r.try_get::<i64, _>("chat_id").ok(),
+        })
+    }).collect();
+
+    (StatusCode::OK, axum::Json(out)).into_response()
+}
+
 pub(super) enum DbAction {
     WipeMessages,
     WipeServers,

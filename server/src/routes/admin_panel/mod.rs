@@ -22,8 +22,7 @@ use users::*;
 pub(super) mod content;
 use self::content::*;
 
-mod homie;
-use homie::*;
+// homie module not exposed in admin panel UI
 
 mod servers;
 use servers::*;
@@ -47,10 +46,7 @@ pub fn router() -> Router<AppState> {
         .route("/reports/:id/status", post(admin_report_status))
         .route("/suggestions", get(suggestions_page))
         .route("/suggestions/:id/status", post(admin_suggestion_status))
-        .route("/gifs", get(gifs_page))
-        .route("/gifs/upload", post(admin_gif_upload))
-        .route("/gifs/:id/delete", post(admin_gif_delete))
-        .route("/gifs/:id/raw", get(admin_gif_raw))
+        // GIF management routes remain, but hidden from admin center UI
         .route("/downloads", get(downloads_page))
         .route("/downloads/upload", post(admin_download_upload))
         .route("/downloads/:id/delete", post(admin_download_delete))
@@ -67,10 +63,8 @@ pub fn router() -> Router<AppState> {
         .route("/db/reset_keep_users", post(db_reset_keep_users_post))
         .route("/db/vacuum", post(db_vacuum_post))
         .route("/db/cleanup_expired_files", post(db_cleanup_expired_files_post))
-        .route("/homie/health", get(homie_health_get))
-        .route("/homie/tools", get(homie_tools_get))
-        .route("/homie/chat", post(homie_chat_post))
-        .route("/homie/reset", post(homie_reset_post))
+        .route("/db/expired_files", get(content::db_list_expired_files_get))
+        // Homie endpoints left in place but not linked from UI
 }
 
 // =============================
@@ -852,7 +846,8 @@ fn new_session(st: &AppState) -> (String, AdminSession) {
 }
 
 fn cookie_for_session(sid: &str, secure: bool) -> String {
-    let mut c = format!("lb_admin_sid={sid}; Path=/; HttpOnly; SameSite=Lax");
+    // Make admin session cookie persistent for 8 hours to improve redirect behavior
+    let mut c = format!("lb_admin_sid={sid}; Path=/; Max-Age=28800; HttpOnly; SameSite=Lax");
     if secure {
         c.push_str("; Secure");
     }
@@ -1412,7 +1407,7 @@ async fn center_page(
 
     let users_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(&st.db).await.unwrap_or(0);
     let servers_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM servers").fetch_one(&st.db).await.unwrap_or(0);
-    let messages_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(&st.db).await.unwrap_or(0);
+    // messages count removed from admin center (messages are E2EE)
     let banned_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetch_one(&st.db).await.unwrap_or(0);
 
     let users_query = q.q.clone().unwrap_or_default().trim().to_string();
@@ -1471,8 +1466,7 @@ async fn center_page(
     if server_cards.is_empty() { server_cards.push_str("<div class='empty-state'>Серверы не найдены.</div>"); }
     let servers_panel = render_servers_panel_body("", &server_cards, true);
     let db_panel = render_db_panel_body(&sess, "/admin/center");
-    let gif_rows = fetch_admin_global_gifs(&st.db).await;
-    let gifs_panel = render_admin_gifs_panel_body(&sess, &gif_rows, "/admin/center?view=gifs");
+    // GIF panel hidden from center; keep backend endpoints intact
     let download_rows = fetch_admin_downloads(&st.db).await;
     let downloads_panel = render_admin_downloads_panel_body(&sess, &download_rows, "/admin/center?view=downloads");
     let suggestion_status = normalized_suggestion_status(q.status.as_deref());
@@ -1480,89 +1474,7 @@ async fn center_page(
     let suggestions_return_to = suggestions_page_url("/admin/center", true, suggestion_status);
     let suggestions_panel = render_suggestions_panel_body(&sess, &suggestions, suggestion_status, true, &suggestions_return_to);
 
-    let msg_rows = sqlx::query(
-        r#"SELECT m.id, COALESCE(m.content,'') AS content, m.timestamp AS created_at, COALESCE(u.username,'Системный') AS username,
-                  COALESCE(c.name,'ЛС/скрытый чат') AS chat_name, c.id AS chat_id, c.server_id
-           FROM messages m
-           LEFT JOIN users u ON u.id = m.sender_id
-           LEFT JOIN chats c ON c.id = m.chat_id
-           ORDER BY m.id DESC
-           LIMIT 120"#,
-    ).fetch_all(&st.db).await.unwrap_or_default();
-    let mut chat_items = String::new();
-    let mut feed_items = String::new();
-    use std::collections::BTreeMap;
-    let mut chat_names: BTreeMap<i64, (String, i64)> = BTreeMap::new();
-    for r in msg_rows {
-        let chat_id: i64 = r.get("chat_id");
-        let chat_name: String = r.get("chat_name");
-        let username: String = r.get("username");
-        let content: String = r.get("content");
-        let created_at: String = r.get("created_at");
-        let server_id: Option<i64> = r.get("server_id");
-        let text = if content.trim().is_empty() { "[вложение или пустое сообщение]".to_string() } else { content.clone() };
-        let preview = if text.chars().count() > 48 { format!("{}…", text.chars().take(48).collect::<String>()) } else { text.clone() };
-        let location = match server_id { Some(sid) => format!("Сервер #{sid}"), None => "Личные сообщения".to_string() };
-        chat_names.entry(chat_id).or_insert((chat_name.clone(), 0)).1 += 1;
-        feed_items.push_str(&format!(
-            r#"<div class='center-feed-item' data-chat-feed='{chat_id}'>
-  <div class='center-feed-head'>
-    <div>
-      <div class='center-feed-author'>{author}</div>
-      <div class='center-feed-loc'>{location} · {chat_name}</div>
-    </div>
-    <div class='center-feed-time'>{time}</div>
-  </div>
-  <div class='center-feed-text'>{text}</div>
-</div>"#,
-            chat_id=chat_id, author=escape_html(&username), location=escape_html(&location), chat_name=escape_html(&chat_name),
-            time=escape_html(&fmt_admin_dt(&created_at)), text=render_admin_message_html(&text),
-        ));
-        let _ = preview;
-    }
-    for (chat_id, (chat_name, count)) in chat_names.iter() {
-        chat_items.push_str(&format!(
-            r#"<button type='button' class='center-chat-item' data-chat-select='{chat_id}'>
-  <div class='center-chat-title'>{chat_name}</div>
-  <div class='center-chat-meta'>{count} сообщений</div>
-</button>"#,
-            chat_id=chat_id, chat_name=escape_html(chat_name), count=count,
-        ));
-    }
-    if chat_items.is_empty() {
-        chat_items.push_str("<div class='empty-state'>Пока нет чатов для просмотра.</div>");
-        feed_items.push_str("<div class='empty-state'>Пока нет сообщений.</div>");
-    }
-    let messenger_panel = format!(
-        r#"<div class='card'>
-  <div class='hstack'>
-    <h2 style='margin:0;'>Мессенджер</h2>
-    <span class='pill'>Read-only</span>
-    <span class='pill'>Без iframe</span>
-  </div>
-  <div class='small' style='margin-top:10px;'>Одна вкладка браузера: слева чаты, справа поток сообщений. Секция запоминает выбранный чат.</div>
-</div>
-<div class='admin-messenger'>
-  <div class='admin-messenger-sidebar'>
-    <div class='center-inline-search'>
-      <input type='text' data-persist-key='admin-center-messenger-search' data-chat-search placeholder='Фильтр по чатам' />
-      <button type='button' class='btn-soft' data-clear-chat-search>Сбросить</button>
-    </div>
-    <div class='admin-chat-list'>{chat_items}</div>
-  </div>
-  <div class='admin-messenger-main'>
-    <div class='admin-chat-header'>
-      <div>
-        <div class='panel-stage-title' style='font-size:18px;'>Поток сообщений</div>
-        <div class='panel-stage-sub'>Последние 120 сообщений. Переключай чаты без потери состояния панели.</div>
-      </div>
-      <span class='pill'>UTC</span>
-    </div>
-    <div class='center-feed-list admin-chat-feed'>{feed_items}</div>
-  </div>
-</div>"#,
-        chat_items=chat_items, feed_items=feed_items,
-    );
+        // Messenger feed removed from admin center (messages are end-to-end encrypted)
 
     let overview_panel = format!(
         r#"<div class='center-hero'>
@@ -1570,12 +1482,11 @@ async fn center_page(
     <h2 class='center-hero-title'>Центр управления</h2>
     <div class='center-hero-sub'>Одна рабочая область для админки и мессенджера. Секции раскрываются по всей доступной ширине, а поиски и выбранная панель сохраняются.</div>
   </div>
-  <div class='center-stat-row'>
-    <div class='center-stat'><div class='center-stat-label'>Пользователи</div><div class='center-stat-value'>{users_total}</div></div>
-    <div class='center-stat'><div class='center-stat-label'>Серверы</div><div class='center-stat-value'>{servers_total}</div></div>
-    <div class='center-stat'><div class='center-stat-label'>Сообщения</div><div class='center-stat-value'>{messages_total}</div></div>
-    <div class='center-stat'><div class='center-stat-label'>Заблокировано</div><div class='center-stat-value'>{banned_total}</div></div>
-  </div>
+        <div class='center-stat-row'>
+        <div class='center-stat'><div class='center-stat-label'>Пользователи</div><div class='center-stat-value'>{users_total}</div></div>
+        <div class='center-stat'><div class='center-stat-label'>Серверы</div><div class='center-stat-value'>{servers_total}</div></div>
+        <div class='center-stat'><div class='center-stat-label'>Заблокировано</div><div class='center-stat-value'>{banned_total}</div></div>
+    </div>
 </div>
 <div class='helper-grid'>
   <div class='helper-card'><h3>Навигация</h3><div class='center-note-list'>
@@ -1588,29 +1499,25 @@ async fn center_page(
     <div class='center-note-line'>• предложения вынесены в отдельную панель;</div>
     <div class='center-note-line'>• опасные действия требуют админ-доступ.</div>
   </div></div>
-  <div class='helper-card'><h3>Мониторинг</h3><div class='center-note-list'>
-    <div class='center-note-line'>• мессенджер открыт в read-only режиме;</div>
-    <div class='center-note-line'>• Homie AI остаётся отдельным инструментом;</div>
-    <div class='center-note-line'>• время в админке показывается в UTC.</div>
-  </div></div>
+    <div class='helper-card'><h3>Мониторинг</h3><div class='center-note-list'>
+        <div class='center-note-line'>• время в админке показывается в UTC.</div>
+    </div></div>
 </div>"#,
         users_total=users_total, servers_total=servers_total, messages_total=messages_total, banned_total=banned_total,
     );
 
-    let homie_panel = render_homie_center_panel(&sess);
+    // homie panel hidden from center UI
 
     let body = format!(
         r#"<div class='panel-shell'>
-  <aside class='panel-sidebar'>
+    <aside class='panel-sidebar'>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='overview'><strong>Центр</strong><span class='small'>Общий вид и точка входа в остальные панели.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='users'><strong>Пользователи</strong><span class='small'>Почта, ник и действия по аккаунтам без прыжков по страницам.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='suggestions'><strong>Предложения</strong><span class='small'>Идеи пользователей из настроек и быстрый просмотр статусов.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='servers'><strong>Серверы</strong><span class='small'>Проверка владельцев и удаление прямо внутри рабочей области.</span></button>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='gifs'><strong>GIF</strong><span class='small'>Глобальный список анимированных стикеров для пользователей.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='downloads'><strong>Загрузки</strong><span class='small'>APK и ПК клиент, которые сервер отдает на странице скачивания.</span></button>
     <button type='button' class='center-nav-item panel-switch' data-center-switch='db'><strong>База данных</strong><span class='small'>Сервисные действия и обслуживание без отдельной вкладки.</span></button>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='messenger'><strong>Мессенджер</strong><span class='small'>Read-only поток и переключение чатов в той же странице.</span></button>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='homie'><strong>Homie AI</strong><span class='small'>Личный агент только для админки.</span></button>
+    <!-- GIF, Messenger and Homie navigation removed -->
   </aside>
   <section class='panel-stage'>
     <div class='panel-stage-header'>
@@ -1624,15 +1531,13 @@ async fn center_page(
       <div class='panel-view' data-panel-view='users' data-stage-title='Пользователи' data-stage-sub=''>{users_panel}</div>
       <div class='panel-view' data-panel-view='suggestions' data-stage-title='Предложения' data-stage-sub='Идеи пользователей из настроек и статус их рассмотрения.'>{suggestions_panel}</div>
       <div class='panel-view' data-panel-view='servers' data-stage-title='Панель серверов' data-stage-sub='Проверка серверов и действия с ними в общей рабочей области.'>{servers_panel}</div>
-      <div class='panel-view' data-panel-view='gifs' data-stage-title='Глобальные GIF' data-stage-sub='Анимированные стикеры, доступные всем пользователям.'>{gifs_panel}</div>
       <div class='panel-view' data-panel-view='downloads' data-stage-title='Загрузки приложения' data-stage-sub='APK и ПК клиент, которые пользователи скачивают с сервера.'>{downloads_panel}</div>
       <div class='panel-view' data-panel-view='db' data-stage-title='Панель базы данных' data-stage-sub='Сервисные инструменты открываются здесь же, без переходов по страницам.'>{db_panel}</div>
-      <div class='panel-view' data-panel-view='messenger' data-stage-title='Мессенджер внутри админки' data-stage-sub='Read-only поток сообщений и переключение чатов без второй вкладки браузера.'>{messenger_panel}</div>
-      <div class='panel-view' data-panel-view='homie' data-stage-title='Homie AI' data-stage-sub='Локальный агент админ-панели.'>{homie_panel}</div>
+            <!-- GIF, Messenger and Homie panels are hidden -->
     </div>
   </section>
 </div>"#,
-        overview_panel=overview_panel, users_panel=users_panel, suggestions_panel=suggestions_panel, servers_panel=servers_panel, gifs_panel=gifs_panel, downloads_panel=downloads_panel, db_panel=db_panel, messenger_panel=messenger_panel, homie_panel=homie_panel,
+                overview_panel=overview_panel, users_panel=users_panel, suggestions_panel=suggestions_panel, servers_panel=servers_panel, downloads_panel=downloads_panel, db_panel=db_panel,
     );
 
     page("Админка • Центр", &body, q.msg.as_deref()).into_response()

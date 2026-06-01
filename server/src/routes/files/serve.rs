@@ -3,12 +3,37 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use std::io::{Write, Seek, Read};
+use std::{io::{Write, Seek, Read}, path::{Path, PathBuf}};
 
 use crate::server::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
 use super::{resolve_user_id_for_file_request, load_file_for_serving, load_file_for_access, can_access_chat_by_user_id};
+
+async fn file_exists(path: &str) -> bool {
+    tokio::fs::metadata(path).await.map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
+}
+
+fn thumb_path_candidates(filename: &str) -> Vec<PathBuf> {
+    let thumbs_dir = PathBuf::from("storage/files/thumbs");
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    ["png", "webp", "jpg", "jpeg"]
+        .into_iter()
+        .map(|ext| thumbs_dir.join(format!("{}.{}", stem, ext)))
+        .collect()
+}
+
+async fn thumb_exists(filename: &str) -> bool {
+    for path in thumb_path_candidates(filename) {
+        if tokio::fs::metadata(&path).await.map(|m| m.is_file() && m.len() > 0).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
 
 /// Returns a signed download link for the file
 pub(crate) async fn get_file_link(
@@ -25,6 +50,10 @@ pub(crate) async fn get_file_link(
         return (StatusCode::GONE, "file expired").into_response();
     }
 
+    if !can_access_chat_by_user_id(&st, me.id, file_row.chat_id).await {
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
+
     // Get token_version from DB
     let token_version = match sqlx::query_scalar::<_, i64>(
         "SELECT token_version FROM users WHERE id = ? LIMIT 1"
@@ -37,13 +66,27 @@ pub(crate) async fn get_file_link(
     };
 
     match crate::auth::create_file_download_token(me.id, file_id, token_version) {
-        Ok((token, _ttl)) => {
-            let url = format!(
-                "/api/files/{}?dl={}",
-                file_id,
-                urlencoding::encode(&token)
-            );
-            (StatusCode::OK, axum::Json(serde_json::json!({ "url": url }))).into_response()
+        Ok((token, ttl)) => {
+            let dl_token = urlencoding::encode(&token);
+            let base_url = format!("/api/files/{}", file_id);
+            let download_url = format!("{}?dl={}", base_url, dl_token);
+            let raw_url = format!("{}/raw?dl={}", base_url, dl_token);
+            let preview_url = format!("{}/preview?dl={}", base_url, dl_token);
+            let archive_url = format!("{}/archive?dl={}", base_url, dl_token);
+
+            let original_available = file_exists(&file_row.storage_path).await;
+            let thumb_available = thumb_exists(&file_row.filename).await;
+
+            (StatusCode::OK, axum::Json(serde_json::json!({
+                "download_url": download_url,
+                "raw_url": raw_url,
+                "preview_url": preview_url,
+                "archive_url": archive_url,
+                "expires_in_sec": ttl,
+                "download_available": original_available,
+                "original_available": original_available,
+                "thumb_available": thumb_available,
+            }))).into_response()
         }
         Err(e) => {
             tracing::error!("[FILES] Failed to create download token for file_id={}: {}", file_id, e);
