@@ -161,3 +161,4 @@ assets/delegated-ripencc-latest
 /turn
 turn/turnserver.conf
 cookies.txt
+Cargo.lock

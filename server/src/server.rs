@@ -240,58 +240,68 @@ pub async fn run_server(
     tracing::info!("[SERVER] Main router built ✅");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let _shutdown_main = shutdown.clone();
+    // Pass shutdown Notify into the loop so Ctrl+C actually stops the server.
+    let shutdown_main = shutdown.clone();
 
     let svc = app.into_service();
     let mut main_handle = tokio::spawn(async move {
         loop {
-            match listener.accept().await {
-                Ok((socket, remote_addr)) => {
-                    let svc = svc.clone();
-                    tokio::spawn(async move {
-                        let io = hyper_util::rt::TokioIo::new(socket);
-
-                        let service = service_fn(move |mut req| {
-                            let mut svc = svc.clone();
-                            async move {
-                                req.extensions_mut()
-                                    .insert(ConnectInfo(remote_addr));
-
-                                let req = req.map(axum::body::Body::new);
-
-                                let resp = match svc.call(req).await {
-                                    Ok(resp) => resp,
-                                    Err(err) => {
-                                        tracing::error!("[SERVER] Service error: {}", err);
-                                        axum::response::Response::builder()
-                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                            .body(axum::body::Body::from("internal server error"))
-                                            .unwrap()
-                                    }
-                                };
-
-                                Ok::<_, std::convert::Infallible>(resp)
-                            }
-                        });
-
-                        if let Err(err) = hyper_util::server::conn::auto::Builder::new(
-                            hyper_util::rt::TokioExecutor::new(),
-                        )
-                        .serve_connection(io, service)
-                        .await
-                        {
-                            tracing::error!("[SERVER] Connection error: {}", err);
-                        }
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("[SERVER] Accept error: {}", e);
+            tokio::select! {
+                biased;
+                _ = shutdown_main.notified() => {
+                    tracing::info!("[SERVER] Shutdown signal received, stopping accept loop.");
                     break;
+                }
+                result = listener.accept() => {
+                    match result {
+                        Ok((socket, remote_addr)) => {
+                            let svc = svc.clone();
+                            tokio::spawn(async move {
+                                let io = hyper_util::rt::TokioIo::new(socket);
+
+                                let service = service_fn(move |mut req| {
+                                    let mut svc = svc.clone();
+                                    async move {
+                                        req.extensions_mut()
+                                            .insert(ConnectInfo(remote_addr));
+
+                                        let req = req.map(axum::body::Body::new);
+
+                                        let resp = match svc.call(req).await {
+                                            Ok(resp) => resp,
+                                            Err(err) => {
+                                                tracing::error!("[SERVER] Service error: {}", err);
+                                                axum::response::Response::builder()
+                                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                    .body(axum::body::Body::from("internal server error"))
+                                                    .unwrap()
+                                            }
+                                        };
+
+                                        Ok::<_, std::convert::Infallible>(resp)
+                                    }
+                                });
+
+                                if let Err(err) = hyper_util::server::conn::auto::Builder::new(
+                                    hyper_util::rt::TokioExecutor::new(),
+                                )
+                                .serve_connection(io, service)
+                                .await
+                                {
+                                    tracing::error!("[SERVER] Connection error: {}", err);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("[SERVER] Accept error: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
         }
 
-        Err::<(), anyhow::Error>(anyhow::anyhow!("HTTP server stopped"))
+        Ok::<(), anyhow::Error>(())
     });
 
     // ------------------------------
@@ -318,55 +328,65 @@ pub async fn run_server(
             crate::routes::pages::admin_panel_base_url()
         );
         let svc = admin_app.into_service();
+        let shutdown_admin = shutdown.clone();
         let ah = tokio::spawn(async move {
             loop {
-                match admin_listener.accept().await {
-                    Ok((socket, remote_addr)) => {
-                        let svc = svc.clone();
-                        tokio::spawn(async move {
-                            let io = hyper_util::rt::TokioIo::new(socket);
-
-                            let service = service_fn(move |mut req| {
-                                let mut svc = svc.clone();
-                                async move {
-                                    req.extensions_mut()
-                                        .insert(ConnectInfo(remote_addr));
-
-                                    let req = req.map(axum::body::Body::new);
-
-                                    let resp = match svc.call(req).await {
-                                        Ok(resp) => resp,
-                                        Err(err) => {
-                                            tracing::error!("[ADMIN] Service error: {}", err);
-                                            axum::response::Response::builder()
-                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                .body(axum::body::Body::from("internal server error"))
-                                                .unwrap()
-                                        }
-                                    };
-
-                                    Ok::<_, std::convert::Infallible>(resp)
-                                }
-                            });
-
-                            if let Err(err) = hyper_util::server::conn::auto::Builder::new(
-                                hyper_util::rt::TokioExecutor::new(),
-                            )
-                            .serve_connection(io, service)
-                            .await
-                            {
-                                tracing::error!("[ADMIN] Connection error: {}", err);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        tracing::error!("[ADMIN] Accept error: {}", e);
+                tokio::select! {
+                    biased;
+                    _ = shutdown_admin.notified() => {
+                        tracing::info!("[ADMIN] Shutdown signal received, stopping accept loop.");
                         break;
+                    }
+                    result = admin_listener.accept() => {
+                        match result {
+                            Ok((socket, remote_addr)) => {
+                                let svc = svc.clone();
+                                tokio::spawn(async move {
+                                    let io = hyper_util::rt::TokioIo::new(socket);
+
+                                    let service = service_fn(move |mut req| {
+                                        let mut svc = svc.clone();
+                                        async move {
+                                            req.extensions_mut()
+                                                .insert(ConnectInfo(remote_addr));
+
+                                            let req = req.map(axum::body::Body::new);
+
+                                            let resp = match svc.call(req).await {
+                                                Ok(resp) => resp,
+                                                Err(err) => {
+                                                    tracing::error!("[ADMIN] Service error: {}", err);
+                                                    axum::response::Response::builder()
+                                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                        .body(axum::body::Body::from("internal server error"))
+                                                        .unwrap()
+                                                }
+                                            };
+
+                                            Ok::<_, std::convert::Infallible>(resp)
+                                        }
+                                    });
+
+                                    if let Err(err) = hyper_util::server::conn::auto::Builder::new(
+                                        hyper_util::rt::TokioExecutor::new(),
+                                    )
+                                    .serve_connection(io, service)
+                                    .await
+                                    {
+                                        tracing::error!("[ADMIN] Connection error: {}", err);
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!("[ADMIN] Accept error: {}", e);
+                                break;
+                            }
+                        }
                     }
                 }
             }
 
-            Err::<(), anyhow::Error>(anyhow::anyhow!("Admin server stopped"))
+            Ok::<(), anyhow::Error>(())
         });
         admin_handle = Some(ah);
     }
@@ -376,20 +396,20 @@ pub async fn run_server(
         tokio::select! {
             res = &mut main_handle => {
                 shutdown.notify_waiters();
-                let r = res??;
+                res??;
                 let _ = ah.await;
-                Ok(r)
+                Ok(())
             }
             res = &mut ah => {
                 shutdown.notify_waiters();
-                let r = res??;
+                res??;
                 let _ = main_handle.await;
-                Ok(r)
+                Ok(())
             }
         }
     } else {
-        let r = main_handle.await??;
-        Ok(r)
+        main_handle.await??;
+        Ok(())
     }
 }
 

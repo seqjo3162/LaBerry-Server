@@ -62,13 +62,10 @@ mod b64 {
 
 // ==================== X25519 Key Pair ====================
 
-/// X25519 keypair для E2EE (только публичный ключ хранится на сервере)
-/// Приватный ключ генерируется и хранится ТОЛЬКО на клиенте
+/// X25519 keypair для E2EE
 #[derive(Debug, Clone)]
 pub struct E2eeKeyPair {
-    /// Публичный ключ (base64-encoded 32 bytes) — хранится на сервере
     pub public_key_b64: String,
-    /// Приватный ключ (base64-encoded 32 bytes) — ТОЛЬКО для клиента
     pub private_key_b64: Option<String>,
 }
 
@@ -101,14 +98,13 @@ impl E2eeKeyPair {
         // Валидируем что это корректный X25519 public key
         let arr: [u8; 32] = bytes.try_into().ok()?;
         let _pub = X25519PublicKey::from(arr);
-        let _ = _pub.as_bytes(); // just to use it
+        let _ = _pub.as_bytes();
         Some(Self {
             public_key_b64: public_b64.to_string(),
             private_key_b64: None,
         })
     }
 
-    /// Создаём keypair из base64-encoded приватного ключа
     pub fn from_private_b64(private_b64: &str) -> Option<Self> {
         let priv_bytes = b64::decode(private_b64)?;
         if priv_bytes.len() != 32 {
@@ -146,7 +142,7 @@ impl E2eeKeyPair {
         Some(shared.to_bytes())
     }
 
-    /// Получить fingerprint (SHA-256 от публичного ключа)
+    /// fingerprint (SHA-256 от публичного ключа)
     pub fn fingerprint(&self) -> String {
         let bytes = b64::decode(&self.public_key_b64).unwrap_or_default();
         let mut hasher = Sha256::new();

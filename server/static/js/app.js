@@ -1571,9 +1571,11 @@ function isUserWatchingChat(chatId) {
     if (location.hash === '#/friends' || location.hash === '#friends') return false;
 
     const chatView = document.getElementById('chatView');
-    if (!chatView || chatView.classList.contains('hidden')) return false;
+    if (!chatView || chatView.hidden || chatView.classList.contains('hidden')) return false;
 
-    if (chatId !== currentChatId) return false;
+    const targetChatId = Number(chatId);
+    const activeChatId = Number(currentChatId);
+    if (!Number.isFinite(targetChatId) || !Number.isFinite(activeChatId) || targetChatId !== activeChatId) return false;
 
     // tab not active
     if (document.hidden || !document.hasFocus()) return false;
@@ -1692,6 +1694,7 @@ function showDesktopNotification(title, body, tag, data = {}) {
 
     const now = Date.now();
     if (now - lastDesktopAt < 700) return;
+    lastDesktopAt = now;
 
     const options = {
         body,
@@ -1704,21 +1707,7 @@ function showDesktopNotification(title, body, tag, data = {}) {
         requireInteraction: !!data?.requireInteraction,
     };
 
-    try {
-        if ('serviceWorker' in navigator) {
-            registerNotificationWorker();
-            navigator.serviceWorker.ready
-                .then((reg) => reg.showNotification(title, options))
-                .catch(() => {
-                    const n = new Notification(title, options);
-                    n.onclick = () => {
-                        try { window.focus(); } catch (_) {}
-                    };
-                });
-            lastDesktopAt = now;
-            return;
-        }
-
+    const showDirect = () => {
         const n = new Notification(title, {
             ...options,
         });
@@ -1726,9 +1715,67 @@ function showDesktopNotification(title, body, tag, data = {}) {
         n.onclick = () => {
             try { window.focus(); } catch (_) {}
         };
+    };
 
-        lastDesktopAt = now;
+    try {
+        if ('serviceWorker' in navigator) {
+            const regPromise = registerNotificationWorker();
+            if (regPromise && typeof regPromise.then === 'function') {
+                regPromise
+                    .then((reg) => {
+                        if (reg && typeof reg.showNotification === 'function') {
+                            return reg.showNotification(title, options);
+                        }
+                        showDirect();
+                        return null;
+                    })
+                    .catch(() => {
+                        showDirect();
+                    });
+                return;
+            }
+        }
+
+        showDirect();
     } catch (_) {}
+}
+
+function serverIdForChat(roomId) {
+    const chatId = Number(roomId);
+    if (!Number.isFinite(chatId) || chatId <= 0) return 0;
+
+    const mapped = Number(chatServerById.get(chatId) || 0);
+    if (Number.isFinite(mapped) && mapped > 0) return mapped;
+
+    const active = Number(currentServerId || 0);
+    return Number.isFinite(active) && active > 0 ? active : 0;
+}
+
+function updateUnreadForIncoming(roomId) {
+    const serverId = serverIdForChat(roomId);
+    if (!serverId) return;
+
+    incUnreadCount(serverId, roomId, 1);
+    updateChannelListItemOnMessage(roomId, getUnreadCount(serverId, roomId));
+    updateJumpBtn();
+}
+
+function clearUnreadForChat(roomId) {
+    const serverId = serverIdForChat(roomId);
+    if (!serverId) return;
+
+    clearUnreadCount(serverId, roomId);
+    updateChannelListItemOnMessage(roomId, 0);
+}
+
+function shouldNotifyForRoom(roomId) {
+    const settings = getSettings();
+    const chatId = Number(roomId);
+    const kind = (chatKindById.get(chatId) || '').toString();
+    const isDm = kind === 'dm' || dmMetaByChatId.has(chatId) || hiddenDmMeta.has(chatId);
+
+    if (isDm && settings && settings.notify_dms === false) return false;
+    return true;
 }
 
 function notifyForIncomingMessage(roomId, sender, content) {
@@ -1741,13 +1788,14 @@ function notifyForIncomingMessage(roomId, sender, content) {
     // notify only if user is not watching that chat
     if (isUserWatchingChat(roomId)) return;
 
-    const roomServerId = Number(chatServerById.get(Number(roomId)) || 0);
+    if (!shouldNotifyForRoom(roomId)) return;
+
+    const roomServerId = serverIdForChat(roomId);
     if (roomServerId > 0 && isServerMuted(roomServerId)) return;
 
-    // client-side unread counter (for Discord-like open behavior)
-    if (currentServerId && roomId !== null && roomId !== undefined) {
-        incUnreadCount(currentServerId, roomId, 1);
-        updateJumpBtn();
+    const kind = (chatKindById.get(Number(roomId)) || 'text').toString();
+    if (kind !== 'dm' && kind !== 'voice') {
+        updateUnreadForIncoming(roomId);
     }
 
     // desktop notification + sound use same trigger
@@ -6189,16 +6237,6 @@ function setupWebSocketHandlers() {
             updateDmListItemOnMessage(roomId, dmPreview);
         }
 
-        // server channel unread updates
-        if (currentServerId && roomId !== currentChatNumeric) {
-            const kind = (chatKindById.get(roomId) || 'text').toString();
-            if (kind !== 'voice') {
-                incUnreadCount(currentServerId, roomId, 1);
-            const n = getUnreadCount(currentServerId, roomId);
-            updateChannelListItemOnMessage(roomId, n);
-            }
-        }
-
         // append to current chat
         if (roomId === currentChatNumeric) {
             addMessage({
@@ -6214,10 +6252,7 @@ function setupWebSocketHandlers() {
                 reactions: reactions || undefined,
             });
             // mark read
-            if (currentServerId) {
-                clearUnreadCount(currentServerId, roomId);
-                updateChannelListItemOnMessage(roomId, 0);
-            }
+            clearUnreadForChat(roomId);
         }
 
         // notifications for any subscribed chats (ws joins accessible rooms)

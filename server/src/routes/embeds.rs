@@ -15,6 +15,8 @@ use std::{
 use tokio::net::lookup_host;
 use url::Url;
 
+use crate::middleware::auth_guard::AuthUser;
+use crate::middleware::rate_limit;
 use crate::server::AppState;
 
 const MAX_HTML_BYTES: usize = 512 * 1024; // 512KB
@@ -185,8 +187,15 @@ fn extract_site_name(html: &str, fallback_host: &str) -> String {
 
 async fn get_preview(
     State(_st): State<AppState>,
+    me: AuthUser,
     Query(q): Query<PreviewQuery>,
 ) -> impl IntoResponse {
+    // Rate-limit: max 20 preview requests per user per minute to prevent abuse.
+    let rl_key = format!("embed_preview:{}", me.id);
+    if !rate_limit::allow(&rl_key, 20, 60) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+
     let url_str = q.url.clone();
     let Ok(parsed) = Url::parse(&q.url) else {
         return StatusCode::BAD_REQUEST.into_response();
@@ -208,8 +217,10 @@ async fn get_preview(
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .user_agent("LaBerry/1.0 (+https://laberry.local)")
+        // SECURITY: Redirects are disabled. A validated public URL could redirect
+        // to a private/internal address, bypassing the SSRF check above.
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("LaBerry/1.0 (+https://laberry.ru)")
         .build()
     {
         Ok(c) => c,

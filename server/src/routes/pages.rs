@@ -124,46 +124,12 @@ pub async fn admin_redirect_fallback(
         .expect("admin redirect response")
 }
 
-pub async fn admin_hint(headers: HeaderMap) -> Html<String> {
-    let url = admin_panel_url_for_request(&headers, "/admin/");
-    let login_url = admin_panel_url_for_request(&headers, "/admin/login");
-
-    Html(format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Admin</title>
-<style>
-body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b0d12; color:#e6e6e6; margin:0; }}
-main {{ padding:18px; max-width:900px; margin:0 auto; }}
-.card {{ background:#121624; border:1px solid #202742; border-radius:16px; padding:14px; margin-top:14px; }}
-a {{ color:#cfe2ff; }}
-code {{ background:#0f1220; padding:2px 6px; border-radius:8px; border:1px solid #202742; }}
-</style>
-</head>
-<body>
-<main>
-  <div class="card">
-    <h2>Admin panel</h2>
-    <div>Admin panel is served by a dedicated admin listener (local-only by default).</div>
-    <div style="height:10px"></div>
-    <div>Main app is on port <code>LB_PORT</code> (default 5001). The admin UI is <strong>not</strong> on that port.</div>
-    <div style="height:10px"></div>
-    <div>Open admin panel: <a href="{login_url}">{login_url}</a></div>
-    <div style="height:8px"></div>
-    <div class="small">Home: <a href="{url}">{url}</a></div>
-    <div style="height:10px"></div>
-    <div class="small">If you use a reverse proxy, forward <code>/admin</code> to the admin listener (port {port}).</div>
-  </div>
-</main>
-</body>
-</html>"#,
-        url = url,
-        login_url = login_url,
-        port = std::env::var("LB_ADMIN_PORT").unwrap_or_else(|_| "5002".to_string())
-    ))
+pub async fn admin_hint(_headers: HeaderMap) -> axum::response::Response {
+    // Do not disclose the admin panel port or URL to unauthenticated users.
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::NOT_FOUND)
+        .body(axum::body::Body::empty())
+        .unwrap()
 }
 
 /// Путь к статическим файлам
