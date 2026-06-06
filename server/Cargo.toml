@@ -13,33 +13,51 @@ host = []
 
 [dependencies]
 ipnet = "2.9"
-maxminddb = "0.24"
+maxminddb = "0.28.1"
 hyper = "1.0"
 hyper-util = { version = "0.1", features = ["full"] }
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "signal", "net"] }
 tokio-util = { version = "0.7", features = ["io"] }
-tokio-rustls = "0.25"
-rustls = "0.22"
-tower = { version = "0.5.3", features = ["make"] }
-tower-http = { version = "0.6.8", features = ["catch-panic", "cors", "trace", "fs", "set-header"] }
-axum = { version = "0.7.9", features = ["tokio", "multipart", "ws"] }
-axum-extra = { version = "0.9", features = ["typed-header"] }
-tower-service = "0.3"
-anyhow = "1"
+tokio-rustls = { version = "0.26", features = ["ring"] }
+rustls = "0.23"
+tower = { version = "0.5", features = ["make"] }
+tower-http = { version = "0.6", features = ["catch-panic", "cors", "trace", "fs", "set-header"] }
+axum = { version = "0.8.9", features = ["ws", "multipart", "macros"] }
+axum-extra = { version = "0.12.6", features = ["typed-header"] }
+tower-service = "0.3.3"
+anyhow = "1.0.102"
 dotenvy = "0.15"
 once_cell = "1"
-dashmap = "5"
+dashmap = "6.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 argon2 = { version = "0.5", features = ["std"] }
-password-hash = { version = "0.5", features = ["std"] }
-rand = "0.8"
-sha2 = "0.10"
-jsonwebtoken = "9"
+password-hash = { version = "0.6.1" }
+# ... existing content ...
+[dependencies]
+async-trait = "0.1"
+argon2 = "0.5"
+axum = { version = "0.8.9", features = ["macros", "ws"] }
+chacha20poly1305 = "0.10"
+hex = "0.4"
+hmac = "0.12"
+jsonwebtoken = "9.3"
+once_cell = "1.21"
+password_hash = "0.5"
+rand = "0.10.1"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.9.0", features = ["runtime-tokio-rustls", "sqlite"] }
+thiserror = "2.0"
+tokio = { version = "1.46", features = ["full"] }
+tower = { version =
+sha2 = "0.11.0"
+jsonwebtoken = "10.4.0"
 uuid = { version = "1", features = ["v4"] }
 mime = "0.3"
-sysinfo = "0.30"
+sysinfo = "0.39.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
@@ -48,7 +66,7 @@ futures-util = "0.3"
 image = "0.25"
 
 # archive listing (.zip)
-zip = "0.6"
+zip = "8.6.0"
 
 # link previews (OpenGraph)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "json"] }
@@ -58,29 +76,29 @@ urlencoding = "2"
 tempfile = "3"
 
 # TURN REST API (coturn auth-secret)
-hmac = "0.12"
-sha1 = "0.10"
+hmac = "0.13.0"
+sha1 = "0.11.0"
 base64 = "0.22"
 
 # TLS/HTTPS Support
 rustls-pemfile = "2.1"
 
 # E2EE JWK Validation
-jsonwebkey = { version = "0.3.5", features = ["p256", "jsonwebtoken", "generate"] }
+jsonwebkey = { version = "0.4.0", features = ["p256", "jsonwebtoken", "generate"] }
 
 # E2EE Encryption: X25519 + ChaCha20-Poly1305 + HKDF
 x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }
 crypto_box = { version = "0.9", features = ["std"] }
 chacha20poly1305 = "0.10"
 aes-gcm = { version = "0.10", features = ["aes"] }
-hkdf = "0.12"
-getrandom = "0.2"
+hkdf = "0.13.0"
+getrandom = "0.4.2"
 
 # Time-based operations for security
 time = { version = "0.3", features = ["macros"] }
 
 [dependencies.sqlx]
-version = "0.8"
+version = "0.9.0"
 default-features = false
 features = [
     "runtime-tokio",
@@ -89,7 +107,9 @@ features = [
     "time"
 ]
 
-[[bin]]
-name = "laberry_server_bin"
-path = "src/main.rs"
+# New dependencies
+async-trait = "1.0"
 
+# Dev dependencies
+[dev-dependencies]
+jsonwebtoken = "10.4.0"
