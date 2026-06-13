@@ -412,7 +412,7 @@ pub fn router() -> Router<AppState> {
         .route("/me/profile", get(get_my_profile).put(update_my_profile))
         .route("/me/delete", post(delete_me))
         .route("/me/blocks", get(list_blocks))
-        .route("/me/blocks/:user_id", put(block_user).delete(unblock_user))
+        .route("/me/blocks/{user_id}", put(block_user).delete(unblock_user))
         .route("/me/status", get(my_status).put(set_my_status))
         .route("/me/cookie-consent", post(set_cookie_consent))
         .route("/me/settings", get(get_my_settings).put(update_my_settings))
@@ -421,10 +421,10 @@ pub fn router() -> Router<AppState> {
         .route("/me/username", put(change_username))
         .route("/", get(list_users))
         .route("/search", get(search))
-        .route("/:id/report", post(report_user))
-        .route("/:id/profile", get(get_profile_by_id))
-        .route("/:id", get(get_by_id))
-        .route("/:id/device-keys", get(get_user_device_keys))
+        .route("/{id}/report", post(report_user))
+        .route("/{id}/profile", get(get_profile_by_id))
+        .route("/{id}", get(get_by_id))
+        .route("/{id}/device-keys", get(get_user_device_keys))
 }
 
 async fn list_users(
@@ -558,79 +558,43 @@ async fn register_device_key(
     me: AuthUser,
     Json(body): Json<RegisterDeviceKeyBody>,
 ) -> impl IntoResponse {
-    use crate::e2ee::E2eeKeyPair;
-
     let db = &st.db;
     let now = auth::now_iso();
 
-    // Проверяем device_id формат
     let did = body.device_id.trim();
     if did.is_empty() || did.len() > 255 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid device_id length"}))).into_response();
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid device_id"}))).into_response();
     }
+
     if !did.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid device_id format"}))).into_response();
     }
+    
+    let raw_key = body.public_jwk.as_deref().unwrap_or("").trim();
+    let is_valid_b64 = raw_key.len() >= 43 && raw_key.len() <= 44 
+        && raw_key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '+' || c == '/' || c == '=');
 
-    let client_pub = body
-        .public_jwk
-        .as_deref()
-        .and_then(normalize_client_public_key);
-
-    let existing_key: Option<String> = sqlx::query_scalar(
-        "SELECT public_encryption_key FROM users WHERE id = ? LIMIT 1",
-    )
-    .bind(me.id)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
-
-    let pub_key_b64 = if let Some(b64) = client_pub {
-        b64
-    } else if let Some(b64) = existing_key {
-        E2eeKeyPair::from_public_b64(&b64)
-            .map(|k| k.public_key_b64)
-            .unwrap_or_else(|| E2eeKeyPair::generate().public_key_b64)
+    let pub_key_b64 = if is_valid_b64 {
+        raw_key.to_string()
+    } else if let Some(normalized) = body.public_jwk.as_deref().and_then(normalize_client_public_key) {
+        normalized
     } else {
-        E2eeKeyPair::generate().public_key_b64
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid public_jwk"}))).into_response();
     };
 
-    let keypair = E2eeKeyPair::from_public_b64(&pub_key_b64).unwrap_or_else(E2eeKeyPair::generate);
-    let _ = sqlx::query(
-        "UPDATE users SET public_encryption_key = ? WHERE id = ?"
-    )
-    .bind(&pub_key_b64)
-    .bind(me.id)
-    .execute(db)
-    .await;
+    let _ = sqlx::query("UPDATE users SET public_encryption_key = ? WHERE id = ?")
+        .bind(&pub_key_b64).bind(me.id).execute(db).await;
 
-    // Сохраняем device registration
     let label = body.label.as_ref().map(|s| s.trim().to_string());
     let _ = sqlx::query(
-        r#"
-        INSERT OR REPLACE INTO user_device_keys(device_id, user_id, public_jwk, label, created_at, last_seen)
-        VALUES(?, ?, ?, ?, ?, ?)
-        "#,
+        r#"INSERT OR REPLACE INTO user_device_keys(device_id, user_id, public_jwk, label, created_at, last_seen)
+           VALUES(?, ?, ?, ?, ?, ?)"#,
     )
-    .bind(did)
-    .bind(me.id)
-    .bind(&pub_key_b64)
-    .bind(label)
-    .bind(&now)
-    .bind(&now)
-    .execute(db)
-    .await;
+    .bind(did).bind(me.id).bind(&pub_key_b64).bind(label).bind(&now).bind(&now)
+    .execute(db).await;
 
-    tracing::info!("[E2EE] Keypair registered: user={} device={} fingerprint={}", me.id, did, keypair.fingerprint());
-
-    // Возвращаем клиенту публичный ключ + fingerprint
-    // Приватный ключ НЕ возвращается с сервера!
     (StatusCode::OK, Json(serde_json::json!({
-        "ok": true,
-        "fingerprint": keypair.fingerprint(),
-        "public_key": &pub_key_b64,
-        "device_id": did
+        "ok": true, "public_key": &pub_key_b64, "device_id": did
     }))).into_response()
 }
 

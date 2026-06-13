@@ -205,40 +205,40 @@ pub(crate) fn render_servers_panel_body(query: &str, rows_html: &str, embedded: 
     if embedded {
         return format!(
             r#"<div class='card'>
-  <div class='search-row'>
-    <div class='hstack'>
-      <h2 style='margin:0;'>Серверы</h2>
-      <span class='pill'>UTC</span>
-    </div>
-    <div class='center-inline-search'>
-      <input type='text' data-persist-key='admin-center-servers-search' data-filter-input='servers' value='{qval}' placeholder='Поиск: название сервера / id' />
-      <button type='button' class='btn-soft' data-clear-filter='servers'>Сбросить</button>
-    </div>
-  </div>
-</div>
-<div class='card'>
-  <div class='servers-list' data-filter-list='servers'>{rows}</div>
-</div>"#,
+            <div class='search-row'>
+                <div class='hstack'>
+                <h2 style='margin:0;'>Серверы</h2>
+                <span class='pill'>UTC</span>
+                </div>
+                <div class='center-inline-search'>
+                <input type='text' data-persist-key='admin-center-servers-search' data-filter-input='servers' value='{qval}' placeholder='Поиск: название сервера / id' />
+                <button type='button' class='btn-soft' data-clear-filter='servers'>Сбросить</button>
+                </div>
+            </div>
+            </div>
+            <div class='card'>
+            <div class='servers-list' data-filter-list='servers'>{rows}</div>
+            </div>"#,
             qval = escape_html(query),
             rows = rows_html,
         );
     }
     format!(
         r#"<div class='card'>
-  <div class='search-row'>
-    <div class='hstack'>
-      <h2 style='margin:0;'>Серверы</h2>
-      <span class='pill'>UTC</span>
-    </div>
-    <form method='get' action='/admin/servers'>
-      <input type='text' name='q' value='{qval}' placeholder='Поиск: название сервера / id (пусто = последние)' />
-      <button type='submit'>Найти</button>
-    </form>
-  </div>
-</div>
-<div class='card'>
-  <div class='servers-list'>{rows}</div>
-</div>"#,
+        <div class='search-row'>
+            <div class='hstack'>
+            <h2 style='margin:0;'>Серверы</h2>
+            <span class='pill'>UTC</span>
+            </div>
+            <form method='get' action='/admin/servers'>
+            <input type='text' name='q' value='{qval}' placeholder='Поиск: название сервера / id (пусто = последние)' />
+            <button type='submit'>Найти</button>
+            </form>
+        </div>
+        </div>
+        <div class='card'>
+        <div class='servers-list'>{rows}</div>
+        </div>"#,
         qval = escape_html(query),
         rows = rows_html,
     )

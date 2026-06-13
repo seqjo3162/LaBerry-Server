@@ -1,6 +1,5 @@
 use crate::{auth, middleware::rate_limit, server::{AdminSession, AppState}};
 
-use anyhow::Context;
 use axum::{
     body::Body,
     extract::{Form, Path, Query, State, ConnectInfo},
@@ -9,9 +8,10 @@ use axum::{
     routing::{get, post},
     Router,
 };
+
 use std::net::SocketAddr;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
-use password_hash::{PasswordHash, PasswordVerifier};
+use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use regex::Regex;
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
@@ -38,26 +38,25 @@ pub fn router() -> Router<AppState> {
         .route("/login", get(login_get).post(login_post))
         .route("/logout", post(logout_post))
         .route("/users", get(users_list))
-        .route("/users/:id/card", get(admin_user_card_fragment))
-        .route("/users/:id/details", get(admin_user_details_fragment))
-        .route("/users/:id/ban", post(user_ban))
-        .route("/users/:id/unban", post(user_unban))
-        .route("/users/:id/ban_forever", post(user_ban_forever))
-        .route("/users/:id/purge", post(user_purge_content))
-        .route("/reports/:id/status", post(admin_report_status))
+        .route("/users/{id}/card", get(admin_user_card_fragment))
+        .route("/users/{id}/details", get(admin_user_details_fragment))
+        .route("/users/{id}/ban", post(user_ban))
+        .route("/users/{id}/unban", post(user_unban))
+        .route("/users/{id}/ban_forever", post(user_ban_forever))
+        .route("/users/{id}/purge", post(user_purge_content))
+        .route("/reports/{id}/status", post(admin_report_status))
         .route("/suggestions", get(suggestions_page))
-        .route("/suggestions/:id/status", post(admin_suggestion_status))
-        // GIF management routes remain, but hidden from admin center UI
+        .route("/suggestions/{id}/status", post(admin_suggestion_status))
         .route("/downloads", get(downloads_page))
         .route("/downloads/upload", post(admin_download_upload))
-        .route("/downloads/:id/delete", post(admin_download_delete))
+        .route("/downloads/{id}/delete", post(admin_download_delete))
         .route("/test-users", get(test_users_page).post(test_users_delete))
         .route("/servers", get(servers_list))
-        .route("/servers/:id/delete", post(server_delete))
-        .route("/servers/:id/add_all_users", post(server_add_all_users))
+        .route("/servers/{id}/delete", post(server_delete))
+        .route("/servers/{id}/add_all_users", post(server_add_all_users))
         .route("/center", get(center_page))
-        .route("/files/:id/raw", get(admin_file_raw))
-        .route("/profile-files/:id/raw", get(admin_profile_file_raw))
+        .route("/files/{id}/raw", get(admin_file_raw))
+        .route("/profile-files/{id}/raw", get(admin_profile_file_raw))
         .route("/db", get(db_tools_page))
         .route("/db/wipe_messages", post(db_wipe_messages_post))
         .route("/db/wipe_servers", post(db_wipe_servers_post))
@@ -65,7 +64,6 @@ pub fn router() -> Router<AppState> {
         .route("/db/vacuum", post(db_vacuum_post))
         .route("/db/cleanup_expired_files", post(db_cleanup_expired_files_post))
         .route("/db/expired_files", get(content::db_list_expired_files_get))
-        // Homie endpoints left in place but not linked from UI
 }
 
 // =============================
@@ -93,12 +91,21 @@ fn admin_cookie_secure(headers: &HeaderMap) -> bool {
     if env_bool("LB_ADMIN_COOKIE_SECURE", false) {
         return true;
     }
+    
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
+        let host_lower = host.to_ascii_lowercase();
+        if host_lower.starts_with("127.0.0.1") || host_lower.starts_with("localhost") {
+            return false;
+        }
+    }
+
     if let Some(v) = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
     {
         return v.eq_ignore_ascii_case("https");
     }
+    
     false
 }
 
@@ -149,11 +156,11 @@ fn verify_admin_password(pw: &str) -> anyhow::Result<()> {
     }
 
     if let Some(hash) = admin_env_trim("LB_ADMIN_PASSWORD_HASH") {
-        let parsed = PasswordHash::new(&hash).context("Некорректный LB_ADMIN_PASSWORD_HASH")?;
         let argon2 = argon2::Argon2::default();
+        let parsed_hash = PasswordHash::new(&hash).map_err(|_| anyhow::anyhow!("Invalid hash format"))?;
         argon2
-            .verify_password(pw.as_bytes(), &parsed)
-            .context("Неверный пароль администратора")?;
+            .verify_password(pw.as_bytes(), &parsed_hash)
+            .map_err(|_| anyhow::anyhow!("Неверный пароль администратора"))?;
         return Ok(());
     }
 
@@ -407,12 +414,12 @@ pub(super) fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
     };
 
     let center_script = if title.contains("Центр") {
-        "<script src='/static/js/admin-center.js?v=6' defer></script>"
+        "<script src='/static/js/admin-center.js?v=1' defer></script>"
     } else {
         ""
     };
     let users_script = if title.contains("Центр") || title.contains("Пользователи") {
-        "<script src='/static/js/admin-users.js?v=3' defer></script>"
+        "<script src='/static/js/admin-users.js?v=1' defer></script>"
     } else {
         ""
     };
@@ -425,313 +432,313 @@ pub(super) fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
 
     let html = format!(
         r#"<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{title}</title>
-<style>
-:root {{
-  --bg:#090c14;
-  --panel:#10162a;
-  --panel-2:#0d1324;
-  --border:#243152;
-  --text:#f2f5ff;
-  --muted:#97a4c5;
-  --accent:#7c5cff;
-  --danger:#8f2f46;
-  --danger-bg:#2d1420;
-  --ok:#1c6b3d;
-  --ok-bg:#0e2418;
-}}
-* {{ box-sizing:border-box; }}
-body {{ font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; }}
-header {{ position:sticky; top:0; z-index:20; padding:12px 18px; background:#0f1425; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }}
-.brand {{ font-weight:800; font-size:26px; letter-spacing:-0.03em; }}
-.nav {{ display:flex; gap:10px; flex-wrap:wrap; }}
-.nav-link {{ color:#dbe6ff; text-decoration:none; padding:10px 14px; border:1px solid var(--border); border-radius:14px; background:#121933; }}
-.nav-link.active {{ background:#1b2850; border-color:#4d67b1; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.05); }}
-.nav-link:hover {{ background:#182243; }}
-header form {{ margin-left:auto; }}
-main.admin-main {{ padding:18px; max-width:1280px; margin:0 auto; }}
-main.admin-main-wide {{ width:100%; max-width:none; padding:20px clamp(18px,2.2vw,36px) 28px; }}
-.card {{ background:linear-gradient(180deg,#11172a 0%, #0d1324 100%); border:1px solid var(--border); border-radius:18px; padding:16px; margin-bottom:14px; box-shadow:0 20px 50px rgba(0,0,0,0.18); }}
-.card h2, .card h3 {{ margin:0 0 12px 0; }}
-.small {{ color:var(--muted); font-size:12px; }}
-input, button, textarea, select {{ font-size:14px; font-family:inherit; }}
-input[type=text], input[type=password], textarea, select {{ width:100%; max-width:640px; padding:11px 13px; border-radius:14px; border:1px solid var(--border); background:#090d18; color:var(--text); outline:none; }}
-input[type=text]:focus, input[type=password]:focus, textarea:focus, select:focus {{ border-color:#6452d7; box-shadow:0 0 0 3px rgba(124,92,255,0.15); }}
-button {{ padding:10px 14px; border-radius:14px; border:1px solid var(--border); background:#182243; color:var(--text); cursor:pointer; }}
-button:hover {{ background:#202c57; }}
-.btn-soft {{ background:#151d37; }}
-.btn-danger {{ background:var(--danger-bg); border-color:var(--danger); }}
-.btn-danger:hover {{ background:#3a1a29; }}
-.table {{ width:100%; border-collapse:collapse; }}
-.table th, .table td {{ border-bottom:1px solid var(--border); padding:12px 8px; text-align:left; vertical-align:top; }}
-.msg {{ background:#182243; border:1px solid #31467c; padding:11px 13px; border-radius:14px; margin-bottom:14px; }}
-.hstack {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
-.search-row {{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
-.search-row form {{ display:flex; gap:10px; flex:1 1 560px; flex-wrap:wrap; }}
-.search-row input[type=text] {{ flex:1 1 340px; max-width:none; }}
-.pill {{ display:inline-flex; align-items:center; gap:8px; padding:7px 11px; border-radius:999px; border:1px solid var(--border); background:#0f1322; color:#cdd7f6; font-size:12px; }}
-.users-list, .servers-list, .db-list {{ display:flex; flex-direction:column; gap:12px; }}
-.user-card, .server-row-card {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; border:1px solid var(--border); background:#0d1120; border-radius:16px; padding:14px; }}
-.user-main, .server-main {{ min-width:0; }}
-.user-top, .server-top {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:8px; }}
-.user-title, .server-title {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-width:0; }}
-.user-id, .server-id {{ color:#8fb4ff; font-weight:700; }}
-.user-name, .server-name {{ font-size:18px; font-weight:700; word-break:break-word; }}
-.user-email, .server-meta {{ color:var(--muted); word-break:break-all; }}
-.user-meta {{ color:var(--muted); font-size:12px; }}
-.user-fields {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:10px; }}
-.user-field {{ border:1px solid var(--border); background:#10182d; border-radius:14px; padding:10px 12px; min-width:0; }}
-.user-field-label {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }}
-.user-field-value {{ word-break:break-word; line-height:1.45; }}
-.user-field-value.mono {{ font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }}
-.status-badge {{ display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid var(--border); }}
-.status-active {{ background:var(--ok-bg); color:#98e2b8; border-color:#214d35; }}
-.status-banned {{ background:#251316; color:#ffb4bf; border-color:#5a2730; }}
-.test-badge {{ background:#161d31; color:#9ec0ff; border-color:#2f4478; }}
-.user-actions, .server-actions {{ display:flex; flex-wrap:wrap; gap:8px; align-content:flex-start; justify-content:flex-end; }}
-.inline-form {{ display:inline-flex; margin:0; }}
-.empty-state {{ padding:26px 18px; border:1px dashed var(--border); border-radius:16px; color:var(--muted); text-align:center; }}
-.db-card {{ border:1px solid var(--border); border-radius:18px; padding:16px; background:#0d1324; }}
-.db-card h3 {{ margin-bottom:8px; }}
-.danger-note {{ color:#ffb9c7; }}
-.center-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:16px; min-height:72vh; }}
-.center-sidebar, .center-main {{ background:linear-gradient(180deg,#10162a 0%, #0d1324 100%); border:1px solid var(--border); border-radius:20px; box-shadow:0 18px 40px rgba(0,0,0,0.22); }}
-.center-sidebar {{ padding:14px; display:flex; flex-direction:column; gap:10px; }}
-.center-main {{ padding:16px; }}
-.center-nav-item {{ display:block; padding:14px 15px; border:1px solid var(--border); border-radius:16px; background:#121933; text-decoration:none; color:var(--text); transition:background .16s ease,border-color .16s ease,transform .16s ease; }}
-.center-nav-item:hover {{ background:#182243; border-color:#36508d; transform:translateY(-1px); }}
-.center-nav-item strong {{ display:block; margin-bottom:6px; font-size:18px; }}
-.center-nav-item .small {{ line-height:1.45; }}
-.center-nav-item.active {{ background:linear-gradient(180deg,#19264a 0%, #131d39 100%); border-color:#4d67b1; }}
-.center-hero {{ display:flex; justify-content:space-between; align-items:flex-start; gap:14px; padding:16px; border:1px solid var(--border); border-radius:18px; background:#0b1020; margin-bottom:14px; flex-wrap:wrap; }}
-.center-hero-title {{ margin:0; font-size:28px; letter-spacing:-0.03em; }}
-.center-hero-sub {{ color:var(--muted); max-width:720px; line-height:1.45; margin-top:8px; }}
-.center-stat-row {{ display:flex; gap:10px; flex-wrap:wrap; }}
-.center-stat {{ min-width:128px; padding:12px 14px; border-radius:16px; border:1px solid var(--border); background:#121933; }}
-.center-stat-label {{ color:var(--muted); font-size:12px; margin-bottom:6px; }}
-.center-stat-value {{ font-size:24px; font-weight:800; line-height:1; }}
-.center-workspace {{ display:grid; grid-template-columns:340px minmax(0,1fr); gap:14px; min-height:58vh; }}
-.center-column {{ display:flex; flex-direction:column; gap:14px; min-width:0; }}
-.center-panel {{ border:1px solid var(--border); border-radius:18px; background:#0b1020; overflow:hidden; }}
-.center-panel-header {{ display:flex; justify-content:space-between; align-items:center; gap:10px; padding:14px 16px; border-bottom:1px solid var(--border); background:#11182d; flex-wrap:wrap; }}
-.center-panel-title {{ font-size:18px; font-weight:800; }}
-.center-panel-sub {{ color:var(--muted); font-size:12px; }}
-.center-panel-body {{ padding:14px; }}
-.center-filter-row {{ display:flex; gap:8px; flex-wrap:wrap; }}
-.center-chip {{ display:inline-flex; align-items:center; gap:7px; padding:7px 10px; border-radius:999px; border:1px solid var(--border); background:#131a30; color:#d9e3ff; font-size:12px; }}
-.center-queue-list {{ display:flex; flex-direction:column; gap:10px; }}
-.center-queue-item {{ border:1px solid var(--border); border-radius:16px; padding:12px; background:#11182d; }}
-.center-queue-top {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }}
-.center-queue-title {{ font-weight:800; line-height:1.3; }}
-.center-queue-meta {{ color:var(--muted); font-size:12px; line-height:1.45; }}
-.center-status {{ display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid var(--border); white-space:nowrap; }}
-.center-status-new {{ background:#1a2647; color:#aecaff; border-color:#39508a; }}
-.center-status-live {{ background:#10261b; color:#97e0b6; border-color:#28533a; }}
-.center-status-warn {{ background:#2a1d10; color:#ffc98f; border-color:#6f4b24; }}
-.center-status-muted {{ background:#151b2f; color:#b4c0df; border-color:#2e3a63; }}
-.center-mini-list {{ display:flex; flex-direction:column; gap:8px; }}
-.center-mini-item {{ display:flex; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid var(--border); border-radius:14px; background:#11182d; }}
-.center-mini-main {{ min-width:0; }}
-.center-mini-title {{ font-weight:700; margin-bottom:4px; word-break:break-word; }}
-.center-mini-meta {{ color:var(--muted); font-size:12px; }}
-.center-mini-side {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
-.center-feed-list {{ display:flex; flex-direction:column; gap:10px; }}
-.center-feed-item {{ border:1px solid var(--border); border-radius:16px; padding:12px 14px; background:#11182d; }}
-.center-feed-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:8px; flex-wrap:wrap; }}
-.center-feed-author {{ font-weight:800; }}
-.center-feed-loc {{ color:#9eb7ff; font-size:12px; margin-top:4px; }}
-.center-feed-time {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
-.center-feed-text {{ line-height:1.55; color:#eef2ff; word-break:break-word; }}
-.admin-message-text {{ margin:6px 0; }}
-.admin-file-card {{ display:flex; align-items:center; gap:12px; border:1px solid #314068; border-radius:14px; background:#0d1428; padding:10px 12px; margin:8px 0; max-width:720px; }}
-.admin-file-type {{ width:42px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; background:#172241; color:#c084fc; font-weight:900; font-size:12px; border:1px solid #3b4a77; flex:0 0 auto; }}
-.admin-file-main {{ min-width:0; flex:1; }}
-.admin-file-name {{ font-weight:800; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
-.admin-file-meta {{ color:var(--muted); font-size:12px; margin-top:3px; }}
-.admin-file-action {{ flex:0 0 auto; text-decoration:none; border:1px solid #4d67b1; color:#eef2ff; background:#172241; padding:7px 10px; border-radius:10px; font-size:12px; font-weight:800; }}
-.admin-file-action:hover {{ border-color:#8b5cf6; color:#fff; }}
+    <html lang="ru">
+    <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <style>
+    :root {{
+    --bg:#090c14;
+    --panel:#10162a;
+    --panel-2:#0d1324;
+    --border:#243152;
+    --text:#f2f5ff;
+    --muted:#97a4c5;
+    --accent:#7c5cff;
+    --danger:#8f2f46;
+    --danger-bg:#2d1420;
+    --ok:#1c6b3d;
+    --ok-bg:#0e2418;
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{ font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--text); margin:0; }}
+    header {{ position:sticky; top:0; z-index:20; padding:12px 18px; background:#0f1425; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }}
+    .brand {{ font-weight:800; font-size:26px; letter-spacing:-0.03em; }}
+    .nav {{ display:flex; gap:10px; flex-wrap:wrap; }}
+    .nav-link {{ color:#dbe6ff; text-decoration:none; padding:10px 14px; border:1px solid var(--border); border-radius:14px; background:#121933; }}
+    .nav-link.active {{ background:#1b2850; border-color:#4d67b1; box-shadow:inset 0 0 0 1px rgba(255,255,255,0.05); }}
+    .nav-link:hover {{ background:#182243; }}
+    header form {{ margin-left:auto; }}
+    main.admin-main {{ padding:18px; max-width:1280px; margin:0 auto; }}
+    main.admin-main-wide {{ width:100%; max-width:none; padding:20px clamp(18px,2.2vw,36px) 28px; }}
+    .card {{ background:linear-gradient(180deg,#11172a 0%, #0d1324 100%); border:1px solid var(--border); border-radius:18px; padding:16px; margin-bottom:14px; box-shadow:0 20px 50px rgba(0,0,0,0.18); }}
+    .card h2, .card h3 {{ margin:0 0 12px 0; }}
+    .small {{ color:var(--muted); font-size:12px; }}
+    input, button, textarea, select {{ font-size:14px; font-family:inherit; }}
+    input[type=text], input[type=password], textarea, select {{ width:100%; max-width:640px; padding:11px 13px; border-radius:14px; border:1px solid var(--border); background:#090d18; color:var(--text); outline:none; }}
+    input[type=text]:focus, input[type=password]:focus, textarea:focus, select:focus {{ border-color:#6452d7; box-shadow:0 0 0 3px rgba(124,92,255,0.15); }}
+    button {{ padding:10px 14px; border-radius:14px; border:1px solid var(--border); background:#182243; color:var(--text); cursor:pointer; }}
+    button:hover {{ background:#202c57; }}
+    .btn-soft {{ background:#151d37; }}
+    .btn-danger {{ background:var(--danger-bg); border-color:var(--danger); }}
+    .btn-danger:hover {{ background:#3a1a29; }}
+    .table {{ width:100%; border-collapse:collapse; }}
+    .table th, .table td {{ border-bottom:1px solid var(--border); padding:12px 8px; text-align:left; vertical-align:top; }}
+    .msg {{ background:#182243; border:1px solid #31467c; padding:11px 13px; border-radius:14px; margin-bottom:14px; }}
+    .hstack {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
+    .search-row {{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
+    .search-row form {{ display:flex; gap:10px; flex:1 1 560px; flex-wrap:wrap; }}
+    .search-row input[type=text] {{ flex:1 1 340px; max-width:none; }}
+    .pill {{ display:inline-flex; align-items:center; gap:8px; padding:7px 11px; border-radius:999px; border:1px solid var(--border); background:#0f1322; color:#cdd7f6; font-size:12px; }}
+    .users-list, .servers-list, .db-list {{ display:flex; flex-direction:column; gap:12px; }}
+    .user-card, .server-row-card {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; border:1px solid var(--border); background:#0d1120; border-radius:16px; padding:14px; }}
+    .user-main, .server-main {{ min-width:0; }}
+    .user-top, .server-top {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:8px; }}
+    .user-title, .server-title {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-width:0; }}
+    .user-id, .server-id {{ color:#8fb4ff; font-weight:700; }}
+    .user-name, .server-name {{ font-size:18px; font-weight:700; word-break:break-word; }}
+    .user-email, .server-meta {{ color:var(--muted); word-break:break-all; }}
+    .user-meta {{ color:var(--muted); font-size:12px; }}
+    .user-fields {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:10px; }}
+    .user-field {{ border:1px solid var(--border); background:#10182d; border-radius:14px; padding:10px 12px; min-width:0; }}
+    .user-field-label {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }}
+    .user-field-value {{ word-break:break-word; line-height:1.45; }}
+    .user-field-value.mono {{ font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }}
+    .status-badge {{ display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid var(--border); }}
+    .status-active {{ background:var(--ok-bg); color:#98e2b8; border-color:#214d35; }}
+    .status-banned {{ background:#251316; color:#ffb4bf; border-color:#5a2730; }}
+    .test-badge {{ background:#161d31; color:#9ec0ff; border-color:#2f4478; }}
+    .user-actions, .server-actions {{ display:flex; flex-wrap:wrap; gap:8px; align-content:flex-start; justify-content:flex-end; }}
+    .inline-form {{ display:inline-flex; margin:0; }}
+    .empty-state {{ padding:26px 18px; border:1px dashed var(--border); border-radius:16px; color:var(--muted); text-align:center; }}
+    .db-card {{ border:1px solid var(--border); border-radius:18px; padding:16px; background:#0d1324; }}
+    .db-card h3 {{ margin-bottom:8px; }}
+    .danger-note {{ color:#ffb9c7; }}
+    .center-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:16px; min-height:72vh; }}
+    .center-sidebar, .center-main {{ background:linear-gradient(180deg,#10162a 0%, #0d1324 100%); border:1px solid var(--border); border-radius:20px; box-shadow:0 18px 40px rgba(0,0,0,0.22); }}
+    .center-sidebar {{ padding:14px; display:flex; flex-direction:column; gap:10px; }}
+    .center-main {{ padding:16px; }}
+    .center-nav-item {{ display:block; padding:14px 15px; border:1px solid var(--border); border-radius:16px; background:#121933; text-decoration:none; color:var(--text); transition:background .16s ease,border-color .16s ease,transform .16s ease; }}
+    .center-nav-item:hover {{ background:#182243; border-color:#36508d; transform:translateY(-1px); }}
+    .center-nav-item strong {{ display:block; margin-bottom:6px; font-size:18px; }}
+    .center-nav-item .small {{ line-height:1.45; }}
+    .center-nav-item.active {{ background:linear-gradient(180deg,#19264a 0%, #131d39 100%); border-color:#4d67b1; }}
+    .center-hero {{ display:flex; justify-content:space-between; align-items:flex-start; gap:14px; padding:16px; border:1px solid var(--border); border-radius:18px; background:#0b1020; margin-bottom:14px; flex-wrap:wrap; }}
+    .center-hero-title {{ margin:0; font-size:28px; letter-spacing:-0.03em; }}
+    .center-hero-sub {{ color:var(--muted); max-width:720px; line-height:1.45; margin-top:8px; }}
+    .center-stat-row {{ display:flex; gap:10px; flex-wrap:wrap; }}
+    .center-stat {{ min-width:128px; padding:12px 14px; border-radius:16px; border:1px solid var(--border); background:#121933; }}
+    .center-stat-label {{ color:var(--muted); font-size:12px; margin-bottom:6px; }}
+    .center-stat-value {{ font-size:24px; font-weight:800; line-height:1; }}
+    .center-workspace {{ display:grid; grid-template-columns:340px minmax(0,1fr); gap:14px; min-height:58vh; }}
+    .center-column {{ display:flex; flex-direction:column; gap:14px; min-width:0; }}
+    .center-panel {{ border:1px solid var(--border); border-radius:18px; background:#0b1020; overflow:hidden; }}
+    .center-panel-header {{ display:flex; justify-content:space-between; align-items:center; gap:10px; padding:14px 16px; border-bottom:1px solid var(--border); background:#11182d; flex-wrap:wrap; }}
+    .center-panel-title {{ font-size:18px; font-weight:800; }}
+    .center-panel-sub {{ color:var(--muted); font-size:12px; }}
+    .center-panel-body {{ padding:14px; }}
+    .center-filter-row {{ display:flex; gap:8px; flex-wrap:wrap; }}
+    .center-chip {{ display:inline-flex; align-items:center; gap:7px; padding:7px 10px; border-radius:999px; border:1px solid var(--border); background:#131a30; color:#d9e3ff; font-size:12px; }}
+    .center-queue-list {{ display:flex; flex-direction:column; gap:10px; }}
+    .center-queue-item {{ border:1px solid var(--border); border-radius:16px; padding:12px; background:#11182d; }}
+    .center-queue-top {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }}
+    .center-queue-title {{ font-weight:800; line-height:1.3; }}
+    .center-queue-meta {{ color:var(--muted); font-size:12px; line-height:1.45; }}
+    .center-status {{ display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; border:1px solid var(--border); white-space:nowrap; }}
+    .center-status-new {{ background:#1a2647; color:#aecaff; border-color:#39508a; }}
+    .center-status-live {{ background:#10261b; color:#97e0b6; border-color:#28533a; }}
+    .center-status-warn {{ background:#2a1d10; color:#ffc98f; border-color:#6f4b24; }}
+    .center-status-muted {{ background:#151b2f; color:#b4c0df; border-color:#2e3a63; }}
+    .center-mini-list {{ display:flex; flex-direction:column; gap:8px; }}
+    .center-mini-item {{ display:flex; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid var(--border); border-radius:14px; background:#11182d; }}
+    .center-mini-main {{ min-width:0; }}
+    .center-mini-title {{ font-weight:700; margin-bottom:4px; word-break:break-word; }}
+    .center-mini-meta {{ color:var(--muted); font-size:12px; }}
+    .center-mini-side {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
+    .center-feed-list {{ display:flex; flex-direction:column; gap:10px; }}
+    .center-feed-item {{ border:1px solid var(--border); border-radius:16px; padding:12px 14px; background:#11182d; }}
+    .center-feed-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:8px; flex-wrap:wrap; }}
+    .center-feed-author {{ font-weight:800; }}
+    .center-feed-loc {{ color:#9eb7ff; font-size:12px; margin-top:4px; }}
+    .center-feed-time {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
+    .center-feed-text {{ line-height:1.55; color:#eef2ff; word-break:break-word; }}
+    .admin-message-text {{ margin:6px 0; }}
+    .admin-file-card {{ display:flex; align-items:center; gap:12px; border:1px solid #314068; border-radius:14px; background:#0d1428; padding:10px 12px; margin:8px 0; max-width:720px; }}
+    .admin-file-type {{ width:42px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; background:#172241; color:#c084fc; font-weight:900; font-size:12px; border:1px solid #3b4a77; flex:0 0 auto; }}
+    .admin-file-main {{ min-width:0; flex:1; }}
+    .admin-file-name {{ font-weight:800; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+    .admin-file-meta {{ color:var(--muted); font-size:12px; margin-top:3px; }}
+    .admin-file-action {{ flex:0 0 auto; text-decoration:none; border:1px solid #4d67b1; color:#eef2ff; background:#172241; padding:7px 10px; border-radius:10px; font-size:12px; font-weight:800; }}
+    .admin-file-action:hover {{ border-color:#8b5cf6; color:#fff; }}
 
-.center-empty {{ padding:28px 18px; border:1px dashed var(--border); border-radius:16px; color:var(--muted); text-align:center; background:#0f1527; }}
-.center-split {{ display:grid; grid-template-columns:minmax(0,1fr) 280px; gap:14px; }}
-.center-note-card {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; }}
-.center-note-card h3 {{ margin:0 0 10px 0; }}
-.center-note-list {{ display:flex; flex-direction:column; gap:8px; }}
-.center-note-line {{ color:var(--muted); font-size:13px; line-height:1.45; }}
-.panel-shell {{ display:grid; grid-template-columns:280px minmax(0,1fr); gap:18px; min-height:calc(100vh - 118px); align-items:stretch; }}
-.panel-sidebar {{ display:flex; flex-direction:column; gap:10px; padding:0; border:0; border-radius:0; background:transparent; }}
-.panel-stage {{ min-width:0; border:0; border-radius:0; background:transparent; box-shadow:none; overflow:visible; }}
-.panel-stage-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:0 0 14px; border-bottom:1px solid rgba(255,255,255,0.08); background:transparent; flex-wrap:wrap; }}
-.panel-stage-title {{ font-size:22px; font-weight:800; }}
-.panel-stage-sub {{ color:var(--muted); font-size:13px; }}
-.panel-stage-body {{ min-height:calc(100vh - 190px); padding:0; }}
-.panel-frame {{ width:100%; min-height:66vh; border:0; border-radius:16px; background:#0b1020; }}
-.panel-frame-wrap {{ border:1px solid var(--border); border-radius:16px; overflow:hidden; background:#0b1020; min-height:68vh; }}
-.messenger-frame-wrap {{ border:1px solid var(--border); border-radius:16px; overflow:hidden; background:#0b1020; height:72vh; }}
-.messenger-frame {{ width:100%; height:calc(100% + 68px); margin-top:-68px; border:0; display:block; background:#0b1020; }}
-.helper-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
-.helper-card {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; }}
-.helper-card h3 {{ margin:0 0 10px 0; }}
-.center-inline-search {{ display:flex; gap:8px; width:min(520px,100%); }}
-.panel-switch {{ text-align:left; width:100%; }}
-.panel-switch strong {{ pointer-events:none; }}
-.panel-view {{ display:none; }}
-.panel-view.is-active {{ display:block; }}
-.admin-messenger {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; }}
-.admin-messenger-sidebar, .admin-messenger-main {{ border:1px solid var(--border); border-radius:16px; background:#0b1020; }}
-.admin-messenger-sidebar {{ padding:12px; display:flex; flex-direction:column; gap:10px; min-width:0; }}
-.admin-chat-list {{ display:flex; flex-direction:column; gap:8px; max-height:68vh; overflow:auto; }}
-.center-chat-item {{ width:100%; text-align:left; background:#11182d; border:1px solid var(--border); border-radius:14px; padding:12px; }}
-.center-chat-item.is-active {{ background:#1b2850; border-color:#4d67b1; }}
-.center-chat-title {{ font-weight:700; margin-bottom:4px; word-break:break-word; }}
-.center-chat-meta {{ color:var(--muted); font-size:12px; }}
-.admin-messenger-main {{ min-width:0; overflow:hidden; }}
-.admin-chat-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap; }}
-.admin-chat-feed {{ padding:14px; max-height:68vh; overflow:auto; }}
-.ai-form {{ display:flex; flex-direction:column; gap:14px; }}
-.ai-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }}
-.ai-grid label, .ai-form label {{ display:flex; flex-direction:column; gap:7px; color:#dbe6ff; font-weight:700; }}
-.ai-check {{ flex-direction:row !important; align-items:center; gap:8px !important; border:1px solid var(--border); border-radius:14px; background:#11182d; padding:12px; }}
-.ai-form input[type=text], .ai-form input[type=number], .ai-form select, .ai-form textarea {{ width:100%; max-width:none; }}
-.utc-note {{ margin-left:auto; color:var(--muted); font-size:12px; }}
+    .center-empty {{ padding:28px 18px; border:1px dashed var(--border); border-radius:16px; color:var(--muted); text-align:center; background:#0f1527; }}
+    .center-split {{ display:grid; grid-template-columns:minmax(0,1fr) 280px; gap:14px; }}
+    .center-note-card {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; }}
+    .center-note-card h3 {{ margin:0 0 10px 0; }}
+    .center-note-list {{ display:flex; flex-direction:column; gap:8px; }}
+    .center-note-line {{ color:var(--muted); font-size:13px; line-height:1.45; }}
+    .panel-shell {{ display:grid; grid-template-columns:280px minmax(0,1fr); gap:18px; min-height:calc(100vh - 118px); align-items:stretch; }}
+    .panel-sidebar {{ display:flex; flex-direction:column; gap:10px; padding:0; border:0; border-radius:0; background:transparent; }}
+    .panel-stage {{ min-width:0; border:0; border-radius:0; background:transparent; box-shadow:none; overflow:visible; }}
+    .panel-stage-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:0 0 14px; border-bottom:1px solid rgba(255,255,255,0.08); background:transparent; flex-wrap:wrap; }}
+    .panel-stage-title {{ font-size:22px; font-weight:800; }}
+    .panel-stage-sub {{ color:var(--muted); font-size:13px; }}
+    .panel-stage-body {{ min-height:calc(100vh - 190px); padding:0; }}
+    .panel-frame {{ width:100%; min-height:66vh; border:0; border-radius:16px; background:#0b1020; }}
+    .panel-frame-wrap {{ border:1px solid var(--border); border-radius:16px; overflow:hidden; background:#0b1020; min-height:68vh; }}
+    .messenger-frame-wrap {{ border:1px solid var(--border); border-radius:16px; overflow:hidden; background:#0b1020; height:72vh; }}
+    .messenger-frame {{ width:100%; height:calc(100% + 68px); margin-top:-68px; border:0; display:block; background:#0b1020; }}
+    .helper-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
+    .helper-card {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; }}
+    .helper-card h3 {{ margin:0 0 10px 0; }}
+    .center-inline-search {{ display:flex; gap:8px; width:min(520px,100%); }}
+    .panel-switch {{ text-align:left; width:100%; }}
+    .panel-switch strong {{ pointer-events:none; }}
+    .panel-view {{ display:none; }}
+    .panel-view.is-active {{ display:block; }}
+    .admin-messenger {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; }}
+    .admin-messenger-sidebar, .admin-messenger-main {{ border:1px solid var(--border); border-radius:16px; background:#0b1020; }}
+    .admin-messenger-sidebar {{ padding:12px; display:flex; flex-direction:column; gap:10px; min-width:0; }}
+    .admin-chat-list {{ display:flex; flex-direction:column; gap:8px; max-height:68vh; overflow:auto; }}
+    .center-chat-item {{ width:100%; text-align:left; background:#11182d; border:1px solid var(--border); border-radius:14px; padding:12px; }}
+    .center-chat-item.is-active {{ background:#1b2850; border-color:#4d67b1; }}
+    .center-chat-title {{ font-weight:700; margin-bottom:4px; word-break:break-word; }}
+    .center-chat-meta {{ color:var(--muted); font-size:12px; }}
+    .admin-messenger-main {{ min-width:0; overflow:hidden; }}
+    .admin-chat-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap; }}
+    .admin-chat-feed {{ padding:14px; max-height:68vh; overflow:auto; }}
+    .ai-form {{ display:flex; flex-direction:column; gap:14px; }}
+    .ai-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }}
+    .ai-grid label, .ai-form label {{ display:flex; flex-direction:column; gap:7px; color:#dbe6ff; font-weight:700; }}
+    .ai-check {{ flex-direction:row !important; align-items:center; gap:8px !important; border:1px solid var(--border); border-radius:14px; background:#11182d; padding:12px; }}
+    .ai-form input[type=text], .ai-form input[type=number], .ai-form select, .ai-form textarea {{ width:100%; max-width:none; }}
+    .utc-note {{ margin-left:auto; color:var(--muted); font-size:12px; }}
 
-.admin-users-shell {{ display:flex; flex-direction:column; gap:10px; }}
-.admin-users-titlebar {{ display:flex; align-items:center; justify-content:space-between; min-height:34px; }}
-.admin-users-titlebar strong {{ font-size:18px; letter-spacing:-0.02em; }}
-.admin-users-grid {{ display:grid; grid-template-columns:330px minmax(0,1fr); gap:12px; min-height:58vh; }}
-.admin-users-list, .admin-users-detail {{ border:1px solid var(--border); border-radius:18px; background:#0b1020; min-width:0; }}
-.admin-users-list {{ padding:12px; display:flex; flex-direction:column; gap:10px; }}
-.admin-user-tabs {{ display:flex; gap:8px; flex-wrap:wrap; }}
-.admin-user-tabs a {{ color:#dbe6ff; text-decoration:none; border:1px solid var(--border); background:#121933; border-radius:999px; padding:7px 10px; font-size:12px; font-weight:800; }}
-.admin-user-tabs a.active {{ background:#1b2850; border-color:#4d67b1; }}
-.admin-user-search {{ display:flex; gap:8px; width:100%; }}
-.admin-user-search input[type=text] {{ max-width:none; flex:1 1 auto; }}
-.admin-user-search button {{ flex:0 0 auto; }}
-.admin-user-list-scroll {{ display:flex; flex-direction:column; gap:8px; overflow:auto; max-height:62vh; padding-right:3px; }}
-.admin-user-row {{ display:flex; align-items:center; gap:10px; border:1px solid var(--border); border-radius:16px; background:#11182d; padding:10px; color:var(--text); text-decoration:none; min-width:0; }}
-.admin-user-row:hover {{ background:#15203a; border-color:#36508d; }}
-.admin-user-row.active {{ background:#172241; border-color:#4d67b1; box-shadow:inset 0 0 0 1px rgba(255,255,255,.04); }}
-.admin-user-row-avatar, .admin-user-avatar {{ width:38px; height:38px; border-radius:50%; flex:0 0 auto; overflow:hidden; display:flex; align-items:center; justify-content:center; border:1px solid #314068; background:radial-gradient(circle at 30% 30%, #314a88, #11182d 70%); color:#fff; font-weight:900; }}
-.admin-user-row-avatar-img, .admin-user-avatar-img {{ width:100%; height:100%; object-fit:cover; display:block; }}
-.admin-user-row-main {{ min-width:0; flex:1; }}
-.admin-user-row-name {{ font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-.admin-user-row-meta {{ color:var(--muted); font-size:12px; margin-top:2px; }}
-.admin-user-pill {{ display:inline-flex; align-items:center; justify-content:center; border-radius:999px; border:1px solid var(--border); padding:5px 9px; font-size:12px; font-weight:800; white-space:nowrap; }}
-.admin-user-pill.online {{ background:#10261b; color:#98e2b8; border-color:#28533a; }}
-.admin-user-pill.offline {{ background:#151b2f; color:#b8c3e4; border-color:#2e3a63; }}
-.admin-user-pill.banned {{ background:#251316; color:#ffb4bf; border-color:#5a2730; }}
-.admin-user-pill.clear {{ background:#141e37; color:#aecdff; border-color:#314a84; }}
-.admin-user-pill.review {{ background:#2b1b10; color:#ffd19a; border-color:#73522b; }}
-.admin-users-detail {{ padding:14px; }}
-.admin-user-card {{ display:flex; flex-direction:column; gap:12px; }}
-.admin-user-card-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
-.admin-user-card-ident {{ display:flex; align-items:center; gap:12px; min-width:0; }}
-.admin-user-avatar {{ width:56px; height:56px; font-size:22px; cursor:pointer; padding:0; }}
-.admin-user-card-title {{ min-width:0; }}
-.admin-user-name {{ font-size:28px; font-weight:900; letter-spacing:-0.03em; line-height:1; word-break:break-word; }}
-.admin-user-sub {{ color:var(--muted); margin-top:6px; word-break:break-word; }}
-.admin-user-pills {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }}
-.admin-user-gear {{ width:38px; height:38px; padding:0; border-radius:12px; }}
-.admin-user-info-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
-.admin-user-info-grid.compact {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
-.admin-user-info {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:12px; min-width:0; }}
-.admin-user-info span {{ display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin-bottom:7px; }}
-.admin-user-info strong {{ display:block; word-break:break-word; }}
-.admin-user-section {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:12px; }}
-.admin-user-section-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:10px; }}
-.admin-user-section-head span {{ color:var(--muted); font-size:12px; }}
-.admin-report-list {{ display:flex; flex-direction:column; gap:8px; }}
-.admin-report-row {{ border:1px solid #2f3d68; border-radius:14px; background:#0d1324; padding:10px; }}
-.admin-report-top {{ display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:7px; }}
-.admin-report-reason {{ color:#ffb4bf; font-weight:900; font-size:12px; }}
-.admin-report-status {{ border:1px solid var(--border); border-radius:999px; padding:4px 8px; font-size:11px; font-weight:800; }}
-.admin-report-status.open {{ background:#2a1d10; color:#ffc98f; border-color:#6f4b24; }}
-.admin-report-status.done {{ background:#10261b; color:#98e2b8; border-color:#28533a; }}
-.admin-report-text {{ line-height:1.45; }}
-.admin-report-meta {{ color:var(--muted); font-size:12px; margin-top:6px; }}
-.admin-report-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }}
-.admin-report-actions form {{ margin:0; }}
-.admin-report-actions button {{ padding:7px 10px; font-size:12px; }}
-.admin-suggestions-shell {{ display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:14px; align-items:start; }}
-.admin-suggestion-list {{ display:flex; flex-direction:column; gap:10px; }}
-.admin-suggestion-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; padding:14px; }}
-.admin-suggestion-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap; margin-bottom:10px; }}
-.admin-suggestion-title {{ font-size:17px; font-weight:900; word-break:break-word; }}
-.admin-suggestion-meta {{ color:var(--muted); font-size:12px; margin-top:4px; word-break:break-word; }}
-.admin-suggestion-text {{ line-height:1.55; word-break:break-word; white-space:pre-wrap; }}
-.admin-suggestion-actions {{ display:flex; gap:8px; margin-top:12px; align-items:flex-start; flex-wrap:wrap; }}
-.admin-suggestion-action-form {{ display:flex; gap:8px; align-items:flex-start; flex:1 1 420px; margin:0; min-width:min(100%,420px); }}
-.admin-suggestion-actions textarea {{ flex:1 1 240px; max-width:none; min-height:40px; resize:vertical; }}
-.admin-suggestion-actions form.inline-form {{ margin:0; }}
-.admin-suggestion-actions button {{ white-space:nowrap; }}
-.admin-suggestion-side {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
-.admin-gif-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; align-items:start; }}
-.admin-gif-upload {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
-.admin-gif-upload form {{ display:flex; flex-direction:column; gap:10px; }}
-.admin-gif-upload input[type=file] {{ width:100%; color:var(--muted); }}
-.admin-gif-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }}
-.admin-gif-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; overflow:hidden; min-width:0; }}
-.admin-gif-thumb {{ aspect-ratio:1.45/1; background:#060914; display:flex; align-items:center; justify-content:center; }}
-.admin-gif-thumb img {{ width:100%; height:100%; object-fit:contain; display:block; }}
-.admin-gif-body {{ padding:10px; display:flex; flex-direction:column; gap:8px; }}
-.admin-gif-name {{ font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-.admin-gif-actions {{ display:flex; gap:8px; flex-wrap:wrap; }}
-.admin-gif-actions form {{ margin:0; }}
-.admin-download-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; align-items:start; }}
-.admin-download-upload {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
-.admin-download-upload form {{ display:flex; flex-direction:column; gap:10px; }}
-.admin-download-upload input[type=file] {{ width:100%; color:var(--muted); }}
-.admin-download-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }}
-.admin-download-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; padding:14px; display:flex; flex-direction:column; gap:10px; min-width:0; }}
-.admin-download-top {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
-.admin-download-title {{ font-weight:900; font-size:16px; word-break:break-word; }}
-.admin-download-meta {{ color:var(--muted); font-size:12px; line-height:1.45; word-break:break-word; }}
-.admin-download-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:auto; }}
-.admin-download-actions form {{ margin:0; }}
-.admin-download-actions a {{ text-decoration:none; border:1px solid var(--border); background:#151d37; color:var(--text); border-radius:14px; padding:10px 14px; font-weight:800; }}
-.admin-user-actions {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
-.admin-user-actions form {{ margin:0; }}
-.admin-ban-reason-input {{ width:100%; max-width:none; margin-bottom:8px; padding:9px 10px; border-radius:12px; border:1px solid var(--border); background:#090d18; color:var(--text); }}
-.admin-user-actions button {{ width:100%; }}
-.btn-ok {{ background:#122b1c; border-color:#28533a; color:#baf0cf; }}
-.btn-ok:hover {{ background:#173625; }}
-.admin-user-emptyline, .admin-user-empty-detail {{ border:1px dashed var(--border); border-radius:14px; background:#0f1527; color:var(--muted); padding:18px; text-align:center; }}
-.admin-user-empty-detail {{ min-height:360px; display:flex; align-items:center; justify-content:center; }}
-.admin-modal-backdrop {{ position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,.58); display:flex; align-items:center; justify-content:center; padding:20px; }}
-.admin-modal-window {{ width:min(760px,100%); max-height:90vh; overflow:auto; border:1px solid var(--border); border-radius:22px; background:#0b1020; box-shadow:0 24px 80px rgba(0,0,0,.45); }}
-.admin-modal-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; border-bottom:1px solid var(--border); padding:16px; }}
-.admin-modal-title {{ font-size:24px; font-weight:900; letter-spacing:-.02em; }}
-.admin-modal-sub {{ color:var(--muted); margin-top:4px; }}
-.admin-modal-close {{ width:36px; height:36px; padding:0; }}
-.admin-modal-body {{ padding:16px; display:flex; flex-direction:column; gap:14px; }}
-.admin-modal-avatar {{ border:1px solid var(--border); border-radius:18px; background:#11182d; min-height:260px; display:flex; align-items:center; justify-content:center; overflow:hidden; }}
-.admin-modal-avatar-img {{ max-width:100%; max-height:420px; object-fit:contain; display:block; }}
-.admin-modal-avatar-empty {{ width:120px; height:120px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:42px; font-weight:900; background:#172241; border:1px solid #314068; }}
-.admin-modal-actions {{ display:flex; gap:10px; flex-wrap:wrap; }}
-.admin-modal-actions a {{ text-decoration:none; border:1px solid var(--border); background:#121933; color:#eef2ff; border-radius:14px; padding:10px 12px; font-weight:800; }}
-.admin-user-toast {{ position:fixed; right:18px; bottom:18px; z-index:1200; max-width:min(420px,calc(100vw - 36px)); padding:12px 14px; border-radius:14px; border:1px solid #5a2730; background:#2d1420; color:#ffd7df; box-shadow:0 18px 50px rgba(0,0,0,.38); font-weight:800; }}
-.admin-user-toast[data-kind='ok'] {{ border-color:#28533a; background:#10261b; color:#baf0cf; }}
-.admin-user-toast[hidden] {{ display:none; }}
-@media (max-width: 980px) {{ .user-card, .server-row-card, .center-shell, .center-workspace, .panel-shell, .helper-grid, .user-fields, .admin-messenger, .admin-users-grid, .admin-user-info-grid, .admin-user-actions, .admin-suggestions-shell, .admin-gif-shell, .admin-download-shell {{ grid-template-columns:1fr; }} .user-actions, .server-actions {{ justify-content:flex-start; }} .admin-user-list-scroll {{ max-height:none; }} .admin-suggestion-side, .admin-gif-upload, .admin-download-upload {{ position:static; }} }}
-@media (max-width: 640px) {{ main.admin-main {{ padding:12px; }} header {{ padding:12px; }} .brand {{ font-size:22px; }} .search-row form {{ flex-direction:column; }} .search-row input[type=text], .search-row button {{ width:100%; }} .messenger-frame {{ margin-top:-62px; height:calc(100% + 62px); }} .admin-suggestion-action-form {{ flex-direction:column; }} .admin-suggestion-actions textarea, .admin-suggestion-actions button {{ width:100%; }} }}
-</style>
-</head>
-<body>
-<header>
-  <div class='brand'>Админ-панель</div>
-  <nav class='nav'>{nav}</nav>
-  <div class='utc-note'>Время везде: UTC</div>
-  {logout_html}
-</header>
-<main class='{main_class}'>
-{msg_html}
-{body}
-</main>
-{center_script}{users_script}</body>
-</html>"#,
+    .admin-users-shell {{ display:flex; flex-direction:column; gap:10px; }}
+    .admin-users-titlebar {{ display:flex; align-items:center; justify-content:space-between; min-height:34px; }}
+    .admin-users-titlebar strong {{ font-size:18px; letter-spacing:-0.02em; }}
+    .admin-users-grid {{ display:grid; grid-template-columns:330px minmax(0,1fr); gap:12px; min-height:58vh; }}
+    .admin-users-list, .admin-users-detail {{ border:1px solid var(--border); border-radius:18px; background:#0b1020; min-width:0; }}
+    .admin-users-list {{ padding:12px; display:flex; flex-direction:column; gap:10px; }}
+    .admin-user-tabs {{ display:flex; gap:8px; flex-wrap:wrap; }}
+    .admin-user-tabs a {{ color:#dbe6ff; text-decoration:none; border:1px solid var(--border); background:#121933; border-radius:999px; padding:7px 10px; font-size:12px; font-weight:800; }}
+    .admin-user-tabs a.active {{ background:#1b2850; border-color:#4d67b1; }}
+    .admin-user-search {{ display:flex; gap:8px; width:100%; }}
+    .admin-user-search input[type=text] {{ max-width:none; flex:1 1 auto; }}
+    .admin-user-search button {{ flex:0 0 auto; }}
+    .admin-user-list-scroll {{ display:flex; flex-direction:column; gap:8px; overflow:auto; max-height:62vh; padding-right:3px; }}
+    .admin-user-row {{ display:flex; align-items:center; gap:10px; border:1px solid var(--border); border-radius:16px; background:#11182d; padding:10px; color:var(--text); text-decoration:none; min-width:0; }}
+    .admin-user-row:hover {{ background:#15203a; border-color:#36508d; }}
+    .admin-user-row.active {{ background:#172241; border-color:#4d67b1; box-shadow:inset 0 0 0 1px rgba(255,255,255,.04); }}
+    .admin-user-row-avatar, .admin-user-avatar {{ width:38px; height:38px; border-radius:50%; flex:0 0 auto; overflow:hidden; display:flex; align-items:center; justify-content:center; border:1px solid #314068; background:radial-gradient(circle at 30% 30%, #314a88, #11182d 70%); color:#fff; font-weight:900; }}
+    .admin-user-row-avatar-img, .admin-user-avatar-img {{ width:100%; height:100%; object-fit:cover; display:block; }}
+    .admin-user-row-main {{ min-width:0; flex:1; }}
+    .admin-user-row-name {{ font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .admin-user-row-meta {{ color:var(--muted); font-size:12px; margin-top:2px; }}
+    .admin-user-pill {{ display:inline-flex; align-items:center; justify-content:center; border-radius:999px; border:1px solid var(--border); padding:5px 9px; font-size:12px; font-weight:800; white-space:nowrap; }}
+    .admin-user-pill.online {{ background:#10261b; color:#98e2b8; border-color:#28533a; }}
+    .admin-user-pill.offline {{ background:#151b2f; color:#b8c3e4; border-color:#2e3a63; }}
+    .admin-user-pill.banned {{ background:#251316; color:#ffb4bf; border-color:#5a2730; }}
+    .admin-user-pill.clear {{ background:#141e37; color:#aecdff; border-color:#314a84; }}
+    .admin-user-pill.review {{ background:#2b1b10; color:#ffd19a; border-color:#73522b; }}
+    .admin-users-detail {{ padding:14px; }}
+    .admin-user-card {{ display:flex; flex-direction:column; gap:12px; }}
+    .admin-user-card-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }}
+    .admin-user-card-ident {{ display:flex; align-items:center; gap:12px; min-width:0; }}
+    .admin-user-avatar {{ width:56px; height:56px; font-size:22px; cursor:pointer; padding:0; }}
+    .admin-user-card-title {{ min-width:0; }}
+    .admin-user-name {{ font-size:28px; font-weight:900; letter-spacing:-0.03em; line-height:1; word-break:break-word; }}
+    .admin-user-sub {{ color:var(--muted); margin-top:6px; word-break:break-word; }}
+    .admin-user-pills {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }}
+    .admin-user-gear {{ width:38px; height:38px; padding:0; border-radius:12px; }}
+    .admin-user-info-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+    .admin-user-info-grid.compact {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+    .admin-user-info {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:12px; min-width:0; }}
+    .admin-user-info span {{ display:block; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; margin-bottom:7px; }}
+    .admin-user-info strong {{ display:block; word-break:break-word; }}
+    .admin-user-section {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:12px; }}
+    .admin-user-section-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:10px; }}
+    .admin-user-section-head span {{ color:var(--muted); font-size:12px; }}
+    .admin-report-list {{ display:flex; flex-direction:column; gap:8px; }}
+    .admin-report-row {{ border:1px solid #2f3d68; border-radius:14px; background:#0d1324; padding:10px; }}
+    .admin-report-top {{ display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:7px; }}
+    .admin-report-reason {{ color:#ffb4bf; font-weight:900; font-size:12px; }}
+    .admin-report-status {{ border:1px solid var(--border); border-radius:999px; padding:4px 8px; font-size:11px; font-weight:800; }}
+    .admin-report-status.open {{ background:#2a1d10; color:#ffc98f; border-color:#6f4b24; }}
+    .admin-report-status.done {{ background:#10261b; color:#98e2b8; border-color:#28533a; }}
+    .admin-report-text {{ line-height:1.45; }}
+    .admin-report-meta {{ color:var(--muted); font-size:12px; margin-top:6px; }}
+    .admin-report-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }}
+    .admin-report-actions form {{ margin:0; }}
+    .admin-report-actions button {{ padding:7px 10px; font-size:12px; }}
+    .admin-suggestions-shell {{ display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:14px; align-items:start; }}
+    .admin-suggestion-list {{ display:flex; flex-direction:column; gap:10px; }}
+    .admin-suggestion-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; padding:14px; }}
+    .admin-suggestion-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap; margin-bottom:10px; }}
+    .admin-suggestion-title {{ font-size:17px; font-weight:900; word-break:break-word; }}
+    .admin-suggestion-meta {{ color:var(--muted); font-size:12px; margin-top:4px; word-break:break-word; }}
+    .admin-suggestion-text {{ line-height:1.55; word-break:break-word; white-space:pre-wrap; }}
+    .admin-suggestion-actions {{ display:flex; gap:8px; margin-top:12px; align-items:flex-start; flex-wrap:wrap; }}
+    .admin-suggestion-action-form {{ display:flex; gap:8px; align-items:flex-start; flex:1 1 420px; margin:0; min-width:min(100%,420px); }}
+    .admin-suggestion-actions textarea {{ flex:1 1 240px; max-width:none; min-height:40px; resize:vertical; }}
+    .admin-suggestion-actions form.inline-form {{ margin:0; }}
+    .admin-suggestion-actions button {{ white-space:nowrap; }}
+    .admin-suggestion-side {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
+    .admin-gif-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; align-items:start; }}
+    .admin-gif-upload {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
+    .admin-gif-upload form {{ display:flex; flex-direction:column; gap:10px; }}
+    .admin-gif-upload input[type=file] {{ width:100%; color:var(--muted); }}
+    .admin-gif-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }}
+    .admin-gif-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; overflow:hidden; min-width:0; }}
+    .admin-gif-thumb {{ aspect-ratio:1.45/1; background:#060914; display:flex; align-items:center; justify-content:center; }}
+    .admin-gif-thumb img {{ width:100%; height:100%; object-fit:contain; display:block; }}
+    .admin-gif-body {{ padding:10px; display:flex; flex-direction:column; gap:8px; }}
+    .admin-gif-name {{ font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+    .admin-gif-actions {{ display:flex; gap:8px; flex-wrap:wrap; }}
+    .admin-gif-actions form {{ margin:0; }}
+    .admin-download-shell {{ display:grid; grid-template-columns:300px minmax(0,1fr); gap:14px; align-items:start; }}
+    .admin-download-upload {{ border:1px solid var(--border); border-radius:16px; background:#11182d; padding:14px; position:sticky; top:86px; }}
+    .admin-download-upload form {{ display:flex; flex-direction:column; gap:10px; }}
+    .admin-download-upload input[type=file] {{ width:100%; color:var(--muted); }}
+    .admin-download-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }}
+    .admin-download-card {{ border:1px solid var(--border); border-radius:16px; background:#0d1324; padding:14px; display:flex; flex-direction:column; gap:10px; min-width:0; }}
+    .admin-download-top {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }}
+    .admin-download-title {{ font-weight:900; font-size:16px; word-break:break-word; }}
+    .admin-download-meta {{ color:var(--muted); font-size:12px; line-height:1.45; word-break:break-word; }}
+    .admin-download-actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:auto; }}
+    .admin-download-actions form {{ margin:0; }}
+    .admin-download-actions a {{ text-decoration:none; border:1px solid var(--border); background:#151d37; color:var(--text); border-radius:14px; padding:10px 14px; font-weight:800; }}
+    .admin-user-actions {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
+    .admin-user-actions form {{ margin:0; }}
+    .admin-ban-reason-input {{ width:100%; max-width:none; margin-bottom:8px; padding:9px 10px; border-radius:12px; border:1px solid var(--border); background:#090d18; color:var(--text); }}
+    .admin-user-actions button {{ width:100%; }}
+    .btn-ok {{ background:#122b1c; border-color:#28533a; color:#baf0cf; }}
+    .btn-ok:hover {{ background:#173625; }}
+    .admin-user-emptyline, .admin-user-empty-detail {{ border:1px dashed var(--border); border-radius:14px; background:#0f1527; color:var(--muted); padding:18px; text-align:center; }}
+    .admin-user-empty-detail {{ min-height:360px; display:flex; align-items:center; justify-content:center; }}
+    .admin-modal-backdrop {{ position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,.58); display:flex; align-items:center; justify-content:center; padding:20px; }}
+    .admin-modal-window {{ width:min(760px,100%); max-height:90vh; overflow:auto; border:1px solid var(--border); border-radius:22px; background:#0b1020; box-shadow:0 24px 80px rgba(0,0,0,.45); }}
+    .admin-modal-head {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; border-bottom:1px solid var(--border); padding:16px; }}
+    .admin-modal-title {{ font-size:24px; font-weight:900; letter-spacing:-.02em; }}
+    .admin-modal-sub {{ color:var(--muted); margin-top:4px; }}
+    .admin-modal-close {{ width:36px; height:36px; padding:0; }}
+    .admin-modal-body {{ padding:16px; display:flex; flex-direction:column; gap:14px; }}
+    .admin-modal-avatar {{ border:1px solid var(--border); border-radius:18px; background:#11182d; min-height:260px; display:flex; align-items:center; justify-content:center; overflow:hidden; }}
+    .admin-modal-avatar-img {{ max-width:100%; max-height:420px; object-fit:contain; display:block; }}
+    .admin-modal-avatar-empty {{ width:120px; height:120px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:42px; font-weight:900; background:#172241; border:1px solid #314068; }}
+    .admin-modal-actions {{ display:flex; gap:10px; flex-wrap:wrap; }}
+    .admin-modal-actions a {{ text-decoration:none; border:1px solid var(--border); background:#121933; color:#eef2ff; border-radius:14px; padding:10px 12px; font-weight:800; }}
+    .admin-user-toast {{ position:fixed; right:18px; bottom:18px; z-index:1200; max-width:min(420px,calc(100vw - 36px)); padding:12px 14px; border-radius:14px; border:1px solid #5a2730; background:#2d1420; color:#ffd7df; box-shadow:0 18px 50px rgba(0,0,0,.38); font-weight:800; }}
+    .admin-user-toast[data-kind='ok'] {{ border-color:#28533a; background:#10261b; color:#baf0cf; }}
+    .admin-user-toast[hidden] {{ display:none; }}
+    @media (max-width: 980px) {{ .user-card, .server-row-card, .center-shell, .center-workspace, .panel-shell, .helper-grid, .user-fields, .admin-messenger, .admin-users-grid, .admin-user-info-grid, .admin-user-actions, .admin-suggestions-shell, .admin-gif-shell, .admin-download-shell {{ grid-template-columns:1fr; }} .user-actions, .server-actions {{ justify-content:flex-start; }} .admin-user-list-scroll {{ max-height:none; }} .admin-suggestion-side, .admin-gif-upload, .admin-download-upload {{ position:static; }} }}
+    @media (max-width: 640px) {{ main.admin-main {{ padding:12px; }} header {{ padding:12px; }} .brand {{ font-size:22px; }} .search-row form {{ flex-direction:column; }} .search-row input[type=text], .search-row button {{ width:100%; }} .messenger-frame {{ margin-top:-62px; height:calc(100% + 62px); }} .admin-suggestion-action-form {{ flex-direction:column; }} .admin-suggestion-actions textarea, .admin-suggestion-actions button {{ width:100%; }} }}
+    </style>
+    </head>
+    <body>
+    <header>
+    <div class='brand'>Админ-панель</div>
+    <nav class='nav'>{nav}</nav>
+    <div class='utc-note'>Время везде: UTC</div>
+    {logout_html}
+    </header>
+    <main class='{main_class}'>
+    {msg_html}
+    {body}
+    </main>
+    {center_script}{users_script}</body>
+    </html>"#,
         title = escape_html(title),
         nav = nav,
         msg_html = msg_html,
@@ -829,14 +836,14 @@ pub(super) fn require_allow_ip(st: &AppState, headers: &HeaderMap, peer: Option<
 fn new_session(st: &AppState) -> (String, AdminSession) {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
-    use rand::RngCore;
+    use rand::Rng;
 
     let mut buf = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     let sid = URL_SAFE_NO_PAD.encode(buf);
 
     let mut csrf_buf = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut csrf_buf);
+    rand::rng().fill_bytes(&mut csrf_buf);
     let csrf = URL_SAFE_NO_PAD.encode(csrf_buf);
 
     let expires_at = (Utc::now() + ChronoDuration::hours(8)).timestamp();
@@ -913,17 +920,16 @@ async fn login_get(State(st): State<AppState>, ConnectInfo(peer): ConnectInfo<So
 
     let body = format!(
         r#"<div class='card'>
-<h2>Вход</h2>
-<p class='small'>Admin listener: <code>{base}</code></p>
-<form id='admin-login-form' method='post' action='/admin/login'>
-  <div class='small'>Пароль администратора</div>
-  <input type='password' name='password' autocomplete='current-password' required />
-  <div style='height:10px'></div>
-  <button type='submit'>Войти</button>
-</form>
-{warn}
-</div>
-<script src='/js/admin-login.js'></script>"#,
+        <h2>Вход</h2>
+        <p class='small'>Admin listener: <code>{base}</code></p>
+        <form id='admin-login-form' method='post' action='/admin/login'>
+        <div class='small'>Пароль администратора</div>
+        <input type='password' name='password' autocomplete='current-password' required />
+        <div style='height:10px'></div>
+        <button type='submit'>Войти</button>
+        </form>
+        {warn}
+        </div>"#, 
         base = escape_html(&crate::routes::pages::admin_panel_base_url()),
         warn = warn
     );
@@ -956,7 +962,8 @@ async fn login_post(
 
     let (sid, _sess) = new_session(&st);
     let cookie = cookie_for_session(&sid, admin_cookie_secure(&headers));
-    tracing::info!("[ADMIN] Login successful");
+    let raw_cookie = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()).unwrap_or("NONE");
+    tracing::info!("[ADMIN] Checking auth. Raw Cookie header: {}", raw_cookie);
 
     let mut response = Response::builder()
         .status(StatusCode::SEE_OTHER)
@@ -1525,37 +1532,34 @@ async fn center_page(
         users_total=users_total, servers_total=servers_total, banned_total=banned_total,
     );
 
-    // homie panel hidden from center UI
-
     let body = format!(
         r#"<div class='panel-shell'>
-    <aside class='panel-sidebar'>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='overview'><strong>Центр</strong><span class='small'>Общий вид и точка входа в остальные панели.</span></button>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='users'><strong>Пользователи</strong><span class='small'>Почта, ник и действия по аккаунтам без прыжков по страницам.</span></button>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='suggestions'><strong>Предложения</strong><span class='small'>Идеи пользователей из настроек и быстрый просмотр статусов.</span></button>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='servers'><strong>Серверы</strong><span class='small'>Проверка владельцев и удаление прямо внутри рабочей области.</span></button>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='downloads'><strong>Загрузки</strong><span class='small'>APK и ПК клиент, которые сервер отдает на странице скачивания.</span></button>
-    <button type='button' class='center-nav-item panel-switch' data-center-switch='db'><strong>База данных</strong><span class='small'>Сервисные действия и обслуживание без отдельной вкладки.</span></button>
-    <!-- GIF, Messenger and Homie navigation removed -->
-  </aside>
-  <section class='panel-stage'>
-    <div class='panel-stage-header'>
-      <div>
-        <div class='panel-stage-title' data-center-stage-title>Центр управления</div>
-        <div class='panel-stage-sub' data-center-stage-sub>Одна рабочая страница для админки и внутреннего мониторинга мессенджера.</div>
-      </div>
-    </div>
-    <div class='panel-stage-body'>
-      <div class='panel-view' data-panel-view='overview' data-stage-title='Центр управления' data-stage-sub='Одна рабочая страница для админки и внутреннего мониторинга мессенджера.'>{overview_panel}</div>
-      <div class='panel-view' data-panel-view='users' data-stage-title='Пользователи' data-stage-sub=''>{users_panel}</div>
-      <div class='panel-view' data-panel-view='suggestions' data-stage-title='Предложения' data-stage-sub='Идеи пользователей из настроек и статус их рассмотрения.'>{suggestions_panel}</div>
-      <div class='panel-view' data-panel-view='servers' data-stage-title='Панель серверов' data-stage-sub='Проверка серверов и действия с ними в общей рабочей области.'>{servers_panel}</div>
-      <div class='panel-view' data-panel-view='downloads' data-stage-title='Загрузки приложения' data-stage-sub='APK и ПК клиент, которые пользователи скачивают с сервера.'>{downloads_panel}</div>
-      <div class='panel-view' data-panel-view='db' data-stage-title='Панель базы данных' data-stage-sub='Сервисные инструменты открываются здесь же, без переходов по страницам.'>{db_panel}</div>
-            <!-- GIF, Messenger and Homie panels are hidden -->
-    </div>
-  </section>
-</div>"#,
+        <aside class='panel-sidebar'>
+        <button type='button' class='center-nav-item panel-switch' data-center-switch='overview'><strong>Центр</strong><span class='small'>Общий вид и точка входа в остальные панели.</span></button>
+        <button type='button' class='center-nav-item panel-switch' data-center-switch='users'><strong>Пользователи</strong><span class='small'>Почта, ник и действия по аккаунтам без прыжков по страницам.</span></button>
+        <button type='button' class='center-nav-item panel-switch' data-center-switch='suggestions'><strong>Предложения</strong><span class='small'>Идеи пользователей из настроек и быстрый просмотр статусов.</span></button>
+        <button type='button' class='center-nav-item panel-switch' data-center-switch='servers'><strong>Серверы</strong><span class='small'>Проверка владельцев и удаление прямо внутри рабочей области.</span></button>
+        <button type='button' class='center-nav-item panel-switch' data-center-switch='downloads'><strong>Загрузки</strong><span class='small'>APK и ПК клиент, которые сервер отдает на странице скачивания.</span></button>
+        <button type='button' class='center-nav-item panel-switch' data-center-switch='db'><strong>База данных</strong><span class='small'>Сервисные действия и обслуживание без отдельной вкладки.</span></button>
+    </aside>
+    <section class='panel-stage'>
+        <div class='panel-stage-header'>
+        <div>
+            <div class='panel-stage-title' data-center-stage-title>Центр управления</div>
+            <div class='panel-stage-sub' data-center-stage-sub>Одна рабочая страница для админки и внутреннего мониторинга мессенджера.</div>
+        </div>
+        </div>
+        <div class='panel-stage-body'>
+        <div class='panel-view' data-panel-view='overview' data-stage-title='Центр управления' data-stage-sub='Одна рабочая страница для админки и внутреннего мониторинга мессенджера.'>{overview_panel}</div>
+        <div class='panel-view' data-panel-view='users' data-stage-title='Пользователи' data-stage-sub=''>{users_panel}</div>
+        <div class='panel-view' data-panel-view='suggestions' data-stage-title='Предложения' data-stage-sub='Идеи пользователей из настроек и статус их рассмотрения.'>{suggestions_panel}</div>
+        <div class='panel-view' data-panel-view='servers' data-stage-title='Панель серверов' data-stage-sub='Проверка серверов и действия с ними в общей рабочей области.'>{servers_panel}</div>
+        <div class='panel-view' data-panel-view='downloads' data-stage-title='Загрузки приложения' data-stage-sub='APK и ПК клиент, которые пользователи скачивают с сервера.'>{downloads_panel}</div>
+        <div class='panel-view' data-panel-view='db' data-stage-title='Панель базы данных' data-stage-sub='Сервисные инструменты открываются здесь же, без переходов по страницам.'>{db_panel}</div>
+                <!-- GIF, Messenger and Homie panels are hidden -->
+        </div>
+    </section>
+    </div>"#,
                 overview_panel=overview_panel, users_panel=users_panel, suggestions_panel=suggestions_panel, servers_panel=servers_panel, downloads_panel=downloads_panel, db_panel=db_panel,
     );
 
@@ -1661,19 +1665,19 @@ async fn fetch_users(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<Vec
     "#;
 
     let rows = if q.is_empty() {
-        sqlx::query(&format!("{select} ORDER BY u.id DESC LIMIT ?"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("{select} ORDER BY u.id DESC LIMIT ?")))
             .bind(limit)
             .fetch_all(db)
             .await?
     } else if let Ok(id) = q.parse::<i64>() {
-        sqlx::query(&format!("{select} WHERE u.id = ? ORDER BY u.id DESC LIMIT ?"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("{select} WHERE u.id = ? ORDER BY u.id DESC LIMIT ?")))
             .bind(id)
             .bind(limit)
             .fetch_all(db)
             .await?
     } else {
         let like = format!("%{}%", q);
-        sqlx::query(&format!("{select} WHERE u.username LIKE ? OR u.email LIKE ? ORDER BY u.id DESC LIMIT ?"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("{select} WHERE u.username LIKE ? OR u.email LIKE ? ORDER BY u.id DESC LIMIT ?")))
             .bind(&like)
             .bind(&like)
             .bind(limit)
@@ -1770,16 +1774,16 @@ async fn fetch_suggestions(db: &SqlitePool, status: &str, limit: i64) -> anyhow:
     "#;
 
     let rows = if status == "all" {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "{base} ORDER BY CASE s.status WHEN 'open' THEN 0 ELSE 1 END, s.id DESC LIMIT ?"
-        ))
+        )))
         .bind(limit)
         .fetch_all(db)
         .await?
     } else {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "{base} WHERE s.status = ? ORDER BY s.id DESC LIMIT ?"
-        ))
+        )))
         .bind(status)
         .bind(limit)
         .fetch_all(db)

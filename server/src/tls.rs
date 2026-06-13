@@ -57,27 +57,22 @@ impl SecurityHeaders {
     /// Generate security headers for HTTPS-only domain
     pub fn headers(domain: &str) -> Vec<(String, String)> {
         vec![
-            // HSTS: Enforce HTTPS for 1 year, including subdomains
             (
                 "Strict-Transport-Security".to_string(),
                 "max-age=31536000; includeSubDomains; preload".to_string(),
             ),
-            // Prevent MIME type sniffing
             (
                 "X-Content-Type-Options".to_string(),
                 "nosniff".to_string(),
             ),
-            // Prevent clickjacking
             (
                 "X-Frame-Options".to_string(),
                 "DENY".to_string(),
             ),
-            // XSS Protection (legacy, but good for older browsers)
             (
                 "X-XSS-Protection".to_string(),
                 "1; mode=block".to_string(),
             ),
-            // Content Security Policy - strict but reasonable for modern apps
             (
                 "Content-Security-Policy".to_string(),
                 format!(
@@ -93,17 +88,14 @@ impl SecurityHeaders {
                     domain, domain, domain
                 ),
             ),
-            // Referrer Policy
             (
                 "Referrer-Policy".to_string(),
                 "strict-origin-when-cross-origin".to_string(),
             ),
-            // Permissions Policy (formerly Feature Policy)
             (
                 "Permissions-Policy".to_string(),
                 "geolocation=(), microphone=(), camera=(), payment=(), usb=()".to_string(),
             ),
-            // Disable caching for sensitive content
             (
                 "Cache-Control".to_string(),
                 "no-cache, no-store, must-revalidate, private".to_string(),

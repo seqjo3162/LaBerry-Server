@@ -1,5 +1,5 @@
-import { api as defaultApi } from "./api.js?v=10";
-import { openAvatarCropper } from "./avatar-cropper.js?v=7";
+import { api as defaultApi } from "./api.js?v=1";
+import { openAvatarCropper } from "./avatar-cropper.js?v=1";
 
 export function initProfileModal({ api, getMe } = {}) {
   const apiFn = typeof api === 'function' ? api : defaultApi;

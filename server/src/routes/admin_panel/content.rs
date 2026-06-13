@@ -2,12 +2,13 @@ pub(super) use crate::auth;
 pub(super) use crate::server::{AdminSession, AppState};
 
 use axum::{
-    extract::{Form, Multipart, Path, Query, State, ConnectInfo},
+    extract::{Form, Path, Query, State, ConnectInfo},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
+    extract::Multipart,
 };
-use std::net::SocketAddr;
 
+use std::net::SocketAddr;
 use sqlx::{Row, SqlitePool};
 use std::path::PathBuf;
 use tokio::fs;
@@ -201,18 +202,16 @@ pub(super) async fn admin_gif_raw(
         .unwrap_or_else(|_| HeaderValue::from_static("inline"));
     let len_value = std::cmp::max(file_size, meta.len() as i64).to_string();
     let len = HeaderValue::from_str(&len_value).unwrap_or_else(|_| HeaderValue::from_static("0"));
-    let body = axum::body::Body::from_stream(ReaderStream::new(file));
-
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static("image/gif")),
-            (header::CONTENT_DISPOSITION, cd),
-            (header::CONTENT_LENGTH, len),
-            (header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff")),
-        ],
-        body,
-    ).into_response()
+    
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/gif")
+        .header(header::CONTENT_DISPOSITION, cd)
+        .header(header::CONTENT_LENGTH, len)
+        .header(header::CACHE_CONTROL, "private, max-age=900")
+        .header("x-content-type-options", "nosniff")
+        .body(axum::body::Body::from_stream(ReaderStream::new(file)))
+        .unwrap()
 }
 
 // =============================

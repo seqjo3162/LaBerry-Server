@@ -5,23 +5,29 @@
 
   form.addEventListener('submit', async function (event) {
     event.preventDefault();
+
     const submit = form.querySelector('button[type=submit]');
     if (submit) submit.disabled = true;
 
-    const data = new FormData(form);
-    const response = await fetch(form.action, {
-      method: 'POST',
-      body: data,
-      redirect: 'manual',
-      credentials: 'same-origin',
-    });
+    try {
+      const passwordInput = form.querySelector('input[name="password"]');
+      const payload = { password: passwordInput ? passwordInput.value : '' };
 
-    const location = response.headers.get('location');
-    if (location) {
-      window.location.href = location;
-      return;
+      const response = await fetch(form.action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        credentials: 'same-origin',
+      });
+
+      if (response.url) {
+        window.location.href = response.url;
+      } else {
+        window.location.reload();
+      }
+    } catch (error) {
+      console.error('Ошибка сети:', error);
+      if (submit) submit.disabled = false;
     }
-
-    window.location.reload();
   });
 })();

@@ -1,9 +1,10 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use std::{io::{Write, Seek, Read}, path::{Path, PathBuf}};
+use std::io::{Write, Seek, Read};
+use std::path::PathBuf;
 
 use crate::server::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -16,7 +17,7 @@ async fn file_exists(path: &str) -> bool {
 
 fn thumb_path_candidates(filename: &str) -> Vec<PathBuf> {
     let thumbs_dir = PathBuf::from("storage/files/thumbs");
-    let stem = Path::new(filename)
+    let stem = std::path::Path::new(filename)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(filename);
@@ -38,7 +39,7 @@ async fn thumb_exists(filename: &str) -> bool {
 /// Returns a signed download link for the file
 pub(crate) async fn get_file_link(
     State(st): State<AppState>,
-    axum::extract::Path(file_id): axum::extract::Path<i64>,
+    AxumPath(file_id): AxumPath<i64>,
     me: AuthUser,
 ) -> axum::response::Response {
     let file_row = match load_file_for_serving(&st, file_id).await {
@@ -98,7 +99,7 @@ pub(crate) async fn get_file_link(
 /// Returns a preview (thumbnail) for image files
 pub(crate) async fn get_preview(
     State(st): State<AppState>,
-    axum::extract::Path(file_id): axum::extract::Path<i64>,
+    AxumPath(file_id): AxumPath<i64>,
     Query(dl): Query<super::DlQuery>,
     me: Option<AuthUser>,
 ) -> axum::response::Response {
@@ -145,7 +146,7 @@ pub(crate) async fn get_preview(
 /// Returns a ZIP archive of the file
 pub(crate) async fn get_archive(
     State(st): State<AppState>,
-    axum::extract::Path(file_id): axum::extract::Path<i64>,
+    AxumPath(file_id): AxumPath<i64>,
     Query(dl): Query<super::DlQuery>,
     me: Option<AuthUser>,
 ) -> axum::response::Response {
@@ -172,10 +173,7 @@ pub(crate) async fn get_archive(
                 let mut tf = std::fs::File::create(&temp_path)?;
                 {
                     let mut archive = zip::ZipWriter::new(&mut tf);
-                    let options = zip::write::FileOptions::default()
-                        .compression_method(zip::CompressionMethod::Stored);
-                    
-                    archive.start_file(&file_row.original_name, options)?;
+                    let _ = archive.start_file(&file_row.original_name, zip::write::SimpleFileOptions::default());
                     archive.write_all(&bytes)?;
                     archive.finish()?;
                 }
@@ -221,7 +219,7 @@ pub(crate) async fn get_archive(
 /// Returns the raw file content
 pub(crate) async fn get_file_raw(
     State(st): State<AppState>,
-    axum::extract::Path(file_id): axum::extract::Path<i64>,
+    AxumPath(file_id): AxumPath<i64>,
     Query(dl): Query<super::DlQuery>,
     me: Option<AuthUser>,
 ) -> axum::response::Response {
@@ -255,18 +253,18 @@ pub(crate) async fn get_file_raw(
 /// Downloads the file with proper content disposition
 pub(crate) async fn get_file(
     State(st): State<AppState>,
-    axum::extract::Path(file_id): axum::extract::Path<i64>,
-    axum::extract::Query(dl): axum::extract::Query<Option<String>>,
+    AxumPath(file_id): AxumPath<i64>,
+    Query(dl): Query<super::DlQuery>,
     me: Option<AuthUser>,
 ) -> axum::response::Response {
-    let user_id = match resolve_user_id_for_file_request(&st, me.as_ref(), file_id, dl.as_deref()).await {
+    let user_id = match resolve_user_id_for_file_request(&st, me.as_ref(), file_id, dl.dl.as_deref()).await {
         Ok(uid) => uid,
         Err(code) => return (code, "unauthorized").into_response(),
     };
 
     let file_row = match load_file_for_serving(&st, file_id).await {
         Ok(row) => row,
-        Err(code) => return (code, "file not found").into_response(),
+        Err(code) => return (code, "file not found").into_response()
     };
 
     if !can_access_chat_by_user_id(&st, user_id, file_row.chat_id).await {

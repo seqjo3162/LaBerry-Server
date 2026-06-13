@@ -68,7 +68,7 @@ fn turn_rest_credential(secret: &str, username: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha1::Sha1;
 
-    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(secret.as_bytes())
         .expect("HMAC can take key of any size");
     mac.update(username.as_bytes());
     let out = mac.finalize().into_bytes();

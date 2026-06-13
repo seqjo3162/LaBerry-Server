@@ -35,12 +35,12 @@ const ORPHAN_CLEANUP_GRACE_SECS: u64 = 60 * 60;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/:file_id/link", get(get_file_link))
-        .route("/:file_id/preview", get(get_preview))
-        .route("/:file_id/archive", get(get_archive))
-        .route("/:file_id/raw", get(get_file_raw))
+        .route("/{file_id}/link", get(get_file_link))
+        .route("/{file_id}/preview", get(get_preview))
+        .route("/{file_id}/archive", get(get_archive))
+        .route("/{file_id}/raw", get(get_file_raw))
         .route("/", post(upload_file))
-        .route("/:file_id", get(get_file))
+        .route("/{file_id}", get(get_file))
 }
 
 #[derive(Deserialize, Default)]
@@ -187,7 +187,6 @@ pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat
                 "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
             )
             .bind(chat_id)
-            .bind(user_id)
             .bind(user_id)
             .fetch_optional(&st.db)
             .await

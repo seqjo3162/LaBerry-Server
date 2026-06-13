@@ -114,7 +114,13 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(5001);
-    let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
+        
+    let ip = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip,
+        Err(e) => return Err(anyhow::anyhow!("Failed to parse IP address '{}': {}", host, e)),
+    };
+    
+    let addr = SocketAddr::new(ip, port);
     tracing::info!("📡 Server will listen on: {}", addr);
 
     let db_path = std::env::var("LB_DB_PATH").unwrap_or_else(|_| "./laberry.db".to_string());

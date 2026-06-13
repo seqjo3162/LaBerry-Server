@@ -1,9 +1,10 @@
 use axum::{
-    extract::{Multipart, Path, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{Path, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
+    extract::Multipart,
 };
 use tokio::{fs, io::AsyncWriteExt};
 use uuid::Uuid;
@@ -27,12 +28,26 @@ pub struct ProfileFileResp {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(upload))
-        .route("/:file_id/raw", get(get_raw))
+        .route("/{file_id}/raw", get(get_raw))
 }
 
 fn is_allowed_mime(mime: &str) -> bool {
     let m = mime.to_ascii_lowercase();
     m.starts_with("image/") && m != "image/svg+xml"
+}
+
+fn transparent_png_response() -> axum::response::Response {
+    let transparent_png: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+        0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+        0x42, 0x60, 0x82
+    ];
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    (headers, transparent_png.to_vec()).into_response()
 }
 
 async fn upload(
@@ -158,22 +173,38 @@ pub async fn get_raw(
     .await;
 
     let Ok(Some(r)) = row else {
-        return StatusCode::NOT_FOUND.into_response();
+        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL WHERE avatar_file_id = ?")
+            .bind(file_id)
+            .execute(db)
+            .await;
+        return transparent_png_response();
     };
 
     let original_name: String = r.get("original_name");
     let mime_type: String = r.get("mime_type");
     let storage_path: String = r.get("storage_path");
 
+    let path = std::path::Path::new(&storage_path);
+    if !path.exists() {
+        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL WHERE avatar_file_id = ?")
+            .bind(file_id)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM profile_files WHERE id = ?")
+            .bind(file_id)
+            .execute(db)
+            .await;
+        return transparent_png_response();
+    }
+
     let Ok(bytes) = fs::read(&storage_path).await else {
-        return StatusCode::NOT_FOUND.into_response();
+        return transparent_png_response();
     };
 
     let mut headers = HeaderMap::new();
-    let ct = mime_type.parse().unwrap_or(header::HeaderValue::from_static("application/octet-stream"));
+    let ct = mime_type.parse().unwrap_or(HeaderValue::from_static("application/octet-stream"));
     headers.insert(header::CONTENT_TYPE, ct);
 
-    // inline for images
     let disp = format!("inline; filename=\"{}\"", original_name.replace('"', ""));
     if let Ok(v) = disp.parse() {
         headers.insert(header::CONTENT_DISPOSITION, v);

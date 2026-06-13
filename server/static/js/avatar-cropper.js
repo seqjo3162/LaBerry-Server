@@ -1,6 +1,3 @@
-// avatar-cropper.js
-// Простая обрезка/центровка аватара под круг: перетаскивание + зум.
-
 let _overlay = null;
 let _state = null;
 

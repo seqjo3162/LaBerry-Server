@@ -14,7 +14,6 @@ pub mod downloads;
 pub mod sessions;
 pub mod rtc;
 pub mod twofa;
-
+pub mod e2ee;
 pub mod profile_files;
-
 pub mod admin_panel;

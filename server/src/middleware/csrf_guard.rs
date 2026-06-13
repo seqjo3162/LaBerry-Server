@@ -9,17 +9,14 @@ use sqlx::SqlitePool;
 use chrono;
 use crate::auth;
 
-/// Generate a new CSRF token (UUID v4)
 pub fn generate_csrf_token() -> String {
     Uuid::new_v4().to_string()
 }
 
-/// Hash CSRF token for storage
 pub fn hash_csrf_token(token: &str) -> String {
     auth::sha256_hex(token)
 }
 
-/// Store CSRF token in database
 pub async fn store_csrf_token(
     db: &SqlitePool,
     user_id: i64,
@@ -49,7 +46,6 @@ pub async fn store_csrf_token(
     Ok(())
 }
 
-/// Validate CSRF token from request header
 pub async fn validate_csrf_token(
     db: &SqlitePool,
     user_id: i64,
@@ -58,7 +54,6 @@ pub async fn validate_csrf_token(
     let token_hash = hash_csrf_token(token);
     let now = auth::now_iso();
 
-    // Clean expired tokens
     sqlx::query(
         r#"DELETE FROM csrf_tokens WHERE expires_at < ?"#
     )
@@ -66,7 +61,6 @@ pub async fn validate_csrf_token(
     .execute(db)
     .await.ok();
 
-    // Check if token exists and is valid for user
     let result = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*) FROM csrf_tokens
@@ -79,7 +73,6 @@ pub async fn validate_csrf_token(
     .fetch_one(db)
     .await?;
 
-    // Consume token (one-time use)
     if result > 0 {
         sqlx::query(
             r#"DELETE FROM csrf_tokens WHERE token_hash = ?"#
@@ -93,14 +86,11 @@ pub async fn validate_csrf_token(
     Ok(false)
 }
 
-/// CSRF guard middleware for state-changing operations
-/// Checks X-CSRF-Token header against stored CSRF tokens
 pub async fn csrf_guard(
     headers: HeaderMap,
     mut req: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, &'static str)> {
-    // Only check POST, PUT, DELETE, PATCH requests
     match *req.method() {
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS => {
             // Safe methods, skip CSRF check
@@ -109,43 +99,34 @@ pub async fn csrf_guard(
         _ => {}
     }
 
-    // Skip CSRF for public endpoints and authenticated API routes
     let path = req.uri().path();
     
-    // Skip all /api/* endpoints — they are protected by Bearer token auth
     if path.starts_with("/api/") {
         return Ok(next.run(req).await);
     }
     
-    // Skip WebSocket connections
     if path.starts_with("/ws") {
         return Ok(next.run(req).await);
     }
     
-    // Skip admin panel endpoints (they use their own session-based CSRF)
     if path.starts_with("/admin") || path.starts_with("/admin-panel/") {
         return Ok(next.run(req).await);
     }
     
-    // Skip specific public endpoints
     if path.starts_with("/api/auth/login")
         || path.starts_with("/api/auth/register")
         || path.starts_with("/api/auth/refresh")
         || path.starts_with("/api/auth/verify-2fa")
         || path.starts_with("/verify")
     {
-        // These endpoints have their own security (2FA, rate limiting, token validation)
         return Ok(next.run(req).await);
     }
 
-    // Check for CSRF token in header
     let csrf_token = headers
         .get("x-csrf-token")
         .and_then(|v| v.to_str().ok())
         .ok_or((StatusCode::FORBIDDEN, "Missing CSRF token (X-CSRF-Token header required)"))?;
 
-    // Token validation will be done in the route handler
-    // This middleware just ensures the header is present
     req.extensions_mut().insert(csrf_token.to_string());
 
     Ok(next.run(req).await)

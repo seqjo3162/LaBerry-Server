@@ -80,7 +80,8 @@ fn percent_encode_header_value(input: &str) -> String {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_downloads))
-        .route("/:platform/file", get(download_latest))
+        .route("/{platform}/file", get(download_latest))
+        .fallback(get(list_downloads))
 }
 
 async fn latest_for_platform(db: &sqlx::SqlitePool, platform: &str) -> Option<sqlx::sqlite::SqliteRow> {

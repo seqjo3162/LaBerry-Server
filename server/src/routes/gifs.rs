@@ -21,10 +21,10 @@ const MAX_GIF_BYTES: usize = 50 * 1024 * 1024;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_gifs))
-        .route("/:asset_id/raw", get(get_gif_raw))
-        .route("/favorites", post(add_favorite))
-        .route("/favorites/:asset_id", delete(remove_favorite))
         .route("/clone", post(clone_gif_to_chat))
+        .route("/favorites", post(add_favorite))
+        .route("/{asset_id}/raw", get(get_gif_raw))
+        .route("/favorites/{asset_id}", delete(remove_favorite))
 }
 
 #[derive(Deserialize, Default)]
@@ -189,7 +189,6 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
         "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
     )
     .bind(chat_id)
-    .bind(user_id)
     .bind(user_id)
     .fetch_optional(&st.db)
     .await
@@ -547,10 +546,10 @@ async fn resolve_user_id_for_asset_request(
 
 async fn get_gif_raw(
     State(st): State<AppState>,
-    me: Option<AuthUser>,
     Path(asset_id): Path<i64>,
     Query(q): Query<DlQuery>,
     headers: HeaderMap,
+    me: Option<AuthUser>,
 ) -> impl IntoResponse {
     let uid = match resolve_user_id_for_asset_request(&st, me.as_ref(), asset_id, q.dl.as_deref()).await {
         Ok(v) => v,

@@ -79,11 +79,11 @@ pub fn router() -> Router<AppState> {
 // /api/messages/* (global endpoints)
 pub fn global_router() -> Router<AppState> {
     Router::new()
-        .route("/:message_id", get(get_one).delete(delete_message))
-        .route("/:message_id/reactions", get(get_reactions))
-        .route("/:message_id/pin", put(pin_message).delete(unpin_message))
+        .route("/{message_id}", get(get_one).delete(delete_message))
+        .route("/{message_id}/reactions", get(get_reactions))
+        .route("/{message_id}/pin", put(pin_message).delete(unpin_message))
         .route(
-            "/:message_id/reactions/:emoji",
+            "/{message_id}/reactions/{emoji}",
             put(add_reaction).delete(remove_reaction),
         )
 }
@@ -223,7 +223,6 @@ async fn can_access_message(
                 "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
             )
             .bind(chat_id)
-            .bind(user_id)
             .bind(user_id)
             .fetch_optional(db)
             .await?

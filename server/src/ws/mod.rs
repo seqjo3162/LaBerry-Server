@@ -1,8 +1,5 @@
-use axum::extract::ws::{Message, WebSocket};
-use futures_util::{SinkExt, StreamExt};
 use dashmap::DashMap;
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -13,7 +10,6 @@ use tracing;
 
 // ======================================================
 // LOG HELPERS (disable verbose WS logs by default)
-// Enable by setting env: LB_DEBUG_WS=1
 // ======================================================
 macro_rules! ws_debug {
     ($($arg:tt)*) => {{
@@ -30,21 +26,16 @@ macro_rules! ws_debug {
     }};
 }
 
-
 // ======================================================
 // TYPE DEFINITIONS FOR BOUNDED CHANNELS
 // ======================================================
-
-// 🔧 PERFORMANCE FIX: Use bounded channels instead of unbounded to prevent memory issues
 pub type WsSender = mpsc::Sender<Value>;
 pub type WsReceiver = mpsc::Receiver<Value>;
-
-const WS_CHANNEL_BUFFER: usize = 128; // Bounded queue size per connection
+const WS_CHANNEL_BUFFER: usize = 128;
 
 // ======================================================
 // TYPEDEFS
 // ======================================================
-
 pub type UserId = i64;
 pub type ConnId = u64;
 pub type VoiceChannelId = i64;
@@ -52,9 +43,8 @@ pub type VoiceChannelId = i64;
 static CONN_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 // ======================================================
-// ROOM ID (каналы + ЛС)
+// ROOM ID
 // ======================================================
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RoomId {
     Channel(i64),
@@ -62,46 +52,25 @@ pub enum RoomId {
     Voice(i64),
 }
 
-// Подмодули
 pub mod chat;
-pub mod presence;
 pub mod friends_events;
 
 // ======================================================
-// IMPROVED HUB STRUCTURE WITH CONNECTION MANAGEMENT
+// HUB STRUCTURE
 // ======================================================
-
 #[derive(Clone)]
 pub struct Hub {
-    /// presence: user_id -> conn_id -> sender
     pub presence: Arc<DashMap<UserId, DashMap<ConnId, WsSender>>>,
-
-    /// rooms: room_id -> user_id -> conn_id -> sender
     pub rooms: Arc<DashMap<RoomId, DashMap<UserId, DashMap<ConnId, WsSender>>>>,
-
-    /// 🔥 idempotent WS: user_id -> active conn_id
     pub active_conn: Arc<DashMap<UserId, ConnId>>,
-    
-    /// 🔥 NEW: Connection details for quick access and cleanup
     pub conn_details: Arc<DashMap<ConnId, ConnectionDetail>>,
-    
-    /// 🔥 NEW: User connection locks to prevent race conditions
     pub user_locks: Arc<DashMap<UserId, Arc<tokio::sync::Notify>>>,
-
-    /// voice state: conn_id -> voice_channel_id
     pub voice_by_conn: Arc<DashMap<ConnId, VoiceChannelId>>,
-
-    /// voice state: user_id -> voice_channel_id
     pub voice_by_user: Arc<DashMap<UserId, VoiceChannelId>>,
-
-    /// short-lived user events that should be delivered on the next reconnect
     pub pending_user_events: Arc<DashMap<UserId, Vec<Value>>>,
-
-    /// screenshare state: voice_channel_id -> set(user_id)
     pub ss_by_voice: Arc<DashMap<VoiceChannelId, DashMap<UserId, ()>>>,
 }
 
-/// 🔥 NEW: Connection details for management
 #[derive(Clone)]
 pub struct ConnectionDetail {
     pub user_id: UserId,
@@ -130,8 +99,9 @@ impl Hub {
     // ===================
     pub fn voice_get_user_channel(&self, user_id: UserId) -> Option<VoiceChannelId> {
         self.voice_user_conns(user_id)
-            .first()
-            .map(|(_, channel_id)| *channel_id)
+            .into_iter()
+            .next()
+            .map(|(_, channel_id)| channel_id)
     }
 
     pub fn voice_get_conn_channel(&self, conn_id: ConnId) -> Option<VoiceChannelId> {
@@ -155,7 +125,6 @@ impl Hub {
         out
     }
 
-    /// Set voice channel for (user, conn). Returns previous voice_channel_id (if any).
     pub fn voice_set(
         &self,
         user_id: UserId,
@@ -167,7 +136,6 @@ impl Hub {
         prev_user.or(prev_conn)
     }
 
-    /// Clear voice channel for (user, conn). Returns cleared voice_channel_id (if any).
     pub fn voice_clear(&self, user_id: UserId, conn_id: ConnId) -> Option<VoiceChannelId> {
         let prev_conn = self.voice_by_conn.remove(&conn_id).map(|(_, v)| v);
 
@@ -179,7 +147,6 @@ impl Hub {
 
         prev_conn
     }
-
 
     // ===================
     // SCREEN SHARE STATE
@@ -244,7 +211,6 @@ impl Hub {
 
         user_conns.insert(conn_id, tx.clone());
         
-        // 🔥 Store connection details
         self.conn_details.insert(conn_id, ConnectionDetail {
             user_id,
             tx,
@@ -262,7 +228,6 @@ impl Hub {
             }
         }
         
-        // 🔥 Remove connection details
         self.conn_details.remove(&conn_id);
     }
 
@@ -304,52 +269,75 @@ impl Hub {
     }
 
     pub fn broadcast_room(&self, room_id: &RoomId, payload: &Value) {
-        // 🔧 PERFORMANCE FIX: Wrap payload in Arc to avoid cloning for each connection
-        let payload_arc = Arc::new(payload.clone());
-        if let Some(room) = self.rooms.get(room_id) {
+        let senders: Vec<mpsc::Sender<Value>> = if let Some(room) = self.rooms.get(room_id) {
+            let mut s = Vec::new();
             for user_conns in room.iter() {
                 for tx in user_conns.value().iter() {
-                    // We still clone here but it's Arc clone (cheap), not Value clone (expensive)
-                    let payload_for_send = (*payload_arc).clone();
-                    if let Err(e) = tx.value().try_send(payload_for_send.clone()) {
-                        if matches!(e, mpsc::error::TrySendError::Full(_)) {
-                            ws_debug!("[BACKPRESSURE] Channel full for user, scheduling async send");
-                            let tx_clone = tx.value().clone();
-                            // spawn a background task to await send so we don't block here
-                            tokio::spawn(async move {
-                                let _ = tx_clone.send(payload_for_send).await;
-                            });
-                        }
+                    s.push(tx.value().clone());
+                }
+            }
+            s
+        } else {
+            tracing::warn!("[WS] broadcast_room: room {:?} not found", room_id);
+            return;
+        };
+
+        if senders.is_empty() {
+            tracing::warn!("[WS] broadcast_room: room {:?} has no senders", room_id);
+            return;
+        }
+
+        tracing::info!("[WS] broadcast_room: {:?} -> {} connections", room_id, senders.len());
+
+        for tx in senders {
+            if let Err(e) = tx.try_send(payload.clone()) {
+                match e {
+                    mpsc::error::TrySendError::Full(_) => {
+                        ws_debug!("[BACKPRESSURE] Channel full, scheduling async send");
+                        let payload_clone = payload.clone();
+                        tokio::spawn(async move {
+                            let _ = tx.send(payload_clone).await;
+                        });
                     }
+                    mpsc::error::TrySendError::Closed(_) => {}
                 }
             }
         }
     }
+
     pub fn broadcast_room_except_user(&self, room_id: &RoomId, exclude_user: UserId, payload: &Value) {
-        let payload_arc = Arc::new(payload.clone());
-        if let Some(room) = self.rooms.get(room_id) {
+        let senders: Vec<mpsc::Sender<Value>> = if let Some(room) = self.rooms.get(room_id) {
+            let mut s = Vec::new();
             for user_conns in room.iter() {
                 if *user_conns.key() == exclude_user {
                     continue;
                 }
                 for tx in user_conns.value().iter() {
-                    let payload_for_send = (*payload_arc).clone();
-                    if let Err(e) = tx.value().try_send(payload_for_send.clone()) {
-                        if matches!(e, mpsc::error::TrySendError::Full(_)) {
-                            ws_debug!("[BACKPRESSURE] Channel full, scheduling async send");
-                            let tx_clone = tx.value().clone();
-                            tokio::spawn(async move {
-                                let _ = tx_clone.send(payload_for_send).await;
-                            });
-                        }
-                    }
+                    s.push(tx.value().clone());
+                }
+            }
+            s
+        } else {
+            return;
+        };
+
+        if senders.is_empty() {
+            return;
+        }
+
+        for tx in senders {
+            if let Err(e) = tx.try_send(payload.clone()) {
+                if matches!(e, mpsc::error::TrySendError::Full(_)) {
+                    ws_debug!("[BACKPRESSURE] Channel full, scheduling async send");
+                    let payload_clone = payload.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(payload_clone).await;
+                    });
                 }
             }
         }
     }
-
-
-
+        
     // ===================
     // DIRECT SEND
     // ===================
@@ -360,7 +348,6 @@ impl Hub {
                 if tx.value().try_send(payload.clone()).is_ok() {
                     sent = true;
                 } else {
-                    // schedule async send in background, still count as delivered attempt
                     let tx_clone = tx.value().clone();
                     let p = payload.clone();
                     tokio::spawn(async move {
@@ -391,7 +378,6 @@ impl Hub {
             .unwrap_or_default()
     }
 
-    // 🔥 NEW: Send to specific connection
     pub fn send_to_conn(&self, conn_id: ConnId, payload: &Value) -> bool {
         if let Some(detail) = self.conn_details.get(&conn_id) {
             if detail.is_closing.load(Ordering::Relaxed) {
@@ -452,19 +438,16 @@ impl Hub {
     }
 
     // ===================
-    // IMPROVED CONNECTION MANAGEMENT
+    // CONNECTION MANAGEMENT
     // ===================
     
-    /// 🔥 NEW: Atomic connection swap with immediate cleanup
     pub async fn swap_connection(&self, user_id: UserId, new_conn_id: ConnId) -> Option<ConnId> {
         let old_conn = self.active_conn.insert(user_id, new_conn_id);
         
         if let Some(old_conn_id) = old_conn {
-            // Mark old connection as closing
             if let Some(detail) = self.conn_details.get(&old_conn_id) {
                 detail.is_closing.store(true, Ordering::Relaxed);
                 
-                // Send takeover notification to old connection
                 let _ = detail.tx.try_send(json!({
                     "type": "connection_taken_over",
                     "new_connection_id": new_conn_id,
@@ -472,10 +455,8 @@ impl Hub {
                 }));
             }
             
-            // Schedule cleanup of old connection
             let hub_clone = self.clone();
             tokio::spawn(async move {
-                // Wait a bit for graceful close
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 hub_clone.cleanup_conn(user_id, old_conn_id).await;
             });
@@ -484,12 +465,10 @@ impl Hub {
         old_conn
     }
     
-    /// 🔥 NEW: Get current active connection for user
     pub fn get_active_conn(&self, user_id: UserId) -> Option<ConnId> {
         self.active_conn.get(&user_id).map(|c| *c)
     }
     
-    /// 🔥 NEW: Check if connection is still active (not closing)
     pub fn is_conn_active(&self, conn_id: ConnId) -> bool {
         self.conn_details
             .get(&conn_id)
@@ -498,7 +477,7 @@ impl Hub {
     }
 
     // ===================
-    // IMPROVED CLEANUP CONNECTION
+    // CLEANUP CONNECTION
     // ===================
     pub async fn cleanup_conn(&self, user_id: UserId, conn_id: ConnId) {
         ws_debug!("[HUB] cleanup_conn: user={}, conn={}", user_id, conn_id);
@@ -509,26 +488,20 @@ impl Hub {
             .map(|v| *v)
             .or_else(|| self.voice_by_user.get(&user_id).map(|v| *v));
 
-        // Check if this connection is still the active one
         let should_remove_from_active = match self.active_conn.get(&user_id) {
             Some(active_conn_id) => *active_conn_id.value() == conn_id,
             None => false,
         };
 
-        // Clean up presence
         self.presence_leave(user_id, conn_id);
 
-        // DashMap нельзя мутировать (remove/get_mut) во время iter() -> возможен дедлок.
-        // Поэтому сначала собираем ключи комнат.
         let room_ids: Vec<RoomId> = self.rooms.iter().map(|e| e.key().clone()).collect();
         for room_id in room_ids {
             self.room_leave(&room_id, user_id, conn_id);
         }
 
-        // Clear voice state for this connection, preserving other live tabs.
         self.voice_clear(user_id, conn_id);
 
-        // Notify voice room that the peer left (disconnect / cleanup)
         if let Some(ch) = voice_channel {
             let payload = json!({
                 "type": "voice_peer_left",
@@ -539,151 +512,41 @@ impl Hub {
             self.broadcast_room(&RoomId::Voice(ch), &payload);
         }
 
-        // Remove from active_conn if it's still the current one
         if should_remove_from_active {
             ws_debug!("[HUB] Removing from active_conn: user={}, conn={}", user_id, conn_id);
             self.active_conn.remove(&user_id);
         }
 
-        // Clean up connection details (idempotent)
         self.conn_details.remove(&conn_id);
 
-        // Notify any waiting locks
         if let Some(notify) = self.user_locks.get(&user_id) {
             notify.value().notify_one();
         }
     }
     
-    // 🔥 NEW: Wait for user to be available (for preventing rapid reconnects)
     pub async fn wait_for_user_available(&self, user_id: UserId, timeout_ms: u64) -> bool {
-    // Проверяем, есть ли активное соединение
-    if let Some(active_conn_id) = self.get_active_conn(user_id) {
-        ws_debug!("[HUB] User {} has active connection {}, waiting...", user_id, active_conn_id);
-        
-        // Получаем notify для этого пользователя
-        let notify = {
-            let entry = self.user_locks.entry(user_id);
-            let notify_ref = entry.or_insert_with(|| Arc::new(tokio::sync::Notify::new()));
-            Arc::clone(&notify_ref)
-        };
-        
-        // Ждем, пока активное соединение не освободит пользователя
-        tokio::select! {
-            _ = notify.notified() => {
-                ws_debug!("[HUB] User {} is now available", user_id);
-                true
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
-                ws_debug!("[HUB] Timeout waiting for user {}", user_id);
-                false
-            }
-        }
-    } else {
-        // Нет активного соединения - пользователь доступен сразу
-        ws_debug!("[HUB] User {} has no active connection, available immediately", user_id);
-        true
-    }
-}
-}
-
-// ======================================================
-// IMPROVED BASE WS HANDLER (IDEMPOTENT WITH LOCKS)
-// ======================================================
-
-pub async fn handle(
-    socket: WebSocket,
-    _db: SqlitePool,
-    hub: Arc<Hub>,
-    user_id: UserId,
-) {
-    let conn_id: ConnId = CONN_ID_SEQ.fetch_add(1, Ordering::Relaxed);
-    
-    // 🔧 PERFORMANCE FIX: Use bounded channel (128) instead of unbounded
-    // This prevents memory issues from slow clients and backpressure builds up properly
-    let (tx, mut rx) = mpsc::channel::<Value>(WS_CHANNEL_BUFFER);
-
-    // Split socket: writer task will own the sink and send messages concurrently
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-
-    // Writer task: consumes `rx` and sends payloads to the client, also handles simple ping heartbeat
-    let hub_clone_for_writer = hub.clone();
-    let writer_conn_id = conn_id;
-    let writer = tokio::spawn(async move {
-        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(10));
-        loop {
+        if let Some(active_conn_id) = self.get_active_conn(user_id) {
+            ws_debug!("[HUB] User {} has active connection {}, waiting...", user_id, active_conn_id);
+            
+            let notify = {
+                let entry = self.user_locks.entry(user_id);
+                let notify_ref = entry.or_insert_with(|| Arc::new(tokio::sync::Notify::new()));
+                Arc::clone(&notify_ref)
+            };
+            
             tokio::select! {
-                Some(payload) = rx.recv() => {
-                    if ws_sender.send(Message::Text(payload.to_string())).await.is_err() {
-                        break;
-                    }
+                _ = notify.notified() => {
+                    ws_debug!("[HUB] User {} is now available", user_id);
+                    true
                 }
-                _ = heartbeat.tick() => {
-                    if !hub_clone_for_writer.is_conn_active(writer_conn_id) {
-                        break;
-                    }
-                    if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
-                        break;
-                    }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
+                    ws_debug!("[HUB] Timeout waiting for user {}", user_id);
+                    false
                 }
             }
-        }
-    });
-
-    // ======================
-    // WAIT FOR USER TO BE AVAILABLE (PREVENT RAPID RECONNECTS)
-    // ======================
-    ws_debug!("[WS] user={} new conn={} requesting connection", user_id, conn_id);
-    ws_debug!("[WS] handle: user={} conn={} waiting for lock", user_id, conn_id);
-    
-    // Wait up to 1 second for user to become available
-    /* 
-    if !hub.wait_for_user_available(user_id, 1000).await {
-        ws_debug!("[WS] user={} timeout waiting for lock, closing", user_id);
-        let _ = socket.close().await;
-        return;
-    }
-    */
-
-    // 🔥 ВМЕСТО ЭТОГО: Просто проверяем, есть ли активное соединение
-
-    if let Some(old_conn_id) = hub.get_active_conn(user_id) {
-        ws_debug!("[WS] User {} already has active connection {}, taking over", user_id, old_conn_id);
-    }
-
-    // ======================
-    // ATOMIC CONNECTION SWAP
-    // ======================
-    let old_conn = hub.swap_connection(user_id, conn_id).await;
-    if let Some(old_conn_id) = old_conn {
-        ws_debug!("[WS] user={} replaced old conn={} with new conn={}", user_id, old_conn_id, conn_id);
-    }
-
-    // регистрируем новый коннект
-    hub.presence_join(user_id, conn_id, tx.clone());
-    for payload in hub.drain_pending_for_user(user_id) {
-        let _ = tx.send(payload);
-    }
-
-    // ======================
-    // MAIN LOOP
-    // ======================
-    ws_debug!("[WS] user={} conn={} entering main loop", user_id, conn_id);
-    
-    // Main task: only reads incoming messages from the client
-    loop {
-        match ws_receiver.next().await {
-            Some(Ok(Message::Close(_))) | None => break,
-            Some(Ok(_)) => {}
-            Some(Err(_)) => break,
+        } else {
+            ws_debug!("[HUB] User {} has no active connection, available immediately", user_id);
+            true
         }
     }
-
-    // Ensure writer stops
-    let _ = writer.abort();
-
-    // ======================
-    // CLEANUP (idempotent)
-    // ======================
-    ws_debug!("[WS] user={} conn={} cleaning up", user_id, conn_id);
-    hub.cleanup_conn(user_id, conn_id).await;
 }

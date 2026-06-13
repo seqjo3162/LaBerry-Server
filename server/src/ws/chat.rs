@@ -21,15 +21,13 @@ pub async fn handle_single_ws(
     user_id: UserId,
     username: String,
 ) {
+    eprintln!("[WS_RAW] handle_single_ws START user={}", user_id);
+    tracing::error!("[WS_RAW] handle_single_ws START user={}", user_id);
+    tracing::info!("[WS] handle_single_ws started for user {}", user_id);
     let conn_id: ConnId = CONN_ID_SEQ.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = mpsc::channel::<Value>(WS_CHANNEL_BUFFER);
-
-    // multi-device: allow several WS connections per user
-
-    // Split socket into sender/receiver so writes run in a separate task
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // Shared last-seen timestamp for heartbeat logic (ms since epoch)
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering as AtomicOrdering;
     let last_seen_ts = Arc::new(AtomicU64::new(chrono::Utc::now().timestamp_millis() as u64));
@@ -61,7 +59,9 @@ pub async fn handle_single_ws(
         }));
     }
 
-    for room in get_accessible_rooms(&db, user_id).await {
+    let rooms = get_accessible_rooms(&db, user_id).await;
+    tracing::info!("[WS] user {} subscribing to {} rooms: {:?}", user_id, rooms.len(), rooms);
+    for room in rooms {
         hub.room_join(room, user_id, conn_id, tx.clone());
     }
 
@@ -72,7 +72,6 @@ pub async fn handle_single_ws(
         "timestamp": chrono::Utc::now().timestamp_millis()
     }));
 
-    // Writer task: owns WS sink and sends outgoing payloads + heartbeat pings
     let hub_for_writer = hub.clone();
     let last_seen_writer = Arc::clone(&last_seen_ts);
     let writer_conn = conn_id;
@@ -87,7 +86,7 @@ pub async fn handle_single_ws(
                         .map(|t| t == "force_logout")
                         .unwrap_or(false);
 
-                    if ws_sender.send(Message::Text(payload.to_string())).await.is_err() {
+                    if ws_sender.send(Message::Text(payload.to_string().into())).await.is_err() {
                         break;
                     }
 
@@ -99,11 +98,10 @@ pub async fn handle_single_ws(
                     if !hub_for_writer.is_conn_active(writer_conn) {
                         break;
                     }
-                    if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
+                    if ws_sender.send(Message::Ping(Vec::new().into())).await.is_err() {
                         break;
                     }
 
-                    // Check last seen timestamp (in ms)
                     let last = last_seen_writer.load(AtomicOrdering::Relaxed) as i64;
                     let now = chrono::Utc::now().timestamp_millis();
                     if now - last > 90_000 {
@@ -114,7 +112,6 @@ pub async fn handle_single_ws(
         }
     });
 
-    // Main loop: only reads incoming messages from the client and updates last_seen
     'main: loop {
         match ws_receiver.next().await {
             Some(Ok(Message::Text(text))) => {
@@ -125,7 +122,6 @@ pub async fn handle_single_ws(
                     break 'main;
                 }
 
-                // клиентский JSON ping: {type:"ping", t|timestamp:number}
                 if let Ok(v) = serde_json::from_str::<Value>(&text) {
                     if v.get("type").and_then(|t| t.as_str()) == Some("ping") {
                         let t = v.get("t")
@@ -153,7 +149,6 @@ pub async fn handle_single_ws(
         }
     }
 
-    // Ensure writer stops
     let _ = writer.abort();
 
     hub.cleanup_conn(user_id, conn_id).await;
@@ -180,10 +175,9 @@ pub async fn handle_single_ws(
             "timestamp": chrono::Utc::now().timestamp_millis()
         }));
     }
-    // socket was split earlier; writer task owns the sink and will close when dropped.
 }
 
-async fn handle_incoming_message(
+pub async fn handle_incoming_message(
     text: &str,
     db: &SqlitePool,
     hub: &Hub,
@@ -196,11 +190,6 @@ async fn handle_incoming_message(
     let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
 
     match typ {
-        // =====================
-        // TYPING / UPLOAD STATE (UI indicators)
-        // client -> {type:"typing", data:{chat_id:number, state:"start"|"stop", activity:"text"|"image"|"video"|"file"}}
-        // client -> {type:"upload_state", data:{chat_id:number, state:"start"|"stop", activity:"image"|"video"|"file"}}
-        // =====================
         "typing" | "upload_state" => {
             let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else {
                 return;
@@ -212,8 +201,6 @@ async fn handle_incoming_message(
 
             let state = v.get("data").and_then(|d| d.get("state")).and_then(|x| x.as_str()).unwrap_or("start");
             let activity = v.get("data").and_then(|d| d.get("activity")).and_then(|x| x.as_str()).unwrap_or("text");
-
-            // broadcast to the chat room; sender gets no echo
             let payload = json!({
                 "type": typ,
                 "chat_id": chat_id,
@@ -224,7 +211,6 @@ async fn handle_incoming_message(
                 "timestamp": chrono::Utc::now().timestamp_millis()
             });
 
-            // voice text should be visible only for connections that are actually in this voice channel
             let is_voice = chat_is_voice(db, chat_id).await;
             if is_voice {
                 if hub.voice_get_conn_channel(conn_id) != Some(chat_id) {
@@ -661,18 +647,30 @@ async fn handle_incoming_message(
         }
 
         "send_message" => {
-            let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else { return; };
-            let Some(content) = v.get("data").and_then(|d| d.get("content")).and_then(|x| x.as_str()) else { return; };
+            let Some(chat_id) = v.get("data").and_then(|d| d.get("chat_id")).and_then(|x| x.as_i64()) else { 
+                tracing::warn!("[WS] send_message: bad_request - no chat_id");
+                return; 
+            };
+            let Some(content) = v.get("data").and_then(|d| d.get("content")).and_then(|x| x.as_str()) else { 
+                tracing::warn!("[WS] send_message: bad_request - no content");
+                return; 
+            };
             let content = content.trim();
-            if content.is_empty() { return; }
+            if content.is_empty() { 
+                tracing::warn!("[WS] send_message: empty content");
+                return; 
+            }
 
             if !can_access_chat(db, user_id, chat_id).await {
-                let _ = tx.try_send(json!({"type":"error","code":"not_member","chat_id": chat_id}));
+                tracing::warn!("[WS] send_message: not_member - user {} chat {}", user_id, chat_id);
+                let _ = tx.try_send(json!({"type": "error", "code": "not_member", "chat_id": chat_id}));
                 return;
             }
 
             let ts = auth::now_iso();
             let message_id = persist_message(db, chat_id, user_id, content, &ts).await;
+            
+            tracing::info!("[WS] send_message: persisted id={} chat={} user={}", message_id, chat_id, user_id);
 
             let sender_avatar_file_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
                 "SELECT avatar_file_id FROM user_profile WHERE user_id = ? LIMIT 1",
@@ -698,25 +696,17 @@ async fn handle_incoming_message(
             let is_voice = chat_is_voice(db, chat_id).await;
             if is_voice {
                 if hub.voice_get_conn_channel(conn_id) != Some(chat_id) {
-                    let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
+                    let _ = tx.try_send(json!({"type": "error", "code": "not_in_voice", "chat_id": chat_id}));
                     return;
                 }
+                tracing::info!("[WS] broadcast_room Voice chat={}", chat_id);
                 hub.broadcast_room(&RoomId::Voice(chat_id), &out);
             } else {
-                let is_voice = chat_is_voice(db, chat_id).await;
-            if is_voice {
-                if hub.voice_get_conn_channel(conn_id) != Some(chat_id) {
-                    let _ = tx.try_send(json!({"type":"error","code":"not_in_voice","chat_id": chat_id}));
-                    return;
-                }
-                hub.broadcast_room(&RoomId::Voice(chat_id), &out);
-            } else {
+                tracing::info!("[WS] broadcast_room Channel chat={}", chat_id);
                 hub.broadcast_room(&RoomId::Channel(chat_id), &out);
             }
-            }
         }
-
-        // legacy: {type:"join", room:{kind:"channel"|"dm", id}, ...}
+        
         "join" => {
             let Some((kind, id)) = parse_legacy_room(&v) else { return; };
             let chat_id = id;
@@ -1036,7 +1026,6 @@ async fn get_accessible_rooms(db: &SqlitePool, user_id: UserId) -> Vec<RoomId> {
           AND COALESCE(c.kind, 'text') <> 'voice'
         "#,
     )
-    .bind(user_id)
     .bind(user_id)
     .fetch_all(db)
     .await

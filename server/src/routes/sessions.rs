@@ -25,7 +25,7 @@ pub struct SessionView {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_my))
-        .route("/:session_id/revoke", post(revoke))
+        .route("/{session_id}/revoke", post(revoke))
 }
 
 async fn list_my(State(st): State<AppState>, me: AuthUser) -> impl IntoResponse {

@@ -44,10 +44,10 @@ pub struct ChatRow {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create).get(list_my))
-        .route("/:chat_id", get(get_one))
-        .route("/:chat_id/join", post(join))
-        .route("/:chat_id/read", post(mark_read))
-        .route("/:chat_id/pins", get(list_pins))// join теперь безопасный
+        .route("/{chat_id}", get(get_one))
+        .route("/{chat_id}/join", post(join))
+        .route("/{chat_id}/read", post(mark_read))
+        .route("/{chat_id}/pins", get(list_pins))// join теперь безопасный
 }
 
 fn default_settings_json() -> Value {

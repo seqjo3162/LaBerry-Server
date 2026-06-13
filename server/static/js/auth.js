@@ -85,15 +85,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     return m[code] || "Ошибка авторизации";
   }
 
-  function saveSessionAndOpenApp(data) {
-    localStorage.setItem("auth_token", data.access_token);
-    if (data?.refresh_token) {
-      localStorage.setItem("refresh_token", data.refresh_token);
-    } else {
-      localStorage.removeItem("refresh_token");
-    }
-    localStorage.setItem("user_id", data.user_id);
-    window.location.href = "/app";
+  async function saveSessionAndOpenApp(data, password, username) {
+      // Генерируем Master Key из введенного пароля и сохраняем в памяти
+      try {
+          const masterKey = await deriveMasterKey(password, username);
+          setMasterKey(masterKey);
+          console.log("🔐 Master Key derived successfully");
+      } catch (e) {
+          console.error("Crypto error", e);
+      }
+
+      localStorage.setItem("auth_token", data.access_token);
+      if (data?.refresh_token) {
+          localStorage.setItem("refresh_token", data.refresh_token);
+      }
+      localStorage.setItem("user_id", data.user_id);
+      window.location.href = "/app";
   }
 
   async function loginWithCredentials(username, password) {
@@ -138,7 +145,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     let res, data;
     try {
       if (mode === "login") {
-        // LOGIN → x-www-form-urlencoded
         const body = new URLSearchParams();
         body.append("username", username);
         body.append("password", password);
@@ -149,7 +155,6 @@ document.addEventListener("DOMContentLoaded", async () => {
           body,
         });
       } else {
-        // REGISTER → JSON
         res = await fetch("/api/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -176,7 +181,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (mode === "register") {
       try {
         const loginData = await loginWithCredentials(username, password);
-        saveSessionAndOpenApp(loginData);
+        saveSessionAndOpenApp(loginData, password, username);
       } catch {
         showError("Аккаунт создан, но автоматический вход не сработал. Войдите вручную.");
         setMode("login");
@@ -184,8 +189,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    // LOGIN SUCCESS
-    saveSessionAndOpenApp(data);
+    saveSessionAndOpenApp(data, password, username);
   });
 
   // ==============================

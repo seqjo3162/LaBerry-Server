@@ -6,7 +6,6 @@ use crate::{
     ws::{Hub, UserId, VoiceChannelId},
     middleware::geo_guard::GeoGuardState,
 };
-use axum::extract::connect_info::ConnectInfo;
 
 use axum::{
     extract::{
@@ -44,40 +43,40 @@ use tokio::{
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
-    cors::CorsLayer,
+    cors::{CorsLayer, AllowOrigin},
     services::{ServeDir, ServeFile},
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
     set_header::SetResponseHeaderLayer,
     LatencyUnit,
 };
-use hyper::service::service_fn;
-use tower::Service;
 
 // ======================================================
 // 🧩 Application State
+// ======================================================
+
 #[derive(Clone)]
 pub struct AdminSession {
     pub expires_at: i64,
     pub csrf: String,
 }
 
-// ======================================================
+// server.rs
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
     pub hub: Arc<Hub>,
     pub connected_ws: Arc<AtomicUsize>,
-    pub friends: DashMap<UserId, HashSet<UserId>>,
-    pub voice_states: DashMap<UserId, VoiceChannelId>,
-    pub admin_sessions: DashMap<String, AdminSession>,
+    pub friends: Arc<DashMap<UserId, HashSet<UserId>>>,
+    pub voice_states: Arc<DashMap<UserId, VoiceChannelId>>,
+    pub admin_sessions: Arc<DashMap<String, AdminSession>>,
     pub geo_guard: GeoGuardState,
     pub trusted_proxies: Vec<IpAddr>,
 }
 
 // ======================================================
-// 🚀 Server entry point WITHOUT TLS (оригинальный)
+// 🚀 Server entry point WITHOUT TLS (оригинальный, исправленный)
 // ======================================================
-
 pub async fn run_server(
     db_path: &str,
     secret: &str,
@@ -102,13 +101,12 @@ pub async fn run_server(
     std::env::set_var("SECRET_KEY", secret);
 
     tracing::info!("[DB] Connecting...");
-    // 🔧 PERFORMANCE: Configure SQLite connection pool for multi-core (Ryzen 5950X: 16 cores)
     use sqlx::sqlite::SqlitePoolOptions;
     use std::time::Duration;
     
     let db = SqlitePoolOptions::new()
-        .max_connections(32)  // 2x CPU cores for 16-core Ryzen
-        .min_connections(8)   // Keep minimum connections warm
+        .max_connections(32)
+        .min_connections(8)
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(300))
         .connect(&db_url)
@@ -123,27 +121,24 @@ pub async fn run_server(
     db::bootstrap::ensure_global_server(&db).await?;
     tracing::info!("[DB] ✅ Bootstrap complete");
 
-
     let geo_guard = GeoGuardState::from_custom_file("assets/custom_blocked_cidr")?;
-    let trusted_proxies = Arc::new(vec![
+    // Упрощено: без Arc
+    let trusted_proxies = vec![
         std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
         std::net::IpAddr::V6(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
-        // Если Caddy в Docker-контейнере, например:
-        // std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 1)),
-    ]);
+    ];
 
     let state = AppState {
         db,
         hub: Arc::new(hub),
         connected_ws: Arc::new(AtomicUsize::new(0)),
-        friends: DashMap::new(),
-        voice_states: DashMap::new(),
-        admin_sessions: DashMap::new(),
+        friends: Arc::new(DashMap::new()),
+        voice_states: Arc::new(DashMap::new()),
+        admin_sessions: Arc::new(DashMap::new()),
         geo_guard,
-        trusted_proxies: trusted_proxies.as_ref().clone(),
+        trusted_proxies,
     };
 
-    // One shutdown signal for both servers.
     let shutdown = Arc::new(Notify::new());
     {
         let shutdown = shutdown.clone();
@@ -160,9 +155,7 @@ pub async fn run_server(
         let cleanup_state = state.clone();
         let cleanup_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            // Run once on startup, then hourly.
             crate::routes::files::cleanup_expired_files(&cleanup_state).await;
-
             let mut tick = interval(Duration::from_secs(60 * 60));
             loop {
                 tokio::select! {
@@ -177,26 +170,18 @@ pub async fn run_server(
         });
     }
 
-    // 🔴 SECURITY FIX: Background cleanup for rate limiting and CSRF tokens
     {
         let cleanup_db = state.db.clone();
         let cleanup_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            let mut tick = interval(Duration::from_secs(60 * 60)); // hourly
+            let mut tick = interval(Duration::from_secs(60 * 60));
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        // Clean expired rate limit logs
                         match crate::middleware::rate_limit::cleanup_expired_logs(&cleanup_db).await {
-                            Ok(rows) => {
-                                if rows > 0 {
-                                    tracing::info!("[CLEANUP] Deleted {} expired rate limit logs", rows);
-                                }
-                            },
+                            Ok(rows) => if rows > 0 { tracing::info!("[CLEANUP] Deleted {} rate limit logs", rows); },
                             Err(e) => tracing::error!("[ERROR] Failed to cleanup rate limit logs: {}", e),
                         }
-
-                        // Clean expired CSRF tokens
                         let now = chrono::Utc::now().to_rfc3339();
                         match sqlx::query(r#"DELETE FROM csrf_tokens WHERE expires_at < ?"#)
                             .bind(&now)
@@ -204,19 +189,13 @@ pub async fn run_server(
                             .await {
                             Ok(result) => {
                                 let rows = result.rows_affected();
-                                if rows > 0 {
-                                    tracing::info!("[CLEANUP] Deleted {} expired CSRF tokens", rows);
-                                }
+                                if rows > 0 { tracing::info!("[CLEANUP] Deleted {} CSRF tokens", rows); }
                             },
                             Err(e) => tracing::error!("[ERROR] Failed to cleanup CSRF tokens: {}", e),
                         }
-
-                        // Clean in-memory rate limit buckets
                         crate::middleware::rate_limit::cleanup_expired_buckets();
                     }
-                    _ = cleanup_shutdown.notified() => {
-                        break;
-                    }
+                    _ = cleanup_shutdown.notified() => break,
                 }
             }
         });
@@ -228,80 +207,21 @@ pub async fn run_server(
     let tls_cert_path = env::var("LB_TLS_CERT_PATH").ok();
     let tls_key_path = env::var("LB_TLS_KEY_PATH").ok();
     let has_tls = tls_cert_path.is_some() && tls_key_path.is_some();
-
     if has_tls {
         tracing::info!("[SERVER] 🔐 TLS/HTTPS enabled");
     } else {
         tracing::info!("[SERVER] ⚠️  TLS/HTTPS disabled");
     }
 
-    tracing::info!("[SERVER] Building main router...");
     let app = build_router(state.clone());
-    tracing::info!("[SERVER] Main router built ✅");
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    // Pass shutdown Notify into the loop so Ctrl+C actually stops the server.
     let shutdown_main = shutdown.clone();
 
-    let svc = app.into_service();
     let mut main_handle = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown_main.notified() => {
-                    tracing::info!("[SERVER] Shutdown signal received, stopping accept loop.");
-                    break;
-                }
-                result = listener.accept() => {
-                    match result {
-                        Ok((socket, remote_addr)) => {
-                            let svc = svc.clone();
-                            tokio::spawn(async move {
-                                let io = hyper_util::rt::TokioIo::new(socket);
-
-                                let service = service_fn(move |mut req| {
-                                    let mut svc = svc.clone();
-                                    async move {
-                                        req.extensions_mut()
-                                            .insert(ConnectInfo(remote_addr));
-
-                                        let req = req.map(axum::body::Body::new);
-
-                                        let resp = match svc.call(req).await {
-                                            Ok(resp) => resp,
-                                            Err(err) => {
-                                                tracing::error!("[SERVER] Service error: {}", err);
-                                                axum::response::Response::builder()
-                                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                    .body(axum::body::Body::from("internal server error"))
-                                                    .unwrap()
-                                            }
-                                        };
-
-                                        Ok::<_, std::convert::Infallible>(resp)
-                                    }
-                                });
-
-                                if let Err(err) = hyper_util::server::conn::auto::Builder::new(
-                                    hyper_util::rt::TokioExecutor::new(),
-                                )
-                                .serve_connection(io, service)
-                                .await
-                                {
-                                    tracing::error!("[SERVER] Connection error: {}", err);
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            tracing::error!("[SERVER] Accept error: {}", e);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok::<(), anyhow::Error>(())
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(async move { shutdown_main.notified().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("Main server error: {}", e))
     });
 
     // ------------------------------
@@ -312,7 +232,6 @@ pub async fn run_server(
         || std::env::var("LB_ADMIN_PASSWORD_HASH").ok().is_some();
 
     let mut admin_handle = None;
-
     if admin_enabled {
         let admin_addr = admin_bind_addr()?;
         let pwd_ok = crate::routes::admin_panel::admin_password_is_configured();
@@ -320,78 +239,24 @@ pub async fn run_server(
             "[ADMIN] Enabled (password configured: {pwd_ok}). Main-app gateway: /admin/* -> admin port"
         );
         tracing::info!("[ADMIN] Building admin router...");
-        let admin_app = build_admin_router(state.clone()).with_state(state.clone());
+        let admin_app = build_admin_router(state.clone());
         let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
         tracing::info!(
             "[ADMIN] Listening on {} (login: {}/admin/login)",
             admin_addr,
             crate::routes::pages::admin_panel_base_url()
         );
-        let svc = admin_app.into_service();
         let shutdown_admin = shutdown.clone();
+
         let ah = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = shutdown_admin.notified() => {
-                        tracing::info!("[ADMIN] Shutdown signal received, stopping accept loop.");
-                        break;
-                    }
-                    result = admin_listener.accept() => {
-                        match result {
-                            Ok((socket, remote_addr)) => {
-                                let svc = svc.clone();
-                                tokio::spawn(async move {
-                                    let io = hyper_util::rt::TokioIo::new(socket);
-
-                                    let service = service_fn(move |mut req| {
-                                        let mut svc = svc.clone();
-                                        async move {
-                                            req.extensions_mut()
-                                                .insert(ConnectInfo(remote_addr));
-
-                                            let req = req.map(axum::body::Body::new);
-
-                                            let resp = match svc.call(req).await {
-                                                Ok(resp) => resp,
-                                                Err(err) => {
-                                                    tracing::error!("[ADMIN] Service error: {}", err);
-                                                    axum::response::Response::builder()
-                                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                        .body(axum::body::Body::from("internal server error"))
-                                                        .unwrap()
-                                                }
-                                            };
-
-                                            Ok::<_, std::convert::Infallible>(resp)
-                                        }
-                                    });
-
-                                    if let Err(err) = hyper_util::server::conn::auto::Builder::new(
-                                        hyper_util::rt::TokioExecutor::new(),
-                                    )
-                                    .serve_connection(io, service)
-                                    .await
-                                    {
-                                        tracing::error!("[ADMIN] Connection error: {}", err);
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                tracing::error!("[ADMIN] Accept error: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            Ok::<(), anyhow::Error>(())
+            axum::serve(admin_listener, admin_app.into_make_service_with_connect_info::<SocketAddr>())
+                .with_graceful_shutdown(async move { shutdown_admin.notified().await })
+                .await
+                .map_err(|e| anyhow::anyhow!("Admin server error: {}", e))
         });
         admin_handle = Some(ah);
     }
 
-    // Wait for shutdown
     if let Some(mut ah) = admin_handle {
         tokio::select! {
             res = &mut main_handle => {
@@ -414,9 +279,9 @@ pub async fn run_server(
 }
 
 // ======================================================
-// 🧭 Router builder
+// 🧭 Router builder (с исправленным CORS)
 // ======================================================
-pub fn build_router(state: AppState) -> Router<()> {
+pub fn build_router(state: AppState) -> Router {
     let st = state.clone();
     tracing::info!("[ROUTER] Building routes...");
 
@@ -428,12 +293,12 @@ pub fn build_router(state: AppState) -> Router<()> {
     tracing::info!("[ROUTER] Static dir: {:?}", static_dir);
 
     let state_for_middleware = state.clone();
+
     let admin_gateway = Router::new()
         .route("/", get(crate::routes::pages::admin_hint))
-        .fallback(any(crate::routes::pages::admin_redirect_fallback));
+        .route("/{*rest}", any(crate::routes::pages::admin_redirect_fallback));
 
-    let router = Router::new()
-        // ⚠️ Убрано .with_state(state.clone()) – состояние будет передаваться в каждый вложенный роутер отдельно
+    let main_routes = Router::new()
         .route("/", get(crate::routes::pages::index))
         .route("/login", get(crate::routes::pages::login))
         .route("/app", get(crate::routes::pages::app))
@@ -442,8 +307,6 @@ pub fn build_router(state: AppState) -> Router<()> {
         .route("/license-agreement", get(crate::routes::pages::license_agreement))
         .nest("/admin", admin_gateway)
         .route("/health", get(|| async { "OK" }))
-        .route("/ws", get(ws_main))
-        .route("/ws/health", get(ws_health))
         .route("/verify", get(crate::routes::auth::verify_token))
         .route("/api/system/status", get(system_status))
         .nest("/api/auth", crate::routes::auth::router().with_state(st.clone()))
@@ -454,6 +317,7 @@ pub fn build_router(state: AppState) -> Router<()> {
         .nest("/api/dms", crate::routes::dms::router().with_state(st.clone()))
         .nest("/api/presence", crate::routes::presence::router().with_state(st.clone()))
         .nest("/api/sessions", crate::routes::sessions::router().with_state(st.clone()))
+        .nest("/api/e2ee", crate::routes::e2ee::router().with_state(st.clone()))
         .nest("/api/messages", crate::routes::messages::global_router().with_state(st.clone()))
         .nest("/api/files", crate::routes::files::router().with_state(st.clone()))
         .nest("/api/gifs", crate::routes::gifs::router().with_state(st.clone()))
@@ -462,87 +326,45 @@ pub fn build_router(state: AppState) -> Router<()> {
         .nest("/api/embeds", crate::routes::embeds::router().with_state(st.clone()))
         .nest("/api/rtc", crate::routes::rtc::router().with_state(st.clone()))
         .nest("/api/2fa", crate::routes::twofa::router().with_state(st.clone()))
-        // files – уже внутри было .with_state, оставим как есть
         .nest(
             "/files",
             Router::new()
-                .route("/:file_id/raw", get(crate::routes::files::get_file_raw))
-                .route("/:file_id", get(crate::routes::files::get_file))
+                .route("/{file_id}/raw", get(crate::routes::files::get_file_raw)) 
+                .route("/{file_id}", get(crate::routes::files::get_file))
                 .with_state(st.clone()),
         )
-        // Admin panel runs on the dedicated admin listener (see run_server); /admin here is only a hint page.
         .nest_service(
             "/static",
             ServeDir::new(static_dir.clone())
                 .fallback(ServeFile::new(static_dir.join("index.html"))),
         )
-        // middlewares with state (they expect Arc<AppState>)
-        .layer(axum::middleware::from_fn_with_state(
-            state_for_middleware.clone(),
-            crate::middleware::host_guard::host_guard,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            state_for_middleware,
-            crate::middleware::geo_guard::geo_guard,
-        ))
+        // Все middleware применяются ТОЛЬКО к main_routes
+        .layer(axum::middleware::from_fn_with_state(state_for_middleware.clone(), crate::middleware::host_guard::host_guard))
+        .layer(axum::middleware::from_fn_with_state(state_for_middleware, crate::middleware::geo_guard::geo_guard))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
-
-        // Security headers (без изменений)
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("x-content-type-options"),
-            HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("x-frame-options"),
-            HeaderValue::from_static("DENY"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("x-xss-protection"),
-            HeaderValue::from_static("1; mode=block"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("referrer-policy"),
-            HeaderValue::from_static("strict-origin-when-cross-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("permissions-policy"),
-            HeaderValue::from_static("geolocation=(), microphone=(self), camera=(), payment=()"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
-            HeaderValue::from_static("same-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("cross-origin-resource-policy"),
-            HeaderValue::from_static("same-origin"),
-        ))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff")))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("x-frame-options"), HeaderValue::from_static("DENY")))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("x-xss-protection"), HeaderValue::from_static("1; mode=block")))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("referrer-policy"), HeaderValue::from_static("strict-origin-when-cross-origin")))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("permissions-policy"), HeaderValue::from_static("geolocation=(), microphone=(self), camera=(), payment=()")))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("cross-origin-opener-policy"), HeaderValue::from_static("same-origin")))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("cross-origin-resource-policy"), HeaderValue::from_static("same-origin")))
         .layer({
             let tls_cert = env::var("LB_TLS_CERT_PATH").ok();
             let tls_key = env::var("LB_TLS_KEY_PATH").ok();
             if tls_cert.is_some() && tls_key.is_some() {
-                SetResponseHeaderLayer::if_not_present(
-                    axum::http::header::HeaderName::from_static("strict-transport-security"),
-                    HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
-                )
+                SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("strict-transport-security"), HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"))
             } else {
-                SetResponseHeaderLayer::if_not_present(
-                    axum::http::header::HeaderName::from_static("x-no-op"),
-                    HeaderValue::from_static("1"),
-                )
+                SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("x-no-op"), HeaderValue::from_static("1"))
             }
         })
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("cache-control"),
-            HeaderValue::from_static("no-cache, no-store, must-revalidate, private"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::header::HeaderName::from_static("pragma"),
-            HeaderValue::from_static("no-cache"),
-        ))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("cache-control"), HeaderValue::from_static("no-cache, no-store, must-revalidate, private")))
+        .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("pragma"), HeaderValue::from_static("no-cache")))
         .layer(SetResponseHeaderLayer::if_not_present(
             axum::http::header::HeaderName::from_static("content-security-policy"),
             HeaderValue::from_str(
-                &env::var("LB_CSP").unwrap_or_else(|_| "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; connect-src 'self' wss: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; frame-src 'self' https://www.youtube.com https://player.vimeo.com https://rutube.ru; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
+                &env::var("LB_CSP").unwrap_or_else(|_| 
+                    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; connect-src 'self' wss: ws: https://i.ytimg.com https://*.ytimg.com https://ru.pinterest.com https://*.pinterest.com https://player.vimeo.com https://rutube.ru; frame-src 'self' https://www.youtube.com https://player.vimeo.com https://rutube.ru; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".to_string())
             ).unwrap_or_else(|_| HeaderValue::from_static("default-src 'self'")),
         ))
         .layer({
@@ -555,43 +377,32 @@ pub fn build_router(state: AppState) -> Router<()> {
             if !allowed.trim().is_empty() {
                 let a = allowed.trim();
                 if a == "*" {
-                    tracing::warn!("⚠️  WARNING: CORS_ALLOWED_ORIGINS='*' is not recommended for production!");
                     cors = cors.allow_origin(tower_http::cors::Any);
                 } else {
-                    let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
-                    for o in a.split(',') {
-                        let o = o.trim();
-                        if o.is_empty() { continue; }
-                        if let Ok(v) = o.parse::<axum::http::HeaderValue>() {
-                            origins.push(v);
-                        }
-                    }
+                    let origins: Vec<HeaderValue> = a.split(',').filter_map(|o| o.trim().parse().ok()).collect();
                     if !origins.is_empty() {
-                        cors = cors.allow_origin(origins);
+                        cors = cors.allow_origin(AllowOrigin::list(origins));
                     }
                 }
             }
             cors
         })
         .layer(axum::middleware::from_fn(crate::middleware::csrf_guard::csrf_guard))
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().include_headers(false))
-                .on_response(
-                    DefaultOnResponse::new()
-                        .include_headers(false)
-                        .latency_unit(LatencyUnit::Millis),
-                ),
-        )
-        .layer(CatchPanicLayer::new())
-        .with_state(state);
+        .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().include_headers(false)).on_response(DefaultOnResponse::new().include_headers(false).latency_unit(LatencyUnit::Millis)))
+        .layer(CatchPanicLayer::new());
 
-    tracing::info!("[ROUTER] ✅ Routes ready");
-    router
+    let ws_routes = Router::new()
+        .route("/ws", get(ws_main))
+        .route("/ws/health", get(ws_health));
+
+    Router::new()
+        .merge(ws_routes)
+        .merge(main_routes)
+        .with_state(state)
 }
 
 // ======================================================
-// 🔐 Admin server (local-only)
+// 🔐 Admin server (local-only) — без изменений
 // ======================================================
 
 fn env_bool(key: &str, default: bool) -> bool {
@@ -621,7 +432,7 @@ fn admin_bind_addr() -> anyhow::Result<SocketAddr> {
     Ok(SocketAddr::from((ip, port)))
 }
 
-pub fn build_admin_router(state: AppState) -> Router<AppState> {
+pub fn build_admin_router(state: AppState) -> Router {
     use axum::response::Redirect;
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -681,6 +492,7 @@ pub fn build_admin_router(state: AppState) -> Router<AppState> {
                 ),
         )
         .layer(CatchPanicLayer::new())
+        .with_state(state)
 }
 
 #[cfg(test)]
@@ -701,9 +513,9 @@ mod tests {
             db,
             hub: Arc::new(hub),
             connected_ws: Arc::new(AtomicUsize::new(0)),
-            friends: DashMap::new(),
-            voice_states: DashMap::new(),
-            admin_sessions: DashMap::new(),
+            friends: Arc::new(DashMap::new()),
+            voice_states: Arc::new(DashMap::new()),
+            admin_sessions: Arc::new(DashMap::new()),
             geo_guard,
             trusted_proxies: vec![
                 IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -775,10 +587,10 @@ async fn health_loop(mut socket: WebSocket, st: AppState) {
     let start = Instant::now();
     loop {
         ticker.tick().await;
-        sys.refresh_cpu();
+        sys.refresh_cpu_all();
         sys.refresh_memory();
 
-        let cpu_usage = sys.global_cpu_info().cpu_usage();
+        let cpu_usage = sys.global_cpu_usage();
         let mem_used = sys.used_memory() / 1024 / 1024;
         let mem_total = sys.total_memory() / 1024 / 1024;
 
@@ -800,7 +612,7 @@ async fn health_loop(mut socket: WebSocket, st: AppState) {
             "memory": { "used_mb": mem_used, "total_mb": mem_total },
             "disk": { "used_gb": disk_used, "total_gb": disk_total }
         });
-        if let Err(err) = socket.send(Message::Text(payload.to_string())).await {
+        if let Err(err) = socket.send(Message::Text(payload.to_string().into())).await {
             tracing::info!("[WS_HEALTH] disconnected (err={})", err);
             break;
         }
@@ -832,7 +644,6 @@ fn extract_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
         token = Some(t.clone());
     } else if let Some(value) = headers.get(header::AUTHORIZATION) {
         if let Ok(v) = value.to_str() {
-            // Typical: "Bearer <jwt>"
             if let Some(bearer) = v.trim().strip_prefix("Bearer ") {
                 if !bearer.is_empty() {
                     token = Some(bearer.to_string());
@@ -843,7 +654,6 @@ fn extract_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
 
     let mut t = token?;
 
-    // Some clients may accidentally pass "Bearer <jwt>" via query.
     let t_trim = t.trim();
     if let Some(rest) = t_trim.strip_prefix("Bearer ") {
         t = rest.trim().to_string();
@@ -853,16 +663,11 @@ fn extract_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
         t = t_trim.to_string();
     }
 
-    // Strip accidental surrounding quotes.
     if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
         t = t.trim_matches('"').to_string();
     }
 
-    if t.is_empty() {
-        None
-    } else {
-        Some(t)
-    }
+    if t.is_empty() { None } else { Some(t) }
 }
 
 async fn ws_main(
@@ -871,9 +676,8 @@ async fn ws_main(
     Query(q): Query<TokenQuery>,
     State(st): State<AppState>,
 ) -> impl IntoResponse {
-    // Token can be provided in query/header (legacy) OR via first WS message (preferred).
+    eprintln!("[WS_RAW] Upgrade request received");
     let pre_token = extract_token(&headers, &q);
-
     let db = st.db.clone();
     let hub = Arc::clone(&st.hub);
     let connected = Arc::clone(&st.connected_ws);
@@ -884,46 +688,42 @@ async fn ws_main(
             tracing::info!("[WS] CONNECT (total={})", prev);
         }
 
-        // Authenticate
         let auth_token = if let Some(t) = pre_token {
             Some(t)
         } else {
-            // wait for {type:\"auth\", token:\"...\"}
-            match tokio::time::timeout(Duration::from_secs(5), socket.recv()).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await {
                 Ok(Some(Ok(Message::Text(text)))) => {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                         if v.get("type").and_then(|x| x.as_str()) == Some("auth") {
                             v.get("token").and_then(|x| x.as_str()).map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
+                        } else { None }
+                    } else { None }
                 }
-                _ => None,
+                Ok(Some(Ok(Message::Binary(_)))) |
+                Ok(Some(Ok(Message::Ping(_)))) |
+                Ok(Some(Ok(Message::Pong(_)))) |
+                Ok(Some(Ok(Message::Close(_)))) |
+                Ok(Some(Err(_))) |
+                Ok(None) |
+                Err(_) => None,
             }
         };
 
         let Some(token) = auth_token else {
-            let _ = socket.send(Message::Text(json!({"type":"error","code":"unauthorized"}).to_string())).await;
+            let _ = socket.send(Message::Text(json!({"type":"error","code":"unauthorized"}).to_string().into())).await;
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
-            if ws_debug_enabled() {
-                tracing::info!("[WS] DISCONNECT (unauthorized) (total={})", after);
-            }
+            if ws_debug_enabled() { tracing::info!("[WS] DISCONNECT (unauthorized) (total={})", after); }
             return;
         };
 
         let (username, token_version) = match auth::decode_username(&token) {
             Ok(v) => v,
             Err(_) => {
-                let _ = socket.send(Message::Text(json!({"type":"error","code":"invalid_token"}).to_string())).await;
+                let _ = socket.send(Message::Text(json!({"type":"error","code":"invalid_token"}).to_string().into())).await;
                 let _ = socket.send(Message::Close(None)).await;
                 let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
-                if ws_debug_enabled() {
-                    tracing::info!("[WS] DISCONNECT (invalid token) (total={})", after);
-                }
+                if ws_debug_enabled() { tracing::info!("[WS] DISCONNECT (invalid token) (total={})", after); }
                 return;
             }
         };
@@ -941,34 +741,28 @@ async fn ws_main(
         .await;
 
         let Ok(Some(row)) = row else {
-            let _ = socket.send(Message::Text(json!({"type":"error","code":"user_not_found"}).to_string())).await;
+            let _ = socket.send(Message::Text(json!({"type":"error","code":"user_not_found"}).to_string().into())).await;
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
-            if ws_debug_enabled() {
-                tracing::info!("[WS] DISCONNECT (user not found) (total={})", after);
-            }
+            if ws_debug_enabled() { tracing::info!("[WS] DISCONNECT (user not found) (total={})", after); }
             return;
         };
 
         let is_banned: i64 = row.get("is_banned");
         if is_banned != 0 {
-            let _ = socket.send(Message::Text(json!({"type":"error","code":"banned"}).to_string())).await;
+            let _ = socket.send(Message::Text(json!({"type":"error","code":"banned"}).to_string().into())).await;
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
-            if ws_debug_enabled() {
-                tracing::info!("[WS] DISCONNECT (banned) (total={})", after);
-            }
+            if ws_debug_enabled() { tracing::info!("[WS] DISCONNECT (banned) (total={})", after); }
             return;
         }
 
         let db_version: i64 = row.get("token_version");
         if db_version != token_version {
-            let _ = socket.send(Message::Text(json!({"type":"error","code":"token_invalidated"}).to_string())).await;
+            let _ = socket.send(Message::Text(json!({"type":"error","code":"token_invalidated"}).to_string().into())).await;
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;
-            if ws_debug_enabled() {
-                tracing::info!("[WS] DISCONNECT (invalidated) (total={})", after);
-            }
+            if ws_debug_enabled() { tracing::info!("[WS] DISCONNECT (invalidated) (total={})", after); }
             return;
         }
 

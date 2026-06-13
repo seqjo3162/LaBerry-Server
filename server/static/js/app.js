@@ -16,13 +16,13 @@ if (typeof fetch === 'undefined') {
     throw new Error('fetch not available');
 }
 
-import { api } from "./api.js?v=11";
-import { initFriends } from "./friends.js?v=10";
-import { wsManager } from "./websocket-manager.js?v=12";
-import { createSettingsUI } from "./settings.js?v=16";
-import { showUserMenu } from "./user-menu.js?v=10";
-import { initVoice } from "./voice.js?v=30";
-import { initProfileModal } from "./profile-modal.js?v=13";
+import { api } from "./api.js?v=1";
+import { initFriends } from "./friends.js?v=1";
+import { wsManager } from "./websocket-manager.js?v=1";
+import { createSettingsUI } from "./settings.js?v=1";
+import { showUserMenu } from "./user-menu.js?v=1";
+import { initVoice } from "./voice.js?v=1";
+import { initProfileModal } from "./profile-modal.js?v=1";
 
 appLog('[APP] All imports loaded successfully');
 
@@ -359,13 +359,17 @@ async function e2eeRegisterDeviceKey(deviceId, publicJwk, label) {
         typeof publicJwk === 'string'
             ? publicJwk
             : (publicJwk.publicText || publicJwk.publicKeyB64 || JSON.stringify(publicJwk));
+    
+    console.log('[E2EE] Registering device key:', { deviceId, pubLength: pub?.length, label });
+    
     try {
-        await api('/api/users/me/device-keys', {
+        const result = await api('/api/users/me/device-keys', {
             method: 'POST',
             body: JSON.stringify({ device_id: deviceId, public_jwk: pub, label: label || null }),
         });
+        console.log('[E2EE] Device key registered successfully:', result);
     } catch (e) {
-        console.warn('[E2EE] failed to register device key', e);
+        console.error('[E2EE] failed to register device key', e);
     }
 }
 
@@ -528,55 +532,29 @@ async function e2eeGetUserPublicKey(userId) {
     }
 }
 
-async function e2eeDeriveWrapKey(publicJwk, ephemeralSecretKey = null, hkdfFn = e2eeHkdf) {
+async function e2eeDeriveWrapKey(publicJwk, ephemeralSecretKey = null, infoStr = 'laberry-wrap-key', hkdfFn = e2eeHkdf) {
     const publicText = e2eeNormalizeX25519PublicB64(publicJwk);
     if (!publicText) return null;
-
     try {
-
-        // Если эфемерный ключ не передан, берем свой собственный X25519 из профиля
         let privateKeyBytes = ephemeralSecretKey;
         if (!privateKeyBytes) {
             const identity = await e2eeEnsureIdentity(false);
-            if (!identity || !identity.secretKey) {
-                console.warn('[E2EE] No X25519 private key available');
-                return null;
-            }
+            if (!identity || !identity.secretKey) return null;
             privateKeyBytes = identity.secretKey;
         }
-
         const publicKeyBytes = e2eeB64uToBytes(publicText);
-
-        if (privateKeyBytes.length !== 32 || publicKeyBytes.length !== 32) {
-            console.warn('[E2EE] Invalid X25519 key length');
-            return null;
-        }
-
-        // Вычисляем общий секрет X25519
+        if (privateKeyBytes.length !== 32 || publicKeyBytes.length !== 32) return null;
         const sharedSecret = nacl.scalarMult(privateKeyBytes, publicKeyBytes);
-        if (!sharedSecret || sharedSecret.length !== 32) {
-            console.warn('[E2EE] X25519 scalarMult failed');
-            return null;
-        }
-
-        // Пропускаем через HKDF для получения ключа AES-GCM (совместимо с Rust)
+        if (!sharedSecret || sharedSecret.length !== 32) return null;
         const keyBytes = await hkdfFn(
             new Uint8Array(32),
             sharedSecret,
-            new TextEncoder().encode('laberry-wrap-key'),
+            new TextEncoder().encode(infoStr),
             32
         );
-
         if (!keyBytes || keyBytes.length !== 32) return null;
-
-        return await crypto.subtle.importKey(
-            'raw', keyBytes,
-            { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
-        );
-    } catch (e) {
-        console.warn('[E2EE] X25519 derivation failed:', e);
-        return null;
-    }
+        return await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    } catch (e) { return null; }
 }
 
 async function e2eeCurrentChatRecipients() {
@@ -584,36 +562,28 @@ async function e2eeCurrentChatRecipients() {
     if (currentUser?.id) {
         const own = await e2eeEnsureIdentity(false);
         out.set(Number(currentUser.id), {
-            id: Number(currentUser.id),
-            username: currentUser.username || 'Вы',
+            id: Number(currentUser.id), username: currentUser.username || 'Вы',
             public_encryption_key: own?.publicText || currentUser.public_encryption_key || null,
         });
     }
-
     try {
         const rows = currentServerId
             ? await api(`/api/servers/${encodeURIComponent(currentServerId)}/members`)
             : await api(`/api/dms/${encodeURIComponent(currentChatId)}/participants`);
-        for (const row of Array.isArray(rows) ? rows : []) {
+        const list = Array.isArray(rows) ? rows : [];
+        await Promise.all(list.map(async (row) => {
             const id = Number(row?.id);
-            if (!Number.isFinite(id) || id <= 0) continue;
+            if (!Number.isFinite(id) || id <= 0) return;
+            if (row?.is_ai === true || row?.is_ai === 1) return;
             
-            // Load public key if not present in row
             let recipient = { ...row };
             if (!recipient.public_encryption_key && !recipient.public_key) {
                 const userPubKey = await e2eeGetUserPublicKey(id);
-                if (userPubKey) {
-                    recipient.public_encryption_key = userPubKey;
-                }
+                if (userPubKey) recipient.public_encryption_key = userPubKey;
             }
-            
             out.set(id, recipient);
-        }
-    } catch (e) {
-        console.warn('[E2EE] failed to load recipients', e);
-        throw new Error('e2ee_recipients_failed');
-    }
-
+        }));
+    } catch (e) { throw new Error('e2ee_recipients_failed'); }
     return [...out.values()];
 }
 
@@ -630,7 +600,6 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     if (!e2eeShouldEncryptOutgoing(plaintext)) return plaintext;
     const identity = await e2eeEnsureIdentity(true);
     if (!identity) throw new Error('e2ee_identity_unavailable');
-
     let recipients;
     try {
         recipients = await e2eeCurrentChatRecipients();
@@ -652,7 +621,6 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     );
     const messageKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', messageKey));
 
-    // Эфемерный ключ X25519 для этого сообщения
     const ephemeralPair = nacl.box.keyPair();
     const ephemeralPubJwk = e2eeBytesToB64u(ephemeralPair.publicKey);
     const ephemeralSecretKey = ephemeralPair.secretKey;
@@ -660,30 +628,29 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     const myDeviceId = e2eeGetOrCreateDeviceId();
     const myPublicJwk = identity.publicText || identity.publicJwk;
 
-    for (const recipient of recipients) {
+    const deviceResults = await Promise.all(recipients.map(async (recipient) => {
+        const id = Number(recipient?.id);
+        if (!Number.isFinite(id) || id <= 0) return { recipient, devices: [] };
+        let devices = [];
+        try { devices = await e2eeGetUserDeviceKeys(id); } catch (_) {}
+        return { recipient, devices };
+    }));
+
+    for (const { recipient, devices: initialDevices } of deviceResults) {
         const id = Number(recipient?.id);
         if (!Number.isFinite(id) || id <= 0) continue;
+        let devices = initialDevices;
 
-        // gather recipient devices
-        let devices = [];
-        try {
-            devices = await e2eeGetUserDeviceKeys(id);
-        } catch (_) { devices = []; }
-
-        // For current user, also include current session's device to ensure self-decryption works
         const isCurrentUser = id === Number(currentUser?.id);
         if (isCurrentUser && myDeviceId && myPublicJwk) {
-            // Check if current session device is already in the list
             const alreadyIncluded = devices.some(d => String(d.device_id) === String(myDeviceId));
             if (!alreadyIncluded) {
                 devices = [{ device_id: myDeviceId, public_jwk: myPublicJwk }, ...devices];
             }
         }
 
-        // fallback to account-level single key
         if ((!devices || devices.length === 0) && recipient?.public_encryption_key) {
             const pubKey = recipient.public_encryption_key;
-            // Try to parse as JWK or use as base64 X25519
             const parsed = e2eeParsePublicKey(pubKey);
             const keyToUse = parsed || (typeof pubKey === 'string' && pubKey.length >= 43 && pubKey.length <= 44 && /^[A-Za-z0-9_-]+$/.test(pubKey) ? pubKey : null);
             if (keyToUse) devices = [{ device_id: 'server', public_jwk: keyToUse }];
@@ -696,21 +663,28 @@ async function e2eeEncryptForCurrentChat(plaintext) {
 
         keys[String(id)] = {};
 
-        for (const d of devices) {
+        const deviceWrapResults = await Promise.all(devices.map(async (d) => {
             const devId = String(d.device_id || '');
             const jwk = e2eeNormalizeX25519PublicB64(d.public_jwk || d.publicKeyB64 || d.public_key);
-            if (!jwk) {
-                continue;
-            }
+            if (!jwk) return null;
+            
             try {
-                // Use unified derivation function
                 const wrapKey = await e2eeDeriveWrapKey(jwk, ephemeralSecretKey);
-                if (!wrapKey) continue;
+                if (!wrapKey) return null;
                 const keyIv = crypto.getRandomValues(new Uint8Array(12));
-                const keyCt = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: keyIv }, wrapKey, messageKeyRaw));
-                keys[String(id)][devId || 'unknown'] = { iv: e2eeBytesToB64u(keyIv), ct: e2eeBytesToB64u(keyCt) };
+                const keyCt = new Uint8Array(await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: keyIv }, wrapKey, messageKeyRaw
+                ));
+                return { devId: devId || 'unknown', iv: e2eeBytesToB64u(keyIv), ct: e2eeBytesToB64u(keyCt) };
             } catch (e) {
                 console.warn('[E2EE] key wrap failed for device', d, e);
+                return null;
+            }
+        }));
+
+        for (const result of deviceWrapResults) {
+            if (result) {
+                keys[String(id)][result.devId] = { iv: result.iv, ct: result.ct };
             }
         }
     }
@@ -736,7 +710,6 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     }
 
     const iv = crypto.getRandomValues(new Uint8Array(12));
-
     let ct;
 
     try {
@@ -747,7 +720,6 @@ async function e2eeEncryptForCurrentChat(plaintext) {
                 new TextEncoder().encode(String(plaintext))
             )
         );
-
         console.log('[E2EE] MESSAGE ENCRYPT OK');
     } catch (e) {
         console.error('[E2EE] MESSAGE ENCRYPT FAILED', e);
@@ -828,39 +800,31 @@ function e2eeCollectWrappedKeyCandidates(userKeyMap, myDeviceId) {
     return out;
 }
 
-async function e2eeBuildWrapKey(env, identity, hkdfFn = e2eeHkdf) {
+async function e2eeBuildWrapKey(env, identity, infoStr = 'laberry-wrap-key', hkdfFn = e2eeHkdf) {
     const ephemeralPub = e2eeNormalizeX25519PublicB64(env.ephemeral);
     if (ephemeralPub) {
-        const wrapKey = await e2eeDeriveWrapKey(ephemeralPub, identity.secretKey, hkdfFn);
+        const wrapKey = await e2eeDeriveWrapKey(ephemeralPub, identity.secretKey, infoStr, hkdfFn);
         if (wrapKey) return wrapKey;
     }
-
-    const senderPub =
-        e2eeNormalizeX25519PublicB64(env.sender_key) ||
-        e2eeNormalizeX25519PublicB64(await e2eeGetUserPublicKey(env.sender));
+    const senderPub = e2eeNormalizeX25519PublicB64(env.sender_key) || e2eeNormalizeX25519PublicB64(await e2eeGetUserPublicKey(env.sender));
     if (!senderPub) return null;
-    return e2eeDeriveWrapKey(senderPub, identity.secretKey, hkdfFn);
+    return e2eeDeriveWrapKey(senderPub, identity.secretKey, infoStr, hkdfFn);
 }
 
 async function e2eeUnwrapMessageKey(wrapped, env, identity) {
     const hkdfAttempts = [e2eeHkdf, e2eeHkdfLegacy];
+    const infoAttempts = ['laberry-wrap-key', 'laberry-recv-key'];
     let lastError = null;
-
     for (const hkdfFn of hkdfAttempts) {
-        try {
-            const wrapKey = await e2eeBuildWrapKey(env, identity, hkdfFn);
-            if (!wrapKey) continue;
-            const messageKeyRaw = await crypto.subtle.decrypt(
-                { name: 'AES-GCM', iv: e2eeB64uToBytes(wrapped.iv) },
-                wrapKey,
-                e2eeB64uToBytes(wrapped.ct)
-            );
-            return crypto.subtle.importKey('raw', messageKeyRaw, { name: 'AES-GCM' }, false, ['decrypt']);
-        } catch (e) {
-            lastError = e;
+        for (const infoStr of infoAttempts) {
+            try {
+                const wrapKey = await e2eeBuildWrapKey(env, identity, infoStr, hkdfFn);
+                if (!wrapKey) continue;
+                const messageKeyRaw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e2eeB64uToBytes(wrapped.iv) }, wrapKey, e2eeB64uToBytes(wrapped.ct));
+                return crypto.subtle.importKey('raw', messageKeyRaw, { name: 'AES-GCM' }, false, ['decrypt']);
+            } catch (e) { lastError = e; }
         }
     }
-
     if (lastError) throw lastError;
     return null;
 }
@@ -872,7 +836,6 @@ async function e2eeDecryptText(content) {
     if (!e2eeAvailable()) return '🔒 Сообщение зашифровано. Нужен HTTPS и современный браузер.';
 
     try {
-        // ИСПРАВЛЕНИЕ 1: Кэшируем identity, чтобы параллельные вызовы не пересоздавали ключи устройства
         if (!e2eeCache.identity) {
             e2eeCache.identity = await e2eeEnsureIdentity(false);
         }
@@ -907,7 +870,6 @@ async function e2eeDecryptText(content) {
                 return new TextDecoder().decode(plain);
             } catch (e) {
                 if (e?.code === 'e2ee_public_key_changed') {
-                    // Если ключ отправителя изменился, очищаем кэш и пытаемся снова
                     console.warn('[E2EE] Sender key changed, clearing cache and retrying:', e?.username);
                     const senderId = env.sender;
                     if (Number.isFinite(senderId) && senderId > 0) {
@@ -918,7 +880,6 @@ async function e2eeDecryptText(content) {
             }
         }
 
-        // Если в последний раз произошла ошибка public_key_changed, пытаемся снова с очищенным кэшем
         if (lastError?.code === 'e2ee_public_key_changed') {
             console.log('[E2EE] Retrying decryption after key change...');
             try {
@@ -936,22 +897,22 @@ async function e2eeDecryptText(content) {
                         );
                         return new TextDecoder().decode(plain);
                     } catch (retryErr) {
-                        // Ignore and continue
                     }
                 }
-            } catch (_) {
-                // Fall through to final error message
-            }
+            } catch (_) {}
         }
 
-        console.warn('[E2EE] decrypt failed (inner):', lastError);
+        if (lastError && lastError.name !== 'OperationError' && !String(lastError.message||'').includes('OperationError')) {
+            console.warn('[E2EE] decrypt failed (inner):', lastError);
+        }
         return '🔒 Не удалось расшифровать сообщение на этом устройстве.';
     } catch (e) {
-        console.warn('[E2EE] decrypt failed (outer):', e);
+        if (e?.name !== 'OperationError' && !String(e?.message || '').includes('OperationError')) {
+            console.warn('[E2EE] decrypt failed (outer):', e);
+        }
         return '🔒 Не удалось расшифровать сообщение на этом устройстве.';
     }
 }
-
 
 async function prepareMessageForDisplay(msg) {
     if (!msg || typeof msg !== 'object') return msg;
@@ -6192,18 +6153,49 @@ function setupWebSocketHandlers() {
 
         const messageData = await prepareMessageForDisplay(data);
         const sender = (messageData.sender_username || messageData.sender_id || 'Unknown').toString();
+        const senderId = Number(messageData.sender_id);
         const content = (messageData.content || '').toString();
         const msgId = parseMaybeNumber(messageData.id) || 0;
         const replyToId = parseMaybeNumber(messageData.reply_to_id);
         const replyPreview = (messageData.reply_preview && typeof messageData.reply_preview === 'object') ? messageData.reply_preview : null;
         const senderAvatar = parseMaybeNumber(messageData.sender_avatar_file_id);
         const reactions = Array.isArray(messageData.reactions) ? messageData.reactions : null;
-
-        // ignore echo from yourself
+        
         const myName = (currentUser?.username || currentUser?.nickname || '').toString();
-        if (myName && sender === myName) {
-            // still append if it's current chat and missing
+        const myId = Number(currentUser?.id);
+        const isMe = (myId && senderId && myId === senderId) || (myName && sender === myName);
+
+        if (isMe) {
             if (roomId === currentChatNumeric) {
+                let foundTempId = null;
+                if (window.__pendingEcho) {
+                    for (const [tId, data] of window.__pendingEcho.entries()) {
+                        if (data.chatId === roomId && data.content === content) {
+                            foundTempId = tId;
+                            break;
+                        }
+                    }
+                }
+                
+                if (foundTempId) {
+                    const el = document.querySelector(`.message[data-temp-id="${foundTempId}"]`);
+                    if (el) {
+                        el.dataset.msgId = String(messageData.id);
+                        el.removeAttribute('data-temp-id');
+                    }
+                    if (window.__pendingEcho) window.__pendingEcho.delete(foundTempId);
+                    markSeen(roomId, messageData.id);
+                    
+                    if (window.__lbMsgCache) {
+                        window.__lbMsgCache.set(Number(messageData.id), {
+                            id: Number(messageData.id),
+                            sender_username: sender,
+                            content: content,
+                        });
+                    }
+                    return;
+                }
+                
                 addMessage({
                     id: messageData.id,
                     chat_id: roomId,
@@ -6328,7 +6320,6 @@ window.onWsMessage = (msg) => {
 
         const myName = (currentUser?.username || currentUser?.nickname || '').toString();
 
-        // old format: {type:'typing_state', data:{room_id, username, is_typing}}
         if (msg.type === 'typing_state') {
             const d = msg.data || msg;
             const roomId = Number(d.room_id);
@@ -6408,39 +6399,41 @@ setInterval(() => {
 function initWebSocket() {
     const token = localStorage.getItem('auth_token');
     if (!token) {
-        console.warn('No token available for WebSocket');
+        console.warn('[WS] No token available for WebSocket');
         return;
     }
     
     setTimeout(() => {
         if (!isPageUnloading && wsManager.connect) {
             appLog('[APP] Attempting WebSocket connection...');
-            wsManager.connect(token).then(() => {
-                appLog('[APP] WebSocket connected successfully');
+            wsManager.connect(token)
+                .then(() => {
+                    appLog('[APP] WebSocket connected successfully');
 
-                // После WS-коннекта presence в БД обновлён — перезагрузим список участников
-                if (currentServerId) {
-                    loadMembers(currentServerId).catch(e => console.warn('[APP] loadMembers after WS connect failed', e));
-                }
-
-                // Лёгкий поллинг, чтобы онлайн/оффлайн не зависали (без WS-событий presence)
-                if (!membersPollTimer) {
-                    membersPollTimer = setInterval(() => {
-                        if (currentServerId) loadMembers(currentServerId).catch(() => {});
-                        refreshFriendsStatus().catch(() => {});
-                    }, 10000);
-                }
-                
-                if (currentChatId && wsManager.isConnected && wsManager.joinRoom) {
-                    const chatId = Number(currentChatId);
-                    if (Number.isFinite(chatId) && chatId > 0) {
-                        appLog(`[WS] Rejoining room ${chatId} after reconnect`);
-                        wsManager.joinRoom(chatId);
+                    if (currentServerId) {
+                        loadMembers(currentServerId).catch(e => console.warn('[APP] loadMembers after WS connect failed', e));
                     }
-                }
-            }).catch(error => {
-                console.error('[APP] WebSocket connection failed:', error);
-            });
+
+                    if (!membersPollTimer) {
+                        membersPollTimer = setInterval(() => {
+                            if (currentServerId) loadMembers(currentServerId).catch(() => {});
+                            refreshFriendsStatus().catch(() => {});
+                        }, 10000);
+                    }
+                    
+                    if (currentChatId && wsManager.isConnected && wsManager.joinRoom) {
+                        const chatId = Number(currentChatId);
+                        if (Number.isFinite(chatId) && chatId > 0) {
+                            appLog(`[WS] Rejoining room ${chatId} after reconnect`);
+                            wsManager.joinRoom(chatId);
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('[APP] WebSocket connection failed:', error);
+                });
+        } else {
+            console.log('[WS] Connection skipped:', { isPageUnloading, hasConnect: !!wsManager.connect });
         }
     }, 500);
 }
@@ -6779,23 +6772,63 @@ function setupMessageComposer() {
 
     const sendMessage = async (content, opts = {}) => {
         const c = (content || '').toString();
-        const url = currentServerId
-            ? `/api/servers/${currentServerId}/chats/${currentChatId}/messages`
-            : `/api/dms/${currentChatId}/messages`;
-
         const replyId = (opts && opts.replyId !== undefined) ? opts.replyId : replyToMessageId;
         let outgoingContent = c;
+        
         try {
             outgoingContent = await e2eeEncryptForCurrentChat(c);
         } catch (e) {
             console.warn('[E2EE] outgoing encryption failed', e);
-            const who = e?.username ? ` (${e.username})` : '';
-            const text = e?.code === 'e2ee_public_key_changed'
-                ? `Сообщение не отправлено: изменился ключ E2EE${who}. Проверьте собеседника.`
-                : 'Сообщение не отправлено: E2EE не готово для всех участников.';
-            showToast(text);
+            showToast('Сообщение не отправлено: E2EE не готово.');
             return null;
         }
+
+        let sentViaWs = false;
+        if (wsManager && wsManager.isConnected && wsManager.isAuthenticated) {
+            sentViaWs = wsManager.sendMessage(currentChatId, outgoingContent);
+        }
+
+        if (sentViaWs) {
+            const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            if (!window.__pendingEcho) window.__pendingEcho = new Map();
+            window.__pendingEcho.set(tempId, { chatId: currentChatId, content: c, at: Date.now() });
+            
+            const msg = {
+                id: tempId,
+                chat_id: currentChatId,
+                sender_id: currentUser?.id,
+                sender_username: currentUser?.username || 'Вы',
+                content: c,
+                timestamp: Date.now(),
+            };
+
+            if (replyId && replyToPreview) {
+                msg.reply_preview = { id: replyId, sender_username: replyToPreview.sender || '', content: replyToPreview.text || '' };
+                msg.reply_to_id = replyId;
+            }
+            
+            addMessage(msg);
+            
+            if (currentServerId) {
+                clearUnreadCount(currentServerId, currentChatId);
+                updateChannelListItemOnMessage(currentChatId, 0);
+            }
+            if (!currentServerId && Number.isFinite(Number(currentChatId))) {
+                dmActivity.set(Number(currentChatId), { lastId: msg.id, at: Date.now() });
+                updateDmListItemOnMessage(Number(currentChatId), c.slice(0, 120));
+            }
+            if (replyId && (!opts || opts.replyId === undefined)) {
+                replyToMessageId = null;
+                replyToPreview = null;
+                if (replyBarEl) replyBarEl.hidden = true;
+            }
+            return msg;
+        }
+
+        const url = currentServerId
+            ? `/api/servers/${currentServerId}/chats/${currentChatId}/messages`
+            : `/api/dms/${currentChatId}/messages`;
+
         const payload = await api(url, {
             method: 'POST',
             body: JSON.stringify({ content: outgoingContent, reply_to_id: replyId || null })
@@ -6810,24 +6843,16 @@ function setupMessageComposer() {
             timestamp: payload?.timestamp || Date.now(),
         };
 
-        // re-order DM list immediately after send
         if (!currentServerId && Number.isFinite(Number(currentChatId))) {
-            const chatId = Number(currentChatId);
-            const prev = extractFileNameFromMessageContent(c) || ((c.includes('[[file:') || c.includes('[[file=')) ? '📎 вложение' : (c.replace(/\s+/g, ' ').trim().slice(0, 120))) || '📎 вложение';
-            dmActivity.set(chatId, { lastId: parseMaybeNumber(msg.id) || (dmActivity.get(chatId)?.lastId || 0), at: Date.now() });
-            updateDmListItemOnMessage(chatId, prev);
+            dmActivity.set(Number(currentChatId), { lastId: msg.id, at: Date.now() });
+            updateDmListItemOnMessage(Number(currentChatId), c.slice(0, 120));
         }
-        const rp = (opts && opts.replyPreview) ? opts.replyPreview : replyToPreview;
-        if (replyId && rp) {
-            msg.reply_preview = {
-                id: replyId,
-                sender_username: rp.sender || rp.sender_username || '',
-                content: rp.text || rp.content || '',
-            };
+
+        if (replyId && replyToPreview) {
+            msg.reply_preview = { id: replyId, sender_username: replyToPreview.sender || '', content: replyToPreview.text || '' };
             msg.reply_to_id = replyId;
         }
 
-        // reset reply draft only for the active composer (not for background upload jobs)
         if (replyId && (!opts || opts.replyId === undefined)) {
             replyToMessageId = null;
             replyToPreview = null;
@@ -6838,15 +6863,12 @@ function setupMessageComposer() {
         if (id !== null && id !== undefined && wsManager && wsManager.isConnected) {
             setTimeout(() => {
                 if (msg.chat_id !== currentChatId) return;
-                if (!hasSeen(msg.chat_id, id)) {
-                    addMessage(msg);
-                }
+                if (!hasSeen(msg.chat_id, id)) addMessage(msg);
             }, 600);
-        } else {
+        } else { 
             addMessage(msg);
         }
 
-        // mark read for current server chat
         if (currentServerId) {
             clearUnreadCount(currentServerId, currentChatId);
             updateChannelListItemOnMessage(currentChatId, 0);
@@ -6864,25 +6886,25 @@ function setupMessageComposer() {
         const st = document.createElement('style');
         st.id = 'lbUploadQueueStyle';
         st.textContent = `
-.upload-queue{padding:10px 12px;border-top:1px solid rgba(255,255,255,.07);border-bottom:1px solid rgba(255,255,255,.07);background:rgba(0,0,0,.14)}
-.upload-job{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 0}
-.upload-job+.upload-job{border-top:1px solid rgba(255,255,255,.06)}
-.upload-job .u-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px}
-.upload-job .u-name{font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.upload-job .u-pct{font-size:12px;font-weight:900;color:var(--accent,#a855f7);white-space:nowrap}
-.upload-job .u-sub{font-size:12px;opacity:.78;line-height:1.35}
-.upload-job .u-bar{height:7px;border-radius:999px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:7px}
-.upload-job .u-bar>i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--accent,#8b5cf6),#d946ef);transition:width .16s ease}
-.upload-job .u-files{display:flex;flex-direction:column;gap:5px;margin-top:8px}
-.upload-job .u-file{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center;font-size:11px;opacity:.82}
-.upload-job .u-file-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.upload-job .u-file-bar{height:4px;border-radius:999px;background:rgba(255,255,255,.10);overflow:hidden;margin-top:3px}
-.upload-job .u-file-bar>i{display:block;height:100%;background:rgba(168,85,247,.9)}
-.upload-job .u-file-state{text-align:right;white-space:nowrap;color:#b9c7ff}
-.upload-job .u-actions{display:flex;align-items:center;gap:6px}
-.upload-job .u-btn{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--text,#fff);border-radius:10px;padding:7px 10px;cursor:pointer;font-size:12px;font-weight:700}
-.upload-job .u-btn:hover{background:rgba(255,255,255,.10)}
-`;
+            .upload-queue{padding:10px 12px;border-top:1px solid rgba(255,255,255,.07);border-bottom:1px solid rgba(255,255,255,.07);background:rgba(0,0,0,.14)}
+            .upload-job{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 0}
+            .upload-job+.upload-job{border-top:1px solid rgba(255,255,255,.06)}
+            .upload-job .u-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px}
+            .upload-job .u-name{font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .upload-job .u-pct{font-size:12px;font-weight:900;color:var(--accent,#a855f7);white-space:nowrap}
+            .upload-job .u-sub{font-size:12px;opacity:.78;line-height:1.35}
+            .upload-job .u-bar{height:7px;border-radius:999px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:7px}
+            .upload-job .u-bar>i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--accent,#8b5cf6),#d946ef);transition:width .16s ease}
+            .upload-job .u-files{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+            .upload-job .u-file{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:center;font-size:11px;opacity:.82}
+            .upload-job .u-file-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .upload-job .u-file-bar{height:4px;border-radius:999px;background:rgba(255,255,255,.10);overflow:hidden;margin-top:3px}
+            .upload-job .u-file-bar>i{display:block;height:100%;background:rgba(168,85,247,.9)}
+            .upload-job .u-file-state{text-align:right;white-space:nowrap;color:#b9c7ff}
+            .upload-job .u-actions{display:flex;align-items:center;gap:6px}
+            .upload-job .u-btn{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--text,#fff);border-radius:10px;padding:7px 10px;cursor:pointer;font-size:12px;font-weight:700}
+            .upload-job .u-btn:hover{background:rgba(255,255,255,.10)}
+            `;
         document.head.appendChild(st);
     };
     ensureUploadQueueStyles();
@@ -9738,7 +9760,8 @@ function addMessage(msg, opts = {}) {
     div.className = "message";
 
     if (msg && msg.id !== undefined && msg.id !== null) {
-        div.dataset.msgId = String(msg.id);
+        if (String(msg.id).startsWith('temp_')) { div.dataset.tempId = String(msg.id); } 
+        else { div.dataset.msgId = String(msg.id); }
     }
 
     const sender = (msg && msg.sender_username) ? String(msg.sender_username) : '?';
@@ -9746,7 +9769,7 @@ function addMessage(msg, opts = {}) {
     const isCurrentUser = (Number.isFinite(senderId) && senderId > 0 && Number(currentUser?.id) === senderId);
     const timeText = formatMessageTime(msg?.timestamp);
     const avatarChar = (sender.charAt(0) || '?').toUpperCase();
-    // ---- reply fallback (если нет reply_preview, но есть reply_to_id) ----
+
     window.__lbMsgCache = window.__lbMsgCache || new Map(); // id -> msg
 
     try {
@@ -10101,6 +10124,7 @@ function addMessage(msg, opts = {}) {
 
 // ===== INIT =====
 async function initializeApp() {
+    console.log('🟢 initializeApp STARTED');
     if (isInitialized) {
         console.warn('[APP] Already initialized, skipping');
         return;
@@ -10145,7 +10169,6 @@ async function initializeApp() {
         await initFriends();
         try { initProfileModal({ api, getMe: () => currentUser }); } catch (e) { console.warn('[PROFILE] init failed', e); }
 
-        // global buttons
         document.getElementById('settingsBtn')?.addEventListener('click', openSettings);
         document.getElementById('pinsBtn')?.addEventListener('click', () => openPinsModal());
         document.getElementById('addChannelBtn')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openCurrentServerMenu(e.currentTarget); });
@@ -10162,7 +10185,6 @@ async function initializeApp() {
             }
         });
 
-        // mobile drawer buttons
         document.getElementById('mobileServersBtn')?.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -10208,7 +10230,7 @@ async function initializeApp() {
         ensureJumpToPresentBtn();
         updateJumpBtn();
         setupAttachmentUi();
-        // mobile drawers are closed by clicking overlay
+        
         const servers = await api("/api/servers");
         appLog('[APP] Servers loaded:', servers);
         
@@ -10278,6 +10300,14 @@ async function initializeApp() {
         }
     }
 }
+
+setInterval(() => {
+    if (!window.__pendingEcho) return;
+    const now = Date.now();
+    for (const [tId, data] of window.__pendingEcho.entries()) {
+        if (now - data.at > 15000) window.__pendingEcho.delete(tId);
+    }
+}, 5000);
 
 document.addEventListener("DOMContentLoaded", () => {
     appLog('[APP] DOM loaded, checking auth...');

@@ -1,12 +1,45 @@
 use chacha20poly1305::aead::{Aead, KeyInit};
-use x25519_dalek::StaticSecret;
-use x25519_dalek::PublicKey as X25519PublicKey;
+use x25519_dalek::{StaticSecret, PublicKey as X25519PublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use rand::RngExt;
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+
+pub fn generate_room_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    rand::rng().fill(&mut key);
+    key
+}
+
+pub fn encrypt_room_key(master_key: &[u8; 32], room_key: &[u8; 32]) -> (Vec<u8>, [u8; 12]) {
+    let cipher_key = Key::<Aes256Gcm>::from_slice(master_key);
+    let cipher = Aes256Gcm::new(cipher_key);
+    
+    let mut nonce = [0u8; 12];
+    rand::rng().fill(&mut nonce);
+    
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), room_key.as_ref())
+        .expect("Encryption failed");
+        
+    (ciphertext, nonce)
+}
+
+pub fn decrypt_room_key(master_key: &[u8; 32], ciphertext: &[u8], nonce: &[u8; 12]) -> [u8; 32] {
+    let cipher_key = Key::<Aes256Gcm>::from_slice(master_key);
+    let cipher = Aes256Gcm::new(cipher_key);
+    
+    let pt = cipher
+        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .expect("Decryption failed");
+        
+    let mut room_key = [0u8; 32];
+    room_key.copy_from_slice(&pt);
+    room_key
+}
 
 // ==================== Base64 Utilities ====================
-
 mod b64 {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -61,8 +94,6 @@ mod b64 {
 }
 
 // ==================== X25519 Key Pair ====================
-
-/// X25519 keypair для E2EE
 #[derive(Debug, Clone)]
 pub struct E2eeKeyPair {
     pub public_key_b64: String,
@@ -70,10 +101,9 @@ pub struct E2eeKeyPair {
 }
 
 impl E2eeKeyPair {
-    /// Генерируем новую keypair (приватный + публичный ключ)
     pub fn generate() -> Self {
         let mut secret_bytes = [0u8; 32];
-        getrandom::getrandom(&mut secret_bytes).expect("getrandom failed");
+        rand::rng().fill(&mut secret_bytes);
         // clamp bits for X25519
         secret_bytes[0] &= 248;
         secret_bytes[31] &= 127;
@@ -88,8 +118,6 @@ impl E2eeKeyPair {
         }
     }
 
-    /// Создаём keypair из base64-encoded публичного ключа
-    /// Приватный ключ НЕ загружается с сервера — это клиентская ответственность
     pub fn from_public_b64(public_b64: &str) -> Option<Self> {
         let bytes = b64::decode(public_b64)?;
         if bytes.len() != 32 {
@@ -120,14 +148,12 @@ impl E2eeKeyPair {
         })
     }
 
-    /// Получаем X25519PublicKey из stored public key
     pub fn to_x25519_public(&self) -> Option<X25519PublicKey> {
         let bytes = b64::decode(&self.public_key_b64)?;
         let arr: [u8; 32] = bytes.try_into().ok()?;
         Some(X25519PublicKey::from(arr))
     }
 
-    /// Получаем StaticSecret из stored private key (только если есть)
     pub fn to_x25519_secret(&self) -> Option<StaticSecret> {
         let priv_bytes = b64::decode(self.private_key_b64.as_ref()?)?;
         let mut arr = [0u8; 32];
@@ -135,14 +161,12 @@ impl E2eeKeyPair {
         Some(StaticSecret::from(arr))
     }
 
-    /// DH: вычисляем shared secret из нашего приватного и чужого публичного ключа
     pub fn diffie_hellman(&self, other_public: &X25519PublicKey) -> Option<[u8; 32]> {
         let secret = self.to_x25519_secret()?;
         let shared = secret.diffie_hellman(other_public);
         Some(shared.to_bytes())
     }
 
-    /// fingerprint (SHA-256 от публичного ключа)
     pub fn fingerprint(&self) -> String {
         let bytes = b64::decode(&self.public_key_b64).unwrap_or_default();
         let mut hasher = Sha256::new();
@@ -152,54 +176,37 @@ impl E2eeKeyPair {
 }
 
 // ==================== E2EE Message ====================
-
-/// Ключ получателя (зашифрованный обёрнутый ключ)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct E2eeRecipientKey {
-    /// shared secret (base64 X25519 DH)
     pub ss: String,
-    /// IV для шифрования (base64)
     pub iv: String,
-    /// Зашифрованный payload (base64)
     pub ct: String,
 }
 
-/// Зашифрованное сообщение (envelope)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct E2eeMessage {
-    /// Версия формата: 1 = legacy (X25519 + ChaCha20), 2 = новый (ECDH P-256 + AES-GCM)
     pub v: u8,
-    /// ID отправителя
     pub sender: i64,
-    /// ID устройства отправителя
     pub device_id: String,
-    /// ephemeral public key (base64 X25519)
     pub epub: String,
-    /// IV для шифрования payload (base64)
     pub iv: String,
-    /// Зашифрованный payload (base64)
     pub payload: String,
-    /// Ключи для получателей: user_id -> device_id -> E2eeRecipientKey
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keys: Option<HashMap<String, HashMap<String, E2eeRecipientKey>>>,
 }
 
 impl E2eeMessage {
-    /// Расшифровать сообщение (только для клиента — сервер не должен вызывать)
     pub fn decrypt(&self, my_key: &E2eeKeyPair, my_device_id: &str) -> Result<String, String> {
         if self.v != 1 {
             return Err(format!("Unsupported E2EE version: {}", self.v));
         }
 
-        // Пытаемся найти свой ключ в keys
         if let Some(ref keys) = self.keys {
-            // Ищем по sender -> device_id
             if let Some(device_keys) = keys.get(&self.sender.to_string()) {
                 if let Some(rec_key) = device_keys.get(my_device_id) {
                     return Self::decrypt_with_shared(&self.epub, rec_key, my_key);
                 }
             }
-            // Ищем по любому user_id -> device_id
             for device_keys in keys.values() {
                 if let Some(rec_key) = device_keys.get(my_device_id) {
                     return Self::decrypt_with_shared(&self.epub, rec_key, my_key);
@@ -207,19 +214,14 @@ impl E2eeMessage {
             }
         }
 
-        // Если нет в keys — пробуем decrypt с ephemeral key (для self-encrypt)
-        // Это работает когда отправитель шифрует для себя
-        // Требуется приватный ключ отправителя
         return Err("Message not encrypted for this device. Try decrypting with sender's key.".to_string());
     }
 
-    /// Расшифровать через shared secret (DH)
     fn decrypt_with_shared(
         epub_b64: &str,
         rec_key: &E2eeRecipientKey,
         my_key: &E2eeKeyPair,
     ) -> Result<String, String> {
-        // Получаем ephemeral public key отправителя
         let epub_bytes = match b64::decode(epub_b64) {
             Some(b) if b.len() == 32 => {
                 let mut arr = [0u8; 32];
@@ -229,13 +231,11 @@ impl E2eeMessage {
             _ => return Err("Invalid epub".to_string()),
         };
 
-        // DH: my_secret * ep_pub = shared
         let shared = match my_key.diffie_hellman(&X25519PublicKey::from(epub_bytes)) {
             Some(s) => s,
             None => return Err("DH failed".to_string()),
         };
 
-        // HKDF для ключа шифрования получателя
         let hk = hkdf::Hkdf::<Sha256>::new(Some(b"laberry-recv-key"), &shared);
         let mut recv_key = [0u8; 32];
         hk.expand(b"laberry-recv-key", &mut recv_key)
@@ -261,17 +261,14 @@ impl E2eeMessage {
         String::from_utf8(pt).map_err(|e| format!("UTF-8: {}", e))
     }
 
-    /// Check if content is an E2EE message
     pub fn is_e2ee_content(content: &str) -> bool {
         content.starts_with("[[e2ee:v")
     }
 
-    /// Parse E2EE message from content string "[[e2ee:v1|<json>]]"
     pub fn from_content(content: &str) -> Option<Self> {
         if !Self::is_e2ee_content(content) {
             return None;
         }
-        // Извлекаем JSON между [[e2ee:vN| и ]]
         let prefix = "[[e2ee:v";
         if let Some(inner) = content.strip_prefix(prefix) {
             if let Some(pipe_pos) = inner.find('|') {
@@ -285,7 +282,6 @@ impl E2eeMessage {
         None
     }
 
-    /// Convert to content string "[[e2ee:vN|<json>]]"
     pub fn to_content(&self) -> String {
         if let Ok(json) = Self::to_json(self) {
             format!("[[e2ee:v{}|{}]]", self.v, json)
@@ -294,19 +290,16 @@ impl E2eeMessage {
         }
     }
 
-    /// Serialize to JSON string
     fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
-    /// Deserialize from JSON string
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
 }
 
 // ==================== Hex helper ====================
-
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
         bytes
@@ -318,7 +311,6 @@ mod hex {
 }
 
 // ==================== Tests ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;

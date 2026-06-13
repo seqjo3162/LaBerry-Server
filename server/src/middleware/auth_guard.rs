@@ -1,8 +1,8 @@
 use axum::{
-    async_trait,
-    extract::FromRequestParts,
+    extract::{FromRequestParts, OptionalFromRequestParts},
     http::{request::Parts, header},
 };
+
 use sqlx::Row;
 
 use crate::{
@@ -25,7 +25,6 @@ pub struct AuthAdmin {
     pub username: String,
 }
 
-#[async_trait]
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
@@ -117,7 +116,6 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-#[async_trait]
 impl FromRequestParts<AppState> for AuthAdmin {
     type Rejection = ApiError;
 
@@ -125,7 +123,7 @@ impl FromRequestParts<AppState> for AuthAdmin {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let user = AuthUser::from_request_parts(parts, state).await?;
+        let user = <AuthUser as FromRequestParts<AppState>>::from_request_parts(parts, state).await?;
 
         if user.role != "admin" {
             return Err(ApiError::Forbidden("Admin access required"));
@@ -135,5 +133,19 @@ impl FromRequestParts<AppState> for AuthAdmin {
             id: user.id,
             username: user.username,
         })
+    }
+}
+
+impl OptionalFromRequestParts<AppState> for AuthUser {
+    type Rejection = <AuthUser as FromRequestParts<AppState>>::Rejection;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        match <AuthUser as FromRequestParts<AppState>>::from_request_parts(parts, state).await {
+            Ok(user) => Ok(Some(user)),
+            Err(_) => Ok(None),
+        }
     }
 }

@@ -1,6 +1,6 @@
-import { api } from "./api.js?v=8";
-import { openAvatarCropper } from "./avatar-cropper.js?v=7";
-import { wsManager } from "./websocket-manager.js?v=12";
+import { api } from "./api.js?v=1";
+import { openAvatarCropper } from "./avatar-cropper.js?v=1";
+import { wsManager } from "./websocket-manager.js?v=1";
 
 const $ = (id) => document.getElementById(id);
 

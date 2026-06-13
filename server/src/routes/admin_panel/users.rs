@@ -989,7 +989,6 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         "SELECT chat_id FROM dm_chats WHERE user_a = ? OR user_b = ?",
     )
     .bind(user_id)
-    .bind(user_id)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -1001,7 +1000,6 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
                FROM files f
                WHERE f.chat_id IN (SELECT chat_id FROM dm_chats WHERE user_a = ? OR user_b = ?)"#,
         )
-        .bind(user_id)
         .bind(user_id)
         .fetch_all(&mut *tx)
         .await?
@@ -1093,18 +1091,15 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
 
     let _ = sqlx::query("DELETE FROM friendships WHERE user_id = ? OR friend_id = ?")
         .bind(user_id)
-        .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
     let _ = sqlx::query("DELETE FROM friend_requests WHERE sender_id = ? OR receiver_id = ?")
         .bind(user_id)
-        .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
     let _ = sqlx::query("DELETE FROM user_reports WHERE reporter_id = ? OR target_user_id = ?")
-        .bind(user_id)
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
@@ -1120,7 +1115,6 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         .await?;
 
     let _ = sqlx::query("DELETE FROM user_blocks WHERE blocker_id = ? OR blocked_id = ?")
-        .bind(user_id)
         .bind(user_id)
         .execute(&mut *tx)
         .await?;

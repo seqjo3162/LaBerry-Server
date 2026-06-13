@@ -4,7 +4,8 @@ use argon2::{
     Argon2,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use rand::{distributions::Uniform, Rng};
+use rand::distr::Uniform;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -255,7 +256,9 @@ pub fn normalize_username(input: &str) -> Option<String> {
 }
 
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
-    let salt = SaltString::generate(&mut rand::thread_rng());
+    let mut salt_bytes = [0u8; 16];
+    rand::rng().fill(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let argon2 = Argon2::default();
 
     let hash = argon2
@@ -276,16 +279,16 @@ pub fn verify_password(password: &str, stored_hash: &str) -> bool {
 }
 
 pub fn generate_2fa_code_6() -> String {
-    let mut rng = rand::thread_rng();
-    let dist = Uniform::new_inclusive(0u32, 999_999u32);
+    let mut rng = rand::rng();
+    let dist = Uniform::new(0u32, 1_000_000u32).unwrap();
     format!("{:06}", rng.sample(dist))
 }
 
 /// Generate backup codes for 2FA account recovery
 /// Returns 10 codes in format: XXXX-XXXX-XXXX (48 bits each)
 pub fn generate_2fa_backup_codes() -> Vec<String> {
-    let mut rng = rand::thread_rng();
-    let dist = Uniform::new(0u64, 281_474_976_710_656u64); // 2^48
+    let mut rng = rand::rng();
+    let dist = Uniform::new(0u64, 281_474_976_710_656u64).unwrap(); // 2^48
     
     (0..10)
         .map(|_| {
@@ -310,22 +313,17 @@ pub fn verify_backup_code(code: &str, stored_hash: &str) -> bool {
 
 /// Generate session ID for tracking user sessions
 pub fn generate_session_id() -> String {
-    use rand::Rng;
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut rng = rand::thread_rng();
-    
-    (0..32)
-        .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect()
+    let mut rng = rand::rng();
+    let mut id = [0u8; 16];
+    rng.fill(&mut id);
+    hex::encode(id)
 }
 
 pub fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// Constant-time string comparison to prevent timing attacks

@@ -106,7 +106,6 @@ class WebSocketManager {
     }
     
     async _connectInternal(token, connectionId) {
-        // Закрываем предыдущее соединение
         if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
             wsLog(`[WS ${connectionId}] Closing previous connection`);
             this.ws.onclose = null;
@@ -115,10 +114,9 @@ class WebSocketManager {
         }
         
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        // Всегда подключаемся к текущему хосту (чтобы работало с доменом/проксированием)
         const host = window.location.host;
-        const url = `${protocol}//${host}/ws`;
-        const safeUrl = `${protocol}//${host}/ws`;
+        const url = `${protocol}//${host}/ws?token=${encodeURIComponent(token)}`;
+        const safeUrl = `${protocol}//${host}/ws?token=***`;
         wsLog(`[WS ${connectionId}] Connecting to ${safeUrl}`);
         
         return new Promise((resolve, reject) => {
@@ -143,15 +141,12 @@ class WebSocketManager {
                 this.ws = ws;
                 this.reconnectAttempts = 0;
                 
-                // Настраиваем обработчики
                 this._setupHandlers(connectionId);
                 
-                // Authenticate (token sent as WS message, avoids URL log exposure)
                 try {
                     ws.send(JSON.stringify({ type: 'auth', token }));
                 } catch (_) {}
 
-                // Запускаем ping
                 this._startPing();
                 
                 resolve();
@@ -223,39 +218,49 @@ class WebSocketManager {
             return;
         }
         
-        // Обработка takeover уведомления
         if (data.type === 'connection_taken_over') {
             wsLog(`[WS] Connection taken over by new connection ${data.new_connection_id}`);
             this.disconnect('Connection taken over');
             return;
         }
         
-        // Обработка join подтверждения
         if (data.type === 'joined') {
             wsLog(`[WS] Joined room:`, data.room);
-            // Здесь нужно вызвать колбэк для UI
             if (window.onChatJoined) {
                 window.onChatJoined(data);
             }
             return;
         }
         
-        // Обработка обычных сообщений + событий чата
         if (data.type === 'message' || data.type === 'chat_message' || data.type === 'reaction' || data.type === 'message_deleted') {
             wsLog(`[WS] Message received:`, data);
-            // Здесь нужно вызвать колбэк для UI
             if (window.onChatMessage) {
                 window.onChatMessage(data);
             }
             return;
         }
         
-        // Обработка ошибок
-        if (data.type === 'error') {
+        if (data.type === 'error')  {
             console.error(`[WS] Server error: ${data.code}`, data);
 
-            // Forward to optional handlers (voice/chat may need to react on errors)
-            if (window.onWsError) {
+            const fatalAuthCodes = ['unauthorized', 'invalid_token', 'user_not_found', 'banned', 'token_invalidated'];
+            if (fatalAuthCodes.includes(data.code)) {
+                console.warn('[WS] Fatal auth error. Stopping reconnects.');
+                try { localStorage.removeItem('auth_token'); } catch (_) {}
+                try { localStorage.removeItem('refresh_token'); } catch (_) {}
+                this.isDisconnecting = true; 
+                if (this.ws) {
+                    this.ws.onclose = null;
+                    this.ws.close(1000, 'Auth failed');
+                    this.ws = null;
+                }
+                if (typeof window !== 'undefined' && !['/', '/login', '/start'].includes(window.location.pathname)) {
+                    window.location.href = '/';
+                }
+                return;
+            }
+
+            if (window.onWsError) { 
                 try { window.onWsError(data); } catch (e) { console.error('[WS] onWsError error', e); }
             }
             if (window.onChatError) {
@@ -278,7 +283,6 @@ class WebSocketManager {
             return;
         }
         
-        // DM call events
         if (data && typeof data.type === 'string' && data.type.startsWith('dm_call_')) {
             if (window.onDmCallEvent) {
                 try { window.onDmCallEvent(data); } catch (e) { console.error('[WS] onDmCallEvent error', e); }
@@ -290,7 +294,6 @@ class WebSocketManager {
             return;
         }
 
-        // Voice/WebRTC events
         if (data && typeof data.type === 'string' && (data.type.startsWith('voice_') || data.type.startsWith('rtc_'))) {
             if (window.onVoiceEvent) {
                 try { window.onVoiceEvent(data); } catch (e) { console.error('[WS] onVoiceEvent error', e); }
@@ -300,12 +303,18 @@ class WebSocketManager {
             return;
         }
 
-        // Global fallback hook (for future features)
         if (window.onWsMessage) {
             try { window.onWsMessage(data); } catch (e) { console.error('[WS] onWsMessage error', e); }
             return;
         }
 
+        if (data.type === 'user_online' || data.type === 'user_offline') {
+            if (window.onWsMessage) {
+                try { window.onWsMessage(data); } catch (e) { console.error('[WS] onWsMessage error', e); }
+            }
+            return;
+        }
+        
         wsLog('[WS] Unknown message:', data);
     }
     

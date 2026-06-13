@@ -104,9 +104,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_my))
         .route("/groups", post(create_group))
-        .route("/with/:user_id", post(get_or_create_with))
-        .route("/:chat_id/participants", get(list_participants))
-        .route("/:chat_id/messages", get(list_messages).post(send_message))
+        .route("/with/{user_id}", post(get_or_create_with))
+        .route("/{chat_id}/participants", get(list_participants))
+        .route("/{chat_id}/messages", get(list_messages).post(send_message))
 }
 
 async fn is_blocked_pair(db: &sqlx::SqlitePool, a: i64, b: i64) -> bool {
@@ -556,12 +556,11 @@ async fn list_my(
     (StatusCode::OK, Json(out)).into_response()
 }
 
-async fn ensure_dm_participant(db: &sqlx::SqlitePool, chat_id: i64, user_id: i64) -> bool {
+async fn ensure_dm_participant(db: &sqlx::SqlitePool, chat_id: i64, _user_id: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
     )
     .bind(chat_id)
-    .bind(user_id)
     .fetch_optional(db)
     .await
     .ok()

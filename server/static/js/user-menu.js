@@ -1,4 +1,4 @@
-import { api } from "./api.js?v=10";
+import { api } from "./api.js?v=1";
 
 let backdropEl = null;
 let menuEl = null;

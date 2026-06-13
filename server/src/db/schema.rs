@@ -28,7 +28,7 @@ macro_rules! migration {
 }
 
 async fn table_has_column(db: &SqlitePool, table: &str, column: &str) -> anyhow::Result<bool> {
-    let rows = sqlx::query(&format!("PRAGMA table_info({})", table))
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA table_info({})", table)))
         .fetch_all(db)
         .await?;
     Ok(rows
@@ -45,7 +45,7 @@ async fn try_add_column(
     if table_has_column(db, table, column_name).await? {
         return Ok(());
     }
-    sqlx::query(&format!("ALTER TABLE {} ADD COLUMN {}", table, column_def))
+    sqlx::query(sqlx::AssertSqlSafe(format!("ALTER TABLE {} ADD COLUMN {}", table, column_def)))
         .execute(db)
         .await?;
     Ok(())
@@ -747,6 +747,21 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
             mark_applied(db, 7).await?;
         }
     }
+    
+    migration!(db, applied, 8, "E2EE Room Keys Backup", {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS e2ee_room_keys (
+                user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                encrypted_key TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(chat_id) REFERENCES chats(id),
+                UNIQUE(user_id, chat_id)
+            );"
+        ).execute(db).await?;
+    });
 
     Ok(())
 }

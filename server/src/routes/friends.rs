@@ -48,13 +48,13 @@ pub fn router() -> Router<AppState> {
         .route("/request", post(request_friend))
         .route("/requests/incoming", get(incoming))
         .route("/requests/outgoing", get(outgoing))
-        .route("/accept/:request_id", post(accept))
-        .route("/decline/:request_id", post(decline))
-        .route("/cancel/:request_id", post(cancel))
+        .route("/accept/{request_id}", post(accept))
+        .route("/decline/{request_id}", post(decline))
+        .route("/cancel/{request_id}", post(cancel))
         .route("/active", get(list_active_friends))
-        .route("/:friend_id/favorite", put(set_favorite))
+        .route("/{friend_id}/favorite", put(set_favorite))
         .route("/", get(list_friends))
-        .route("/:friend_id", delete(remove_friend))
+        .route("/{friend_id}", delete(remove_friend))
 }
 
 /* ---------- helpers ---------- */
