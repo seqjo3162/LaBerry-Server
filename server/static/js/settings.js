@@ -784,7 +784,11 @@ export function createSettingsUI(opts = {}) {
                     body: JSON.stringify({ old_password, new_password })
                 });
                 if (res?.reauth) {
-                    showInline('ok', 'Пароль изменён. Выполняю выход...');
+                    showInline('ok', 'Пароль изменён. Пожалуйста подождите процесс займёт некоторое время...');
+                    const newKey = e2eeCache.identity?.secretKey;
+                    if (newKey) {
+                        await uploadKeyBackups(newKey, newPassword, currentUser?.email);
+                    }
                     setTimeout(() => doLogout(), 800);
                 } else {
                     showInline('ok', 'Пароль изменён');

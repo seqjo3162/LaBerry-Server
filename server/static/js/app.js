@@ -30,7 +30,6 @@ window.lbShowUserMenu = showUserMenu;
 
 const $ = (id) => document.getElementById(id);
 
-// ui scale: fast paint from localStorage
 try {
     const s = localStorage.getItem('ui_scale');
     if (s) {
@@ -127,7 +126,6 @@ function e2eeB64uToBytes(value) {
     return out;
 }
 
-/** Normalize any stored E2EE public key to base64url-encoded 32-byte X25519. */
 function e2eeNormalizeX25519PublicB64(value) {
     if (value == null) return null;
 
@@ -138,7 +136,6 @@ function e2eeNormalizeX25519PublicB64(value) {
         if (value.crv === 'X25519' || value.kty === 'OKP') {
             return e2eeNormalizeX25519PublicB64(value.x);
         }
-        // Legacy P-256 JWK — not compatible with X25519 wrap
         if (value.kty === 'EC' || value.crv === 'P-256') return null;
         return null;
     }
@@ -146,18 +143,15 @@ function e2eeNormalizeX25519PublicB64(value) {
     let str = String(value).trim();
     if (!str) return null;
 
-    // JSON string wrapper: "\"base64...\"" or {"x":"..."}
     if (str.startsWith('{') || str.startsWith('[') || (str.startsWith('"') && str.endsWith('"'))) {
         try {
             const parsed = JSON.parse(str);
             if (typeof parsed === 'string') return e2eeNormalizeX25519PublicB64(parsed);
             if (parsed && typeof parsed === 'object') return e2eeNormalizeX25519PublicB64(parsed);
         } catch (_) {
-            /* fall through */
         }
     }
 
-    // SHA-256 fingerprint (hex), not a public key
     if (/^[A-Fa-f0-9]{64}$/.test(str)) return null;
 
     const b64ish = str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
@@ -302,7 +296,6 @@ function e2eeParseEnvelope(text) {
         const json = new TextDecoder().decode(e2eeB64uToBytes(packed));
         const env = JSON.parse(json);
         if (!env) return null;
-        // Поддержка клиентского формата (alg: 'LB-E2EE-v1')
         if (env.alg === 'LB-E2EE-v1') {
             return {
                 ...env,
@@ -313,7 +306,7 @@ function e2eeParseEnvelope(text) {
                 _format: 'client',
             };
         }
-        // Поддержка серверного формата (v: 1)
+        
         if (env.v === 1) {
             return {
                 ...env,
@@ -334,11 +327,10 @@ function e2eeParseEnvelope(text) {
 
 async function e2eeImportPublicKey(jwk) {
     if (!jwk) return null;
-    // If it's a base64 X25519 key, return it as-is for now (will be handled by e2eeDeriveWrapKey)
     if (typeof jwk === 'string' && jwk.length >= 43 && jwk.length <= 44 && /^[A-Za-z0-9_-]+$/.test(jwk)) {
-        return jwk; // Return base64 string for X25519 processing
+        return jwk;
     }
-    // Try to import as JWK (ECDH P-256)
+    
     try {
         return await crypto.subtle.importKey(
             'jwk',
@@ -403,69 +395,85 @@ async function e2eeEnsureIdentity(upload = false) {
     if (!e2eeAvailable()) return null;
     const currentId = Number(currentUser?.id);
     if (e2eeIdentityPromise && e2eeIdentityUserId !== currentId) {
-        // User switched accounts in the same session: reset stale identity promise.
-        e2eeIdentityPromise = null;
-        e2eeIdentityUserId = null;
+        e2eeIdentityPromise = null; e2eeIdentityUserId = null;
     }
     if (e2eeIdentityPromise) return e2eeIdentityPromise;
 
     e2eeIdentityPromise = (async () => {
         e2eeIdentityUserId = Number(currentUser?.id);
         let saved = null;
-        try { saved = JSON.parse(localStorage.getItem(e2eeStorageKey()) || 'null'); } catch (_) { saved = null; }
+        try { saved = JSON.parse(localStorage.getItem(e2eeStorageKey()) || 'null'); } catch (_) {}
 
         let naclSecretKeyB64 = saved?.privateKeyB64;
         let naclPublicKeyB64 = saved?.publicKeyB64;
 
-        // Если ключей нет, генерируем именно X25519 (через NaCl)
         if (!naclSecretKeyB64 || !naclPublicKeyB64) {
-            const naclPair = nacl.box.keyPair();
-            naclSecretKeyB64 = e2eeBytesToB64u(naclPair.secretKey);
-            naclPublicKeyB64 = e2eeBytesToB64u(naclPair.publicKey);
-
-            try {
-                localStorage.setItem(e2eeStorageKey(), JSON.stringify({
-                    privateKeyB64: naclSecretKeyB64,
-                    publicKeyB64: naclPublicKeyB64
-                }));
-            } catch (_) {}
-        }
-
-        // Преобразуем B64 обратно в Uint8Array для использования в NaCl
-        const secretKey = e2eeB64uToBytes(naclSecretKeyB64);
-        const publicKey = e2eeB64uToBytes(naclPublicKeyB64);
-
-        // ВАЖНО: Регистрируем именно этот ключ на сервере
-        if (upload && currentUser) {
-            try {
-                const deviceId = e2eeGetOrCreateDeviceId();
-                const me = await api('/api/users/me').catch(() => null);
-                const serverPub = e2eeNormalizeX25519PublicB64(me?.public_encryption_key);
-                if (serverPub && serverPub !== naclPublicKeyB64) {
-                    console.warn('[E2EE] Server public key out of sync; re-registering device key');
-                } else if (!serverPub) {
-                    console.warn('[E2EE] Server has no valid X25519 key; registering device key');
-                }
-                await e2eeRegisterDeviceKey(deviceId, naclPublicKeyB64, navigator.userAgent);
-                e2eePublicKeyCache.clear();
-                currentUser = {
-                    ...currentUser,
-                    ...(me || {}),
-                    public_encryption_key: naclPublicKeyB64,
-                };
-            } catch (e) {
-                console.error('[E2EE] Ошибка регистрации ключа:', e);
+            const pwd = sessionStorage.getItem('lb_pwd');
+            const email = currentUser?.email;
+            if (pwd || email) {
+                try {
+                    const restored = await restoreMasterKey(pwd, email);
+                    if (restored && restored.length === 32) {
+                        naclSecretKeyB64 = e2eeBytesToB64u(restored);
+                        const pub = nacl.box.keyPair.fromSecretKey(restored).publicKey;
+                        naclPublicKeyB64 = e2eeBytesToB64u(pub);
+                        console.log('[E2EE] Master key restored from backup');
+                    }
+                } catch (e) { console.error('[E2EE] restore failed', e); }
             }
         }
 
-        return {
-            secretKey,
-            publicKey,
-            publicText: naclPublicKeyB64,
-            publicJwk: naclPublicKeyB64,
-        };
-    })();
+        let isNewKey = false;
+        if (!naclSecretKeyB64 || !naclPublicKeyB64) {
+            if (typeof nacl === 'undefined') throw new Error('nacl_not_loaded');
+            const naclPair = nacl.box.keyPair();
+            naclSecretKeyB64 = e2eeBytesToB64u(naclPair.secretKey);
+            naclPublicKeyB64 = e2eeBytesToB64u(naclPair.publicKey);
+            isNewKey = true;
+        }
 
+        try {
+            localStorage.setItem(e2eeStorageKey(), JSON.stringify({
+                privateKeyB64: naclSecretKeyB64, publicKeyB64: naclPublicKeyB64
+            }));
+        } catch (_) {}
+
+        const pwd = sessionStorage.getItem('lb_pwd');
+        const email = currentUser?.email;
+
+        // Миграция: если ключ был загружен из localStorage, но бэкапа на сервере нет — создаём
+        if (!isNewKey && saved?.privateKeyB64 && (pwd || email)) {
+            try {
+                const backup = await api('/api/users/me/key-backup').catch(() => null);
+                if (!backup || (!backup.blob_password && !backup.blob_email)) {
+                    console.log('[E2EE] Creating backup for existing key (migration)');
+                    await uploadKeyBackups(e2eeB64uToBytes(naclSecretKeyB64), pwd, email);
+                }
+            } catch (e) { console.error('[E2EE] backup migration failed', e); }
+        }
+
+        // Создание бэкапа для свежего ключа
+        if (isNewKey && (pwd || email)) {
+            try {
+                await uploadKeyBackups(e2eeB64uToBytes(naclSecretKeyB64), pwd, email);
+                console.log('[E2EE] Master key backup created');
+            } catch (e) { console.error('[E2EE] backup failed', e); }
+        }
+
+        const secretKey = e2eeB64uToBytes(naclSecretKeyB64);
+        const publicKey = e2eeB64uToBytes(naclPublicKeyB64);
+
+        if (upload && currentUser) {
+            try {
+                const deviceId = e2eeGetOrCreateDeviceId();
+                await e2eeRegisterDeviceKey(deviceId, naclPublicKeyB64, navigator.userAgent);
+                e2eePublicKeyCache.clear();
+                currentUser = { ...currentUser, public_encryption_key: naclPublicKeyB64 };
+            } catch (e) { console.error('[E2EE] register failed:', e); }
+        }
+
+        return { secretKey, publicKey, publicText: naclPublicKeyB64, publicJwk: naclPublicKeyB64 };
+    })();
     return e2eeIdentityPromise;
 }
 
@@ -481,10 +489,8 @@ async function e2eeGetUserPublicKey(userId) {
 
     try {
         const u = await api(`/api/users/${encodeURIComponent(id)}`);
-        // Parse key - could be JWK or base64 X25519
         let pubKey = e2eeParsePublicKey(u?.public_encryption_key);
         if (!pubKey) {
-            // Try raw value as base64 X25519
             const rawKey = u?.public_encryption_key;
             if (typeof rawKey === 'string' && rawKey.length >= 43 && rawKey.length <= 44 && /^[A-Za-z0-9_-]+$/.test(rawKey)) {
                 pubKey = rawKey;
@@ -504,11 +510,8 @@ async function e2eeGetUserPublicKey(userId) {
             e2eePublicKeyCache.set(id, pubKey);
             return pubKey;
         }
-        // stale P-256 or fingerprint-only value on server — ignore
-        // fallback: try to get per-device keys
         const devs = await e2eeGetUserDeviceKeys(id);
         if (devs && devs.length) {
-            // Try both public_jwk and publicKeyB64 fields
             const first = devs[0].public_jwk || devs[0].publicKeyB64 || devs[0].public_key;
             if (first) {
                 try {
@@ -600,6 +603,7 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     if (!e2eeShouldEncryptOutgoing(plaintext)) return plaintext;
     const identity = await e2eeEnsureIdentity(true);
     if (!identity) throw new Error('e2ee_identity_unavailable');
+
     let recipients;
     try {
         recipients = await e2eeCurrentChatRecipients();
@@ -608,9 +612,9 @@ async function e2eeEncryptForCurrentChat(plaintext) {
         recipients = [];
     }
     if (!recipients.length) {
-        console.warn('[E2EE] No recipients available, sending plaintext');
-        return plaintext;
+        throw new Error('e2ee_no_recipients');
     }
+
     const keys = {};
     const missing = [];
 
@@ -677,7 +681,6 @@ async function e2eeEncryptForCurrentChat(plaintext) {
                 ));
                 return { devId: devId || 'unknown', iv: e2eeBytesToB64u(keyIv), ct: e2eeBytesToB64u(keyCt) };
             } catch (e) {
-                console.warn('[E2EE] key wrap failed for device', d, e);
                 return null;
             }
         }));
@@ -689,10 +692,6 @@ async function e2eeEncryptForCurrentChat(plaintext) {
         }
     }
 
-    if (missing.length) {
-        console.warn('[E2EE] Missing public keys for:', missing.slice(0, 3));
-    }
-
     const selfBucket = keys[String(currentUser?.id)];
     const selfWrapped = e2eeCountWrappedDevices(selfBucket);
     let totalWrapped = 0;
@@ -700,31 +699,20 @@ async function e2eeEncryptForCurrentChat(plaintext) {
         totalWrapped += e2eeCountWrappedDevices(keys[bucketId]);
     }
 
-    if (totalWrapped === 0) {
-        console.warn('[E2EE] No recipient device keys wrapped; sending plaintext');
-        return plaintext;
-    }
-    if (selfWrapped === 0) {
-        console.warn('[E2EE] Cannot encrypt for current device; sending plaintext');
-        return plaintext;
+    if (totalWrapped === 0 || selfWrapped === 0) {
+        throw new Error('e2ee_wrap_failed');
     }
 
     const iv = crypto.getRandomValues(new Uint8Array(12));
     let ct;
 
-    try {
-        ct = new Uint8Array(
-            await crypto.subtle.encrypt(
-                { name: 'AES-GCM', iv },
-                messageKey,
-                new TextEncoder().encode(String(plaintext))
-            )
-        );
-        console.log('[E2EE] MESSAGE ENCRYPT OK');
-    } catch (e) {
-        console.error('[E2EE] MESSAGE ENCRYPT FAILED', e);
-        throw e;
-    }
+    ct = new Uint8Array(
+        await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv },
+            messageKey,
+            new TextEncoder().encode(String(plaintext))
+        )
+    );
 
     const envelope = {
         alg: 'LB-E2EE-v1',
@@ -740,10 +728,63 @@ async function e2eeEncryptForCurrentChat(plaintext) {
     return `${E2EE_PREFIX}${packed}${E2EE_SUFFIX}`;
 }
 
-// Создаем кэш прямо перед функцией, чтобы он жил в памяти вкладки
+async function getOrCreateRoomKey(chatId, identity) {
+    try {
+        const backup = await api(`/api/e2ee/room-keys/${chatId}`).catch(() => null);
+        if (backup?.encrypted_key && backup?.nonce) {
+            const masterKeyB64 = identity.privateKeyB64; // или отдельный мастер-ключ
+            return decrypt_room_key(masterKeyB64, backup.encrypted_key, backup.nonce);
+        }
+    } catch (_) {}
+    
+    const roomKeyB64 = generate_room_key();
+    const recipients = await e2eeCurrentChatRecipients();
+    console.log('[E2EE] Recipients:', recipients.map(r => ({
+        id: r.id,
+        username: r.username,
+        hasKey: !!r.public_encryption_key
+    })));
+    const encryptedKeys = [];
+    for (const recipient of recipients) {
+        const recipientPubB64 = recipient.public_encryption_key;
+        if (!recipientPubB64) continue;
+        
+        const sharedB64 = identity.keyPair.diffie_hellman(recipientPubB64);
+        if (!sharedB64) continue;
+        
+        // HKDF shared secret -> master key для реципиента
+        const masterKey = await e2eeHkdf(
+            new Uint8Array(32),
+            e2eeB64uToBytes(sharedB64),
+            'laberry-room-key',
+            32
+        );
+        const masterKeyB64 = e2eeBytesToB64u(masterKey);
+        
+        const enc = encrypt_room_key(masterKeyB64, roomKeyB64);
+        if (enc) {
+            encryptedKeys.push({
+                user_id: recipient.id,
+                encrypted_key: enc.ciphertext,
+                nonce: enc.nonce,
+            });
+        }
+    }
+    
+    // Сохранить на сервере
+    if (encryptedKeys.length > 0) {
+        await api(`/api/e2ee/room-keys/${chatId}`, {
+            method: 'POST',
+            body: JSON.stringify({ keys: encryptedKeys }),
+        }).catch(() => null);
+    }
+    
+    return roomKeyB64;
+}
+
 const e2eeCache = {
     identity: null,
-    wrapKeys: new Map() // Кэш для wrapKey по ключу отправителя
+    wrapKeys: new Map()
 };
 
 function e2eeCountWrappedDevices(keyMap) {
@@ -846,14 +887,11 @@ async function e2eeDecryptText(content) {
         const userKeyMap = e2eeLookupRecipientKeys(env, currentUser.id, myDeviceId);
 
         if (!userKeyMap || typeof userKeyMap !== 'object' || e2eeCountWrappedDevices(userKeyMap) === 0) {
-            const bucketKeys = env.keys && typeof env.keys === 'object' ? Object.keys(env.keys) : [];
-            console.warn('[E2EE] No wrapped key for device', myDeviceId, 'buckets:', bucketKeys);
             return '🔒 Сообщение зашифровано со старой версией или без ключа для этого устройства.';
         }
 
         const wrappedCandidates = e2eeCollectWrappedKeyCandidates(userKeyMap, myDeviceId);
         if (!wrappedCandidates.length) {
-            console.warn('[E2EE] No wrapped key found for device', myDeviceId, 'in keys:', Object.keys(userKeyMap || {}));
             return '🔒 Сообщение зашифровано не для этого аккаунта или устройства.';
         }
 
@@ -869,49 +907,58 @@ async function e2eeDecryptText(content) {
                 );
                 return new TextDecoder().decode(plain);
             } catch (e) {
-                if (e?.code === 'e2ee_public_key_changed') {
-                    console.warn('[E2EE] Sender key changed, clearing cache and retrying:', e?.username);
-                    const senderId = env.sender;
-                    if (Number.isFinite(senderId) && senderId > 0) {
-                        e2eePublicKeyCache.delete(senderId);
-                    }
-                }
                 lastError = e;
             }
         }
 
-        if (lastError?.code === 'e2ee_public_key_changed') {
-            console.log('[E2EE] Retrying decryption after key change...');
-            try {
-                const retryUserKeyMap = e2eeLookupRecipientKeys(env, currentUser.id, myDeviceId);
-                const retryWrappedCandidates = e2eeCollectWrappedKeyCandidates(retryUserKeyMap, myDeviceId);
-                
-                for (const wrapped of retryWrappedCandidates) {
-                    try {
-                        const messageKey = await e2eeUnwrapMessageKey(wrapped, env, identity);
-                        if (!messageKey) continue;
-                        const plain = await crypto.subtle.decrypt(
-                            { name: 'AES-GCM', iv: e2eeB64uToBytes(env.iv) },
-                            messageKey,
-                            e2eeB64uToBytes(env.ct)
-                        );
-                        return new TextDecoder().decode(plain);
-                    } catch (retryErr) {
-                    }
-                }
-            } catch (_) {}
-        }
-
-        if (lastError && lastError.name !== 'OperationError' && !String(lastError.message||'').includes('OperationError')) {
-            console.warn('[E2EE] decrypt failed (inner):', lastError);
-        }
         return '🔒 Не удалось расшифровать сообщение на этом устройстве.';
     } catch (e) {
-        if (e?.name !== 'OperationError' && !String(e?.message || '').includes('OperationError')) {
-            console.warn('[E2EE] decrypt failed (outer):', e);
-        }
         return '🔒 Не удалось расшифровать сообщение на этом устройстве.';
     }
+}
+
+async function deriveBackupKey(secret, saltB64u) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(secret), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: e2eeB64uToBytes(saltB64u), iterations: 300000, hash: 'SHA-256' },
+        keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+    );
+}
+
+async function encryptMasterKeyForBackup(masterKeyRaw, secret) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const saltB64u = e2eeBytesToB64u(salt);
+    const key = await deriveBackupKey(secret, saltB64u);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, masterKeyRaw);
+    return { salt: saltB64u, blob: e2eeBytesToB64u(new Uint8Array([...iv, ...new Uint8Array(ct)])) };
+}
+
+async function decryptMasterKeyFromBackup(blobB64u, secret, saltB64u) {
+    const key = await deriveBackupKey(secret, saltB64u);
+    const data = e2eeB64uToBytes(blobB64u);
+    const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: data.slice(0, 12) }, key, data.slice(12));
+    return new Uint8Array(raw);
+}
+
+async function uploadKeyBackups(masterKeyRaw, password, email) {
+    const payload = {};
+    if (password) { const e = await encryptMasterKeyForBackup(masterKeyRaw, password); payload.blob_password = e.blob; payload.salt_password = e.salt; }
+    if (email) { const e = await encryptMasterKeyForBackup(masterKeyRaw, email.trim().toLowerCase()); payload.blob_email = e.blob; payload.salt_email = e.salt; }
+    if (Object.keys(payload).length > 0) await api('/api/users/me/key-backup', { method: 'POST', body: JSON.stringify(payload) }).catch(()=>{});
+}
+
+async function restoreMasterKey(password, email) {
+    const backup = await api('/api/users/me/key-backup').catch(() => null);
+    if (!backup) return null;
+    if (password && backup.blob_password && backup.salt_password) {
+        try { return await decryptMasterKeyFromBackup(backup.blob_password, password, backup.salt_password); } catch (_) {}
+    }
+    if (email && backup.blob_email && backup.salt_email) {
+        try { return await decryptMasterKeyFromBackup(backup.blob_email, email.trim().toLowerCase(), backup.salt_email); } catch (_) {}
+    }
+    return null;
 }
 
 async function prepareMessageForDisplay(msg) {
@@ -1008,15 +1055,12 @@ function wireAvatarFallbacks(root = document) {
             if (box) box.classList.remove('avatar-load-failed');
         };
 
-        // Attach listeners only once per image element
         img.addEventListener('error', showFallback);
         img.addEventListener('load', showImage);
         
-        // Initial check for cached images using naturalWidth > 0
         if (img.complete && img.naturalWidth > 0) {
             showImage();
         } else if (!img.complete || img.naturalWidth === 0) {
-             // If not complete or zero width, rely on event listeners for state changes.
         }
     };
 
@@ -5534,7 +5578,6 @@ function renderDmList(dms) {
             <div class="avatar ${isGroup ? 'dm-group-avatar' : ''}">${isGroup ? '👥' : escapeHtml(letter)}</div>
             <div class="text">
                 <div class="title">${escapeHtml(otherName)}</div>
-                <div class="sub">${escapeHtml(subText)}</div>
             </div>
             <button class="dm-hide" type="button" title="Скрыть чат">✕</button>
         `;
@@ -6775,12 +6818,26 @@ function setupMessageComposer() {
         const replyId = (opts && opts.replyId !== undefined) ? opts.replyId : replyToMessageId;
         let outgoingContent = c;
         
-        try {
-            outgoingContent = await e2eeEncryptForCurrentChat(c);
-        } catch (e) {
-            console.warn('[E2EE] outgoing encryption failed', e);
-            showToast('Сообщение не отправлено: E2EE не готово.');
-            return null;
+        const isFileOnly = !c.trim() || c.includes('[[file:') || c.includes('[[file=');
+        
+        if (!isFileOnly) {
+            if (typeof nacl === 'undefined') {
+                showToast('Ошибка: библиотека шифрования (nacl) не загружена.');
+                return null;
+            }
+            try {
+                outgoingContent = await e2eeEncryptForCurrentChat(c);
+            } catch (e) {
+                console.warn('[E2EE] outgoing encryption failed', e);
+                showToast('Сообщение не отправлено: ошибка шифрования.');
+                return null;
+            }
+            
+            if (!outgoingContent.startsWith('[[e2ee:')) {
+                console.error('[E2EE] Encryption silently failed, aborting send.');
+                showToast('Не удалось зашифровать сообщение. Отправка прервана.');
+                return null;
+            }
         }
 
         let sentViaWs = false;
@@ -7638,7 +7695,6 @@ function setupMessageComposer() {
             return;
         }
 
-        // snapshot reply
         const replyIdSnap = replyToMessageId;
         const replyPreviewSnap = replyToPreview ? { ...replyToPreview } : null;
         if (replyIdSnap) {
@@ -7647,7 +7703,6 @@ function setupMessageComposer() {
             if (replyBarEl) replyBarEl.hidden = true;
         }
 
-        // optimistic UI
         if (input) {
             input.value = '';
             resizeComposerInput();
@@ -7658,7 +7713,6 @@ function setupMessageComposer() {
         const emptyMsg = document.getElementById('messages')?.querySelector?.('.empty-chat');
         if (emptyMsg) emptyMsg.remove();
 
-        // Text-only: keep old behavior (short lock only)
         if (files.length === 0) {
             if (isSubmitting) return;
             isSubmitting = true;

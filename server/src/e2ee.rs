@@ -94,7 +94,7 @@ mod b64 {
 }
 
 // ==================== X25519 Key Pair ====================
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct E2eeKeyPair {
     pub public_key_b64: String,
     pub private_key_b64: Option<String>,
@@ -104,7 +104,6 @@ impl E2eeKeyPair {
     pub fn generate() -> Self {
         let mut secret_bytes = [0u8; 32];
         rand::rng().fill(&mut secret_bytes);
-        // clamp bits for X25519
         secret_bytes[0] &= 248;
         secret_bytes[31] &= 127;
         secret_bytes[31] |= 64;
@@ -120,10 +119,7 @@ impl E2eeKeyPair {
 
     pub fn from_public_b64(public_b64: &str) -> Option<Self> {
         let bytes = b64::decode(public_b64)?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        // Валидируем что это корректный X25519 public key
+        if bytes.len() != 32 { return None; }
         let arr: [u8; 32] = bytes.try_into().ok()?;
         let _pub = X25519PublicKey::from(arr);
         let _ = _pub.as_bytes();
@@ -135,9 +131,7 @@ impl E2eeKeyPair {
 
     pub fn from_private_b64(private_b64: &str) -> Option<Self> {
         let priv_bytes = b64::decode(private_b64)?;
-        if priv_bytes.len() != 32 {
-            return None;
-        }
+        if priv_bytes.len() != 32 { return None; }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&priv_bytes);
         let secret = StaticSecret::from(arr);
@@ -214,7 +208,7 @@ impl E2eeMessage {
             }
         }
 
-        return Err("Message not encrypted for this device. Try decrypting with sender's key.".to_string());
+        Err("Message not encrypted for this device.".to_string())
     }
 
     fn decrypt_with_shared(
@@ -241,14 +235,8 @@ impl E2eeMessage {
         hk.expand(b"laberry-recv-key", &mut recv_key)
             .map_err(|e| format!("HKDF expand: {}", e))?;
 
-        let iv_bytes = match b64::decode(&rec_key.iv) {
-            Some(b) => b,
-            None => return Err("Invalid iv".to_string()),
-        };
-        let ct_bytes = match b64::decode(&rec_key.ct) {
-            Some(b) => b,
-            None => return Err("Invalid ct".to_string()),
-        };
+        let iv_bytes = b64::decode(&rec_key.iv).ok_or("Invalid iv")?;
+        let ct_bytes = b64::decode(&rec_key.ct).ok_or("Invalid ct")?;
 
         let cipher = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&recv_key)
             .map_err(|e| format!("ChaCha20Poly1305 new: {}", e))?;
@@ -266,9 +254,7 @@ impl E2eeMessage {
     }
 
     pub fn from_content(content: &str) -> Option<Self> {
-        if !Self::is_e2ee_content(content) {
-            return None;
-        }
+        if !Self::is_e2ee_content(content) { return None; }
         let prefix = "[[e2ee:v";
         if let Some(inner) = content.strip_prefix(prefix) {
             if let Some(pipe_pos) = inner.find('|') {
@@ -321,7 +307,6 @@ mod tests {
         assert!(!key.public_key_b64.is_empty());
         assert!(key.private_key_b64.is_some());
         
-        // Восстанавливаем из приватного ключа
         let restored = E2eeKeyPair::from_private_b64(key.private_key_b64.as_ref().unwrap()).unwrap();
         assert_eq!(key.public_key_b64, restored.public_key_b64);
     }
@@ -332,7 +317,7 @@ mod tests {
         let fp1 = key.fingerprint();
         let fp2 = key.fingerprint();
         assert_eq!(fp1, fp2);
-        assert_eq!(fp1.len(), 64); // SHA-256 hex
+        assert_eq!(fp1.len(), 64);
     }
 
     #[test]

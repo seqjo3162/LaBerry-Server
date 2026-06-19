@@ -762,6 +762,18 @@ pub async fn init(db: &SqlitePool) -> anyhow::Result<()> {
             );"
         ).execute(db).await?;
     });
-
+    
+    migration!(db, applied, 9, "E2EE Master Key Backup", {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS user_key_backups (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                blob_password TEXT,
+                salt_password TEXT,
+                blob_email TEXT,
+                salt_email TEXT,
+                updated_at TEXT NOT NULL
+            );"
+        ).execute(db).await?;
+    });
     Ok(())
 }

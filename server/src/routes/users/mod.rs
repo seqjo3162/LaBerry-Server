@@ -180,6 +180,90 @@ pub fn sanitize_settings(mut s: UserSettings) -> UserSettings {
     s
 }
 
+#[derive(Deserialize)]
+pub struct SaveKeyBackupBody {
+    pub blob_password: Option<String>,
+    pub salt_password: Option<String>,
+    pub blob_email: Option<String>,
+    pub salt_email: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GetKeyBackupResponse {
+    pub blob_password: Option<String>,
+    pub salt_password: Option<String>,
+    pub blob_email: Option<String>,
+    pub salt_email: Option<String>,
+}
+
+async fn save_key_backup(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Json(body): Json<SaveKeyBackupBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+    let now = auth::now_iso();
+    
+    let res = sqlx::query(
+        r#"
+        INSERT INTO user_key_backups (user_id, blob_password, salt_password, blob_email, salt_email, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            blob_password = excluded.blob_password, 
+            salt_password = excluded.salt_password,
+            blob_email = excluded.blob_email, 
+            salt_email = excluded.salt_email, 
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(me.id)
+    .bind(&body.blob_password)
+    .bind(&body.salt_password)
+    .bind(&body.blob_email)
+    .bind(&body.salt_email)
+    .bind(&now)
+    .execute(db)
+    .await;
+
+    match res {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => {
+            tracing::error!("save_key_backup failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn get_key_backup(
+    State(st): State<AppState>,
+    me: AuthUser,
+) -> impl IntoResponse {
+    let db = &st.db;
+    let row = sqlx::query(
+        "SELECT blob_password, salt_password, blob_email, salt_email FROM user_key_backups WHERE user_id = ?",
+    )
+    .bind(me.id)
+    .fetch_optional(db)
+    .await;
+
+    match row {
+        Ok(Some(r)) => {
+            let resp = GetKeyBackupResponse {
+                blob_password: r.try_get("blob_password").ok().flatten(),
+                salt_password: r.try_get("salt_password").ok().flatten(),
+                blob_email: r.try_get("blob_email").ok().flatten(),
+                salt_email: r.try_get("salt_email").ok().flatten(),
+            };
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("get_key_backup failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct UserPublic {
     pub id: i64,
@@ -405,6 +489,7 @@ pub fn trim_chars(raw: &str, max_chars: usize) -> String {
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/me/key-backup", get(get_key_backup).post(save_key_backup))
         .route("/me", get(me).put(update_me))
         .route("/me/device-keys", post(register_device_key))
         .route("/me/email/request_code", post(request_email_code))

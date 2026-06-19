@@ -93,7 +93,6 @@ pub async fn csrf_guard(
 ) -> Result<Response, (StatusCode, &'static str)> {
     match *req.method() {
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS => {
-            // Safe methods, skip CSRF check
             return Ok(next.run(req).await);
         }
         _ => {}

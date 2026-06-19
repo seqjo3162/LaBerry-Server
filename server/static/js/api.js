@@ -145,7 +145,6 @@ export async function api(path, opts = {}) {
       try { localStorage.removeItem('token'); } catch (_) {}
     }
 
-    // Предварительная проверка токена — если истёк, пробуем обновить ДО запроса
     if (token && _apiIsJwtExpired(token)) {
       apiWarn('[API] Token expired, refreshing before request...');
       const next = await refreshAccessToken();

@@ -456,7 +456,6 @@ export function initFriends() {
     if (!layout) return;
     const { panel, items } = layout;
 
-    // toggle
     if (panel && panel.hidden === false) {
       closeSearch();
       return;
@@ -626,8 +625,6 @@ export function initFriends() {
     }
   });
 
-
-  // allow app.js to force-exit friends view without toggling server mode
   window.addEventListener("laberry:friends-force-exit", () => {
     if (!friendsOpen) return;
     friendsOpen = false;

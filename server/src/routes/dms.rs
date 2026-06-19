@@ -561,6 +561,7 @@ async fn ensure_dm_participant(db: &sqlx::SqlitePool, chat_id: i64, _user_id: i6
         "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
     )
     .bind(chat_id)
+    .bind(_user_id)
     .fetch_optional(db)
     .await
     .ok()

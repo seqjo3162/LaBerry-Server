@@ -95,6 +95,8 @@ document.addEventListener("DOMContentLoaded", async () => {
           console.error("Crypto error", e);
       }
 
+      sessionStorage.setItem('lb_pwd', password);
+
       localStorage.setItem("auth_token", data.access_token);
       if (data?.refresh_token) {
           localStorage.setItem("refresh_token", data.refresh_token);
