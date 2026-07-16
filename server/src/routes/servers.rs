@@ -558,6 +558,7 @@ pub fn router() -> Router<AppState> {
         .route("/{server_id}/members", get(list_members))
         .route("/{server_id}/chats/{chat_id}/messages", get(crate::routes::messages::list).post(crate::routes::messages::send))
         .route("/{server_id}/chats/{chat_id}/messages/", get(crate::routes::messages::list).post(crate::routes::messages::send))
+        .route("/{server_id}/remove_user", post(server_remove_user))
 }
 
 #[derive(Serialize)]
@@ -1447,4 +1448,120 @@ async fn delete_server(
     }
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RemoveUserBody {
+    pub user_id: i64,
+}
+
+async fn server_remove_user(
+    State(st): State<AppState>,
+    me: AuthUser,
+    Path(server_id): Path<i64>,
+    Json(body): Json<RemoveUserBody>,
+) -> impl IntoResponse {
+    let db = &st.db;
+
+    let owner_id = match sqlx::query_scalar::<_, i64>("SELECT owner_id FROM servers WHERE id = ? LIMIT 1")
+        .bind(server_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(id) => id,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let is_leaving = me.id == body.user_id;
+
+    if is_leaving {
+        if owner_id == me.id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"detail":"owner_cannot_leave"})),
+            )
+                .into_response();
+        }
+    } else {
+        if owner_id == body.user_id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"detail":"cannot_kick_owner"})),
+            )
+                .into_response();
+        }
+
+        let member = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        )
+        .bind(server_id)
+        .bind(me.id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+        if !member {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+
+        if me.id != owner_id {
+            let role = sqlx::query_scalar::<_, String>(
+                "SELECT COALESCE(role,'member') FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            )
+            .bind(server_id)
+            .bind(me.id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "member".to_string());
+
+            if role != "admin" {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+        }
+    }
+
+    let target_member = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+    )
+    .bind(server_id)
+    .bind(body.user_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    if !target_member {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"detail":"user_not_in_server"}))).into_response();
+    }
+
+    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = ? AND user_id = ?")
+        .bind(server_id)
+        .bind(body.user_id)
+        .execute(db)
+        .await;
+
+    let _ = sqlx::query(
+        "DELETE FROM chat_participants WHERE user_id = ? AND chat_id IN (SELECT id FROM chats WHERE server_id = ?)"
+    )
+    .bind(body.user_id)
+    .bind(server_id)
+    .execute(db)
+    .await;
+
+    let _ = sqlx::query(
+        "DELETE FROM chat_reads WHERE user_id = ? AND chat_id IN (SELECT id FROM chats WHERE server_id = ?)"
+    )
+    .bind(body.user_id)
+    .bind(server_id)
+    .execute(db)
+    .await;
+
+    (StatusCode::OK, Json(serde_json::json!({"status":"ok"}))).into_response()
 }

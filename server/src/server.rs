@@ -333,6 +333,7 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/{file_id}", get(crate::routes::files::get_file))
                 .with_state(st.clone()),
         )
+        .nest("/api/payments", crate::routes::payments::router().with_state(st.clone()))
         .route_service("/favicon.ico", ServeFile::new(static_dir.join("assets/favicons/favicon.ico")))
         .route_service("/apple-touch-icon.png", ServeFile::new(static_dir.join("assets/favicons/apple-touch-icon.png")))
         .nest_service(

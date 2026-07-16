@@ -23,6 +23,7 @@ import { createSettingsUI } from "./settings.js?v=1";
 import { showUserMenu } from "./user-menu.js?v=1";
 import { initVoice } from "./voice.js?v=1";
 import { initProfileModal } from "./profile-modal.js?v=1";
+import { renderSubscriptionPanel, initSubscriptionEvents } from './subscriptions.js?v=1';
 
 appLog('[APP] All imports loaded successfully');
 
@@ -4764,19 +4765,6 @@ function hideUtilityView() {
     if (utilityView) utilityView.hidden = true;
 }
 
-function utilityPlanCard(name, price, tone, lines) {
-    const list = (Array.isArray(lines) ? lines : [])
-        .map((line) => `<li>${escapeHtml(line)}</li>`)
-        .join('');
-    return `
-      <button class="subscription-plan ${tone || ''}" type="button" data-plan="${escapeHtml(name)}">
-        <span class="subscription-plan-name">${escapeHtml(name)}</span>
-        <span class="subscription-plan-price">${escapeHtml(price)}</span>
-        <ul>${list}</ul>
-      </button>
-    `;
-}
-
 function formatDownloadSize(size) {
     const n = Number(size || 0);
     if (!Number.isFinite(n) || n <= 0) return '';
@@ -4833,85 +4821,6 @@ async function loadDownloadsUtility(utilityView) {
         utilityView.innerHTML = renderDownloadsUtility([]);
         showToast('Не удалось загрузить список сборок');
     }
-}
-
-function subscriptionServerOptionsHtml() {
-    const servers = (Array.isArray(lastServersSnapshot) ? lastServersSnapshot : [])
-        .filter((server) => Number(server?.id) > 0);
-
-    if (!servers.length) {
-        return '<option value="">Нет доступных серверов</option>';
-    }
-
-    return servers
-        .map((server) => `<option value="${Number(server.id)}">${escapeHtml(server.name || `Сервер ${server.id}`)}</option>`)
-        .join('');
-}
-
-function renderSubscriptionUtility(mode = 'personal') {
-    const isServer = mode === 'server';
-    const checkoutBody = isServer
-        ? `
-            <label class="subscription-field">
-              <span>Сервер для поддержки</span>
-              <select class="inp" id="subscriptionServerSelect">
-                ${subscriptionServerOptionsHtml()}
-              </select>
-            </label>
-            <button class="btn btn-primary" type="button" id="subscriptionPayBtn">Поддержать</button>
-          `
-        : `
-            <label class="subscription-option"><input type="radio" name="subTarget" value="self" checked /> <span>Купить себе</span></label>
-            <label class="subscription-option"><input type="radio" name="subTarget" value="gift" /> <span>Подарить подписку</span></label>
-            <input class="inp" id="subscriptionGiftInput" placeholder="Ник получателя подарка" autocomplete="off" hidden />
-            <button class="btn btn-primary" type="button" id="subscriptionPayBtn">Перейти к оплате</button>
-          `;
-    return `
-      <section class="utility-shell subscription-shell">
-        <div class="utility-hero">
-          <div>
-            <div class="utility-kicker">Подписка</div>
-            <h2>${isServer ? 'Поддержать сервер' : 'Личная подписка'}</h2>
-            <p>${isServer
-                ? 'Помощь серверу, бусты и видимые бонусы для сообщества будут подключаться через платежный backend.'
-                : 'Выберите план для себя или подготовьте подарок другому пользователю.'}</p>
-          </div>
-          <div class="subscription-switch">
-            <button class="${isServer ? 'active' : ''}" type="button" data-sub-mode="server">Поддержать сервер</button>
-            <button class="${!isServer ? 'active' : ''}" type="button" data-sub-mode="personal">Личная подписка</button>
-          </div>
-        </div>
-
-        <div class="subscription-layout">
-          <div class="subscription-plans">
-            ${utilityPlanCard('Berry Lite', '149 ₽ / мес', '', ['Расширенные реакции', 'Акцент профиля', 'Бейдж подписчика'])}
-            ${utilityPlanCard('Berry Plus', '299 ₽ / мес', 'featured', ['GIF-избранное без лимита', 'Подарочные месяцы', 'Приоритетные функции'])}
-            ${utilityPlanCard('Berry Ultra', '599 ₽ / мес', '', ['Буст сервера', 'Расширенные темы', 'Ранний доступ'])}
-          </div>
-
-          <div class="subscription-checkout-card">
-            <div class="subscription-checkout-title">${isServer ? 'Поддержка сервера' : 'Оформление'}</div>
-            ${checkoutBody}
-            <div class="subscription-payment-methods">
-              <label class="subscription-option"><input type="radio" name="paymentMethod" value="qr" checked /> <span>Оплата по QR-Code</span></label>
-              <label class="subscription-option"><input type="radio" name="paymentMethod" value="card" /> <span>Карта через провайдера</span></label>
-            </div>
-            <div class="subscription-qr-box" id="subscriptionQrBox">
-              <div class="subscription-qr-mark">QR</div>
-              <span>Безопасный сценарий: код открывает платёжную страницу провайдера, данные карты не попадают в мессенджер.</span>
-            </div>
-            <label class="subscription-save-pay">
-              <input type="checkbox" id="subscriptionSavePayment" />
-              <span>Оставить платёжные данные в браузере</span>
-            </label>
-            <div class="subscription-danger-note" id="subscriptionPaymentWarning" hidden>
-              Осторожно: сейчас сервер не имеет полноценной защиты для хранения платёжных данных. При входе в ваш аккаунт данные могут быть украдены. Безопаснее использовать QR-Code и не сохранять карту.
-            </div>
-            <div class="subscription-note">Сейчас это интерфейсная заготовка. Реальное списание нужно подключать через платежного провайдера и webhook-подтверждение.</div>
-          </div>
-        </div>
-      </section>
-    `;
 }
 
 function renderStoreUtility() {
@@ -4982,43 +4891,11 @@ function openUtilityPanel(tab, opts = {}) {
     } else if (tab === 'downloads') {
         utilityView.innerHTML = renderDownloadsUtility(null);
         loadDownloadsUtility(utilityView).catch(() => {});
-    } else if (tab === 'subscription') {
-        utilityView.innerHTML = renderSubscriptionUtility(opts.mode || 'personal');
-        utilityView.querySelectorAll('[data-sub-mode]')?.forEach?.((btn) => {
-            btn.addEventListener('click', () => {
-                openUtilityPanel('subscription', { mode: btn.dataset.subMode || 'personal' });
-            });
-        });
-        utilityView.querySelectorAll('.subscription-plan').forEach((btn) => {
-            btn.addEventListener('click', () => {
-                utilityView.querySelectorAll('.subscription-plan').forEach((x) => x.classList.remove('selected'));
-                btn.classList.add('selected');
-            });
-        });
-        const syncGiftInput = () => {
-            const target = utilityView.querySelector('input[name="subTarget"]:checked')?.value || 'self';
-            const giftInput = utilityView.querySelector('#subscriptionGiftInput');
-            if (giftInput) {
-                giftInput.hidden = target !== 'gift';
-                if (target !== 'gift') giftInput.value = '';
-            }
-        };
-        utilityView.querySelectorAll('input[name="subTarget"]').forEach((radio) => {
-            radio.addEventListener('change', syncGiftInput);
-        });
-        syncGiftInput();
-        const syncPaymentStorageWarning = () => {
-            const warning = utilityView.querySelector('#subscriptionPaymentWarning');
-            const save = utilityView.querySelector('#subscriptionSavePayment');
-            if (warning) warning.hidden = !save?.checked;
-        };
-        utilityView.querySelector('#subscriptionSavePayment')?.addEventListener('change', syncPaymentStorageWarning);
-        syncPaymentStorageWarning();
-        utilityView.querySelector('#subscriptionPayBtn')?.addEventListener('click', () => {
-            showToast('Платежный backend пока не подключен');
-        });
     } else if (tab === 'store') {
         utilityView.innerHTML = renderStoreUtility();
+    } else if (tab === 'subscription') {
+      utilityView.innerHTML = renderSubscriptionPanel(opts.mode || 'personal');
+      initSubscriptionEvents(utilityView);
     } else {
         utilityView.innerHTML = renderQuestsUtility();
     }

@@ -175,4 +175,26 @@
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setup);
   else setup();
+  document.addEventListener('click', function(e) {
+    const closeBtn = e.target.closest('[data-admin-user-close]');
+    if (closeBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const detailPanel = document.querySelector('[data-admin-user-detail]');
+        if (detailPanel) {
+            detailPanel.innerHTML = `<div class='admin-user-empty-detail'>Выбери пользователя слева.</div>`;
+        }
+        
+        document.querySelectorAll('.admin-user-row.active').forEach(row => {
+            row.classList.remove('active');
+        });
+        
+        const url = new URL(window.location);
+        if (url.searchParams.has('user_id')) {
+            url.searchParams.delete('user_id');
+            window.history.replaceState({}, '', url);
+        }
+    }
+  });
 })();

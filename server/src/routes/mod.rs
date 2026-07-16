@@ -17,3 +17,4 @@ pub mod twofa;
 pub mod e2ee;
 pub mod profile_files;
 pub mod admin_panel;
+pub mod payments;

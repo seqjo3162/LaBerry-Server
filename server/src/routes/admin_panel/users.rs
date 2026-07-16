@@ -9,10 +9,6 @@ use axum::{
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 
-// =============================
-// Helpers (user-only)
-// =============================
-
 pub(crate) fn normalized_user_mode(input: Option<&str>) -> &'static str {
     match input.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
         "active" => "active",
@@ -20,6 +16,20 @@ pub(crate) fn normalized_user_mode(input: Option<&str>) -> &'static str {
         "review" => "review",
         _ => "all",
     }
+}
+
+pub(crate) async fn fetch_user_servers(db: &SqlitePool, user_id: i64) -> anyhow::Result<Vec<(i64, String)>> {
+    let rows = sqlx::query(
+        r#"SELECT s.id, s.name 
+           FROM servers s 
+           JOIN server_members m ON m.server_id = s.id 
+           WHERE m.user_id = ? 
+           ORDER BY s.name"#
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.get("id"), r.get("name"))).collect())
 }
 
 pub(crate) fn user_mode_matches(user: &UserRow, mode: &str) -> bool {
@@ -85,10 +95,6 @@ fn trust_review_label(status: &str) -> &'static str {
     }
 }
 
-// =============================
-// Render functions (user-only)
-// =============================
-
 fn render_user_reports_html(sess: &AdminSession, reports: &[UserReportRow], return_to: &str) -> String {
     if reports.is_empty() {
         return "<div class='admin-user-emptyline'>Репортов по этому пользователю нет.</div>".to_string();
@@ -153,6 +159,7 @@ pub(crate) fn render_user_detail_card(
     sess: &AdminSession,
     user: &UserRow,
     reports: &[UserReportRow],
+    servers: &[(i64, String)],
     current_return_to: &str,
 ) -> String {
     let email_html = if user.email.trim().is_empty() { "без e-mail".to_string() } else { escape_html(&user.email) };
@@ -174,6 +181,27 @@ pub(crate) fn render_user_detail_card(
     } else {
         escape_html(&initial)
     };
+    
+    let servers_html = if servers.is_empty() {
+        "<div class='small' style='padding:6px 0;'>Не состоит ни в одном сервере.</div>".to_string()
+    } else {
+        let mut s = String::new();
+        for (sid, sname) in servers {
+            s.push_str(&format!(
+                r#"<div style='display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--border);'>
+                    <span style='font-size:13px;'>{} <span class='small'>#{}</span></span>
+                    <form method='post' action='/admin/users/{}/kick_from/{}' class='inline-form' data-ajax-user-action>
+                        <input type='hidden' name='csrf' value='{}' />
+                        <input type='hidden' name='return_to' value='{}' />
+                        <button type='submit' class='btn-danger' style='padding:4px 8px; font-size:11px;'>Выгнать</button>
+                    </form>
+                </div>"#,
+                escape_html(sname), sid, user.id, sid, escape_html(&sess.csrf), escape_html(current_return_to)
+            ));
+        }
+        s
+    };
+
     let ban_reason_html = if user.is_banned && !user.ban_reason.trim().is_empty() {
         format!(
             "<div class='admin-user-section compact-ban-reason'><strong>Причина бана</strong><div class='admin-user-section-muted'>{}</div><div class='admin-report-meta'>{}</div></div>",
@@ -183,6 +211,7 @@ pub(crate) fn render_user_detail_card(
     } else {
         String::new()
     };
+    
     let trust_review_html = if trust_needs_review {
         let reason = if user.trust_review_reason.trim().is_empty() {
             "Причина не указана".to_string()
@@ -200,6 +229,7 @@ pub(crate) fn render_user_detail_card(
     } else {
         String::new()
     };
+    
     let main_action = if user.is_banned {
         format!(
             r#"<form method='post' action='/admin/users/{id}/unban' data-ajax-user-action>
@@ -240,7 +270,10 @@ pub(crate) fn render_user_detail_card(
         </div>
       </div>
     </div>
-    <button type='button' class='admin-user-gear' data-admin-user-details='{id}' data-details-url='/admin/users/{id}/details' title='Детали и аватар'>⚙</button>
+    <div style='display:flex; gap:8px; align-items:flex-start;'>
+      <button type='button' class='admin-user-gear' data-admin-user-details='{id}' data-details-url='/admin/users/{id}/details' title='Детали и аватар'>⚙</button>
+      <button type='button' class='admin-user-gear' data-admin-user-close title='Закрыть панель' style='font-size:18px; color:var(--muted); background:transparent; border:none; cursor:pointer;'>✕</button>
+    </div>
   </div>
 
   <div class='admin-user-info-grid compact'>
@@ -259,6 +292,14 @@ pub(crate) fn render_user_detail_card(
       <span>{report_count}</span>
     </div>
     <div class='admin-report-list'>{reports_html}</div>
+  </div>
+
+  <div class='admin-user-section'>
+    <div class='admin-user-section-head'>
+      <strong>Серверы</strong>
+      <span>{server_count}</span>
+    </div>
+    <div class='admin-user-server-list' style='padding:4px 8px;'>{servers_html}</div>
   </div>
 
   <div class='admin-user-actions'>
@@ -296,10 +337,227 @@ pub(crate) fn render_user_detail_card(
         trust_review_html = trust_review_html,
         report_count = reports.len(),
         reports_html = render_user_reports_html(sess, reports, current_return_to),
+        server_count = servers.len(),
+        servers_html = servers_html,
         main_action = main_action,
         csrf = escape_html(&sess.csrf),
         return_to = escape_html(current_return_to),
     )
+}
+
+pub(crate) fn render_users_panel_body(
+    sess: &AdminSession,
+    users: &[UserRow],
+    query: &str,
+    embedded: bool,
+    mode: &str,
+    requested_user_id: Option<i64>,
+    current_return_to: &str,
+    selected_reports: &[UserReportRow],
+    selected_servers: &[(i64, String)],
+) -> String {
+    let base_path = if embedded { "/admin/center" } else { "/admin/users" };
+    let mode = normalized_user_mode(Some(mode));
+    let filtered: Vec<&UserRow> = users.iter().filter(|u| user_mode_matches(u, mode)).collect();
+    let selected = requested_user_id
+        .and_then(|id| filtered.iter().copied().find(|u| u.id == id))
+        .or_else(|| filtered.first().copied());
+    let selected_id = selected.map(|u| u.id);
+
+    let all_href = user_page_url(base_path, embedded, query, "all", None);
+    let active_href = user_page_url(base_path, embedded, query, "active", None);
+    let banned_href = user_page_url(base_path, embedded, query, "banned", None);
+    let review_href = user_page_url(base_path, embedded, query, "review", None);
+    
+    let search_html = if embedded {
+        format!(
+            r#"<div class='admin-user-search'>
+  <input type='text' data-persist-key='admin-center-users-search' data-filter-input='users' value='{qval}' placeholder='Поиск: имя / e-mail / id' />
+  <button type='button' class='btn-soft' data-clear-filter='users'>Сбросить</button>
+</div>"#,
+            qval = escape_html(query),
+        )
+    } else {
+        format!(
+            r#"<form method='get' action='{action}' class='admin-user-search'>
+  <input type='hidden' name='mode' value='{mode}' />
+  <input type='text' name='q' value='{qval}' placeholder='Поиск: имя / e-mail / id' />
+  <button type='submit'>Найти</button>
+</form>"#,
+            action = base_path,
+            mode = escape_html(mode),
+            qval = escape_html(query),
+        )
+    };
+    
+    let mut rows_html = String::new();
+    if filtered.is_empty() {
+        rows_html.push_str("<div class='admin-user-emptyline'>Пользователи не найдены.</div>");
+    } else {
+        for user in &filtered {
+            let initial = user.username.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_else(|| "?".to_string());
+            let row_href = user_page_url(base_path, embedded, query, mode, Some(user.id));
+            let card_url = format!("/admin/users/{}/card?return_to={}", user.id, url::form_urlencoded::byte_serialize(current_return_to.as_bytes()).collect::<String>());
+            let details_url = format!("/admin/users/{}/details", user.id);
+            let active = if selected_id == Some(user.id) { " active" } else { "" };
+            let needs_review = user.trust_review_status == "review" || user.trust_factor < 60;
+            let pill_class = if user.is_banned { "banned" } else if needs_review { "review" } else if user.is_online { "online" } else { "offline" };
+            let pill_text = if user.is_banned { "Бан" } else if needs_review { "Проверка" } else if user.is_online { "Онлайн" } else { "Оффлайн" };
+            let avatar_html = if let Some(file_id) = user.avatar_file_id {
+                format!("<img class='admin-user-row-avatar-img' src='/admin/profile-files/{file_id}/raw' alt='avatar' />")
+            } else {
+                escape_html(&initial)
+            };
+            let filter = format!("#{} {} {} {} {}", user.id, user.username.to_lowercase(), user.email.to_lowercase(), user.cookie_consent_status, user.trust_review_status);
+            rows_html.push_str(&format!(
+                r#"<a class='admin-user-row{active}' href='{href}' data-admin-user-row data-user-id='{id}' data-card-url='{card_url}' data-details-url='{details_url}' data-filter-item='users' data-filter='{filter}'>
+  <div class='admin-user-row-avatar'>{avatar_html}</div>
+  <div class='admin-user-row-main'>
+    <div class='admin-user-row-name'>{username}</div>
+    <div class='admin-user-row-meta'>ID #{id}</div>
+  </div>
+  <span class='admin-user-pill {pill_class}'>{pill_text}</span>
+</a>"#,
+                active = active,
+                href = escape_html(&row_href),
+                id = user.id,
+                card_url = escape_html(&card_url),
+                details_url = escape_html(&details_url),
+                filter = escape_html(&filter),
+                avatar_html = avatar_html,
+                username = escape_html(&user.username),
+                pill_class = pill_class,
+                pill_text = pill_text,
+            ));
+        }
+    }
+
+    let detail_html = if let Some(user) = selected {
+        render_user_detail_card(sess, user, selected_reports, selected_servers, current_return_to)
+    } else {
+        "<div class='admin-user-empty-detail'>Выбери пользователя слева.</div>".to_string()
+    };
+
+    format!(
+        r#"<div class='admin-users-shell'>
+  <div class='admin-users-titlebar'>
+    <strong>Пользователи</strong>
+  </div>
+  <div class='admin-users-grid'>
+    <aside class='admin-users-list'>
+      <div class='admin-user-tabs'>
+        <a href='{all_href}' class='{all_cls}'>Все</a>
+        <a href='{active_href}' class='{active_cls}'>Обычные</a>
+        <a href='{review_href}' class='{review_cls}'>Проверка</a>
+        <a href='{banned_href}' class='{banned_cls}'>Забаненные</a>
+      </div>
+      {search_html}
+      <div class='admin-user-list-scroll'>{rows_html}</div>
+    </aside>
+    <section class='admin-users-detail' data-admin-user-detail>{detail_html}</section>
+  </div>
+</div>"#,
+        all_href = escape_html(&all_href),
+        active_href = escape_html(&active_href),
+        banned_href = escape_html(&banned_href),
+        review_href = escape_html(&review_href),
+        all_cls = if mode == "all" { "active" } else { "" },
+        active_cls = if mode == "active" { "active" } else { "" },
+        banned_cls = if mode == "banned" { "active" } else { "" },
+        review_cls = if mode == "review" { "active" } else { "" },
+        search_html = search_html,
+        rows_html = rows_html,
+        detail_html = detail_html,
+    )
+}
+
+pub(crate) async fn users_list(
+    State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<ListQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() {
+        return e.into_response();
+    }
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
+        return e.into_response();
+    }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let query = q.q.clone().unwrap_or_default().trim().to_string();
+    let mode = normalized_user_mode(q.mode.as_deref());
+    let embed = q.embed == Some(1);
+    let base_path = if embed { "/admin/center" } else { "/admin/users" };
+
+    let body = match fetch_users(&st.db, &query, 200).await {
+        Ok(list) => {
+            let selected_id = q.user_id.or_else(|| list.iter().find(|u| user_mode_matches(u, mode)).map(|u| u.id));
+            let fallback_return_to = user_page_url(base_path, embed, &query, mode, selected_id);
+            let current_return_to = safe_admin_return_to(q.return_to.as_deref().unwrap_or(""), &fallback_return_to);
+            
+            let reports = match selected_id {
+                Some(id) => fetch_user_reports(&st.db, id, 8).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let servers = match selected_id {
+                Some(id) => fetch_user_servers(&st.db, id).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            render_users_panel_body(
+                &sess,
+                &list,
+                &query,
+                embed,
+                mode,
+                selected_id,
+                &current_return_to,
+                &reports,
+                &servers,
+            )
+        }
+        Err(err) => format!(
+            "<div class='card'><div class='empty-state'>Ошибка БД: {}</div></div>",
+            escape_html(&format!("{}", err))
+        ),
+    };
+
+    if embed {
+        embedded_page("Админка • Пользователи", &body, q.msg.as_deref()).into_response()
+    } else {
+        page("Админка • Пользователи", &body, q.msg.as_deref()).into_response()
+    }
+}
+
+pub(crate) async fn admin_user_card_fragment(
+    State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(q): Query<ListQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) { return e.into_response(); }
+    let (_sid, sess) = match require_auth(&st, &headers) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+
+    let user = match fetch_user_by_id(&st.db, id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Пользователь не найден").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Ошибка БД: {e}")).into_response(),
+    };
+    
+    let reports = fetch_user_reports(&st.db, id, 8).await.unwrap_or_default();
+    let servers = fetch_user_servers(&st.db, id).await.unwrap_or_default();
+    let fallback = user_page_url("/admin/users", false, "", "all", Some(id));
+    let return_to = safe_admin_return_to(q.return_to.as_deref().unwrap_or(""), &fallback);
+    
+    Html(render_user_detail_card(&sess, &user, &reports, &servers, &return_to)).into_response()
 }
 
 pub(crate) fn render_user_details_modal(user: &UserRow) -> String {
@@ -348,214 +606,6 @@ pub(crate) fn render_user_details_modal(user: &UserRow) -> String {
         status = if user.is_online { "онлайн" } else { "оффлайн" },
         ban = if user.is_banned { "ограничен" } else { "нет" },
     )
-}
-
-pub(crate) fn render_users_panel_body(
-    sess: &AdminSession,
-    users: &[UserRow],
-    query: &str,
-    embedded: bool,
-    mode: &str,
-    requested_user_id: Option<i64>,
-    current_return_to: &str,
-    selected_reports: &[UserReportRow],
-) -> String {
-    let base_path = if embedded { "/admin/center" } else { "/admin/users" };
-    let mode = normalized_user_mode(Some(mode));
-    let filtered: Vec<&UserRow> = users.iter().filter(|u| user_mode_matches(u, mode)).collect();
-    let selected = requested_user_id
-        .and_then(|id| filtered.iter().copied().find(|u| u.id == id))
-        .or_else(|| filtered.first().copied());
-    let selected_id = selected.map(|u| u.id);
-
-    let all_href = user_page_url(base_path, embedded, query, "all", None);
-    let active_href = user_page_url(base_path, embedded, query, "active", None);
-    let banned_href = user_page_url(base_path, embedded, query, "banned", None);
-    let review_href = user_page_url(base_path, embedded, query, "review", None);
-    let search_html = if embedded {
-        format!(
-            r#"<div class='admin-user-search'>
-  <input type='text' data-persist-key='admin-center-users-search' data-filter-input='users' value='{qval}' placeholder='Поиск: имя / e-mail / id' />
-  <button type='button' class='btn-soft' data-clear-filter='users'>Сбросить</button>
-</div>"#,
-            qval = escape_html(query),
-        )
-    } else {
-        format!(
-            r#"<form method='get' action='{action}' class='admin-user-search'>
-  <input type='hidden' name='mode' value='{mode}' />
-  <input type='text' name='q' value='{qval}' placeholder='Поиск: имя / e-mail / id' />
-  <button type='submit'>Найти</button>
-</form>"#,
-            action = base_path,
-            mode = escape_html(mode),
-            qval = escape_html(query),
-        )
-    };
-
-    let mut rows_html = String::new();
-    if filtered.is_empty() {
-        rows_html.push_str("<div class='admin-user-emptyline'>Пользователи не найдены.</div>");
-    } else {
-        for user in &filtered {
-            let initial = user.username.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_else(|| "?".to_string());
-            let row_href = user_page_url(base_path, embedded, query, mode, Some(user.id));
-            let card_url = format!("/admin/users/{}/card?return_to={}", user.id, url::form_urlencoded::byte_serialize(current_return_to.as_bytes()).collect::<String>());
-            let details_url = format!("/admin/users/{}/details", user.id);
-            let active = if selected_id == Some(user.id) { " active" } else { "" };
-            let needs_review = user.trust_review_status == "review" || user.trust_factor < 60;
-            let pill_class = if user.is_banned { "banned" } else if needs_review { "review" } else if user.is_online { "online" } else { "offline" };
-            let pill_text = if user.is_banned { "Бан" } else if needs_review { "Проверка" } else if user.is_online { "Онлайн" } else { "Оффлайн" };
-            let avatar_html = if let Some(file_id) = user.avatar_file_id {
-                format!("<img class='admin-user-row-avatar-img' src='/admin/profile-files/{file_id}/raw' alt='avatar' />")
-            } else {
-                escape_html(&initial)
-            };
-            let filter = format!("#{} {} {} {} {}", user.id, user.username.to_lowercase(), user.email.to_lowercase(), user.cookie_consent_status, user.trust_review_status);
-            rows_html.push_str(&format!(
-                r#"<a class='admin-user-row{active}' href='{href}' data-admin-user-row data-user-id='{id}' data-card-url='{card_url}' data-details-url='{details_url}' data-filter-item='users' data-filter='{filter}'>
-  <div class='admin-user-row-avatar'>{avatar_html}</div>
-  <div class='admin-user-row-main'>
-    <div class='admin-user-row-name'>{username}</div>
-    <div class='admin-user-row-meta'>ID #{id}</div>
-  </div>
-  <span class='admin-user-pill {pill_class}'>{pill_text}</span>
-</a>"#,
-                active = active,
-                href = escape_html(&row_href),
-                id = user.id,
-                card_url = escape_html(&card_url),
-                details_url = escape_html(&details_url),
-                filter = escape_html(&filter),
-                avatar_html = avatar_html,
-                username = escape_html(&user.username),
-                pill_class = pill_class,
-                pill_text = pill_text,
-            ));
-        }
-    }
-
-    let detail_html = if let Some(user) = selected {
-        render_user_detail_card(sess, user, selected_reports, current_return_to)
-    } else {
-        "<div class='admin-user-empty-detail'>Выбери пользователя слева.</div>".to_string()
-    };
-
-    format!(
-        r#"<div class='admin-users-shell'>
-  <div class='admin-users-titlebar'>
-    <strong>Пользователи</strong>
-  </div>
-  <div class='admin-users-grid'>
-    <aside class='admin-users-list'>
-      <div class='admin-user-tabs'>
-        <a href='{all_href}' class='{all_cls}'>Все</a>
-        <a href='{active_href}' class='{active_cls}'>Обычные</a>
-        <a href='{review_href}' class='{review_cls}'>Проверка</a>
-        <a href='{banned_href}' class='{banned_cls}'>Забаненные</a>
-      </div>
-      {search_html}
-      <div class='admin-user-list-scroll'>{rows_html}</div>
-    </aside>
-    <section class='admin-users-detail' data-admin-user-detail>{detail_html}</section>
-  </div>
-</div>"#,
-        all_href = escape_html(&all_href),
-        active_href = escape_html(&active_href),
-        banned_href = escape_html(&banned_href),
-        review_href = escape_html(&review_href),
-        all_cls = if mode == "all" { "active" } else { "" },
-        active_cls = if mode == "active" { "active" } else { "" },
-        banned_cls = if mode == "banned" { "active" } else { "" },
-        review_cls = if mode == "review" { "active" } else { "" },
-        search_html = search_html,
-        rows_html = rows_html,
-        detail_html = detail_html,
-    )
-}
-
-// =============================
-// Handlers
-// =============================
-
-pub(crate) async fn users_list(
-    State(st): State<AppState>,
-    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    Query(q): Query<ListQuery>,
-) -> impl IntoResponse {
-    if let Err(e) = require_admin_panel_enabled() {
-        return e.into_response();
-    }
-    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) {
-        return e.into_response();
-    }
-    let (_sid, sess) = match require_auth(&st, &headers) {
-        Ok(v) => v,
-        Err(r) => return r.into_response(),
-    };
-
-    let query = q.q.clone().unwrap_or_default().trim().to_string();
-    let mode = normalized_user_mode(q.mode.as_deref());
-    let embed = q.embed == Some(1);
-    let base_path = if embed { "/admin/center" } else { "/admin/users" };
-
-    let body = match fetch_users(&st.db, &query, 200).await {
-        Ok(list) => {
-            let selected_id = q.user_id.or_else(|| list.iter().find(|u| user_mode_matches(u, mode)).map(|u| u.id));
-            let fallback_return_to = user_page_url(base_path, embed, &query, mode, selected_id);
-            let current_return_to = safe_admin_return_to(q.return_to.as_deref().unwrap_or(""), &fallback_return_to);
-            let reports = match selected_id {
-                Some(id) => fetch_user_reports(&st.db, id, 8).await.unwrap_or_default(),
-                None => Vec::new(),
-            };
-            render_users_panel_body(
-                &sess,
-                &list,
-                &query,
-                embed,
-                mode,
-                selected_id,
-                &current_return_to,
-                &reports,
-            )
-        }
-        Err(err) => format!(
-            "<div class='card'><div class='empty-state'>Ошибка БД: {}</div></div>",
-            escape_html(&format!("{}", err))
-        ),
-    };
-
-    if embed {
-        embedded_page("Админка • Пользователи", &body, q.msg.as_deref()).into_response()
-    } else {
-        page("Админка • Пользователи", &body, q.msg.as_deref()).into_response()
-    }
-}
-
-pub(crate) async fn admin_user_card_fragment(
-    State(st): State<AppState>,
-    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    Path(id): Path<i64>,
-    Query(q): Query<ListQuery>,
-) -> impl IntoResponse {
-    if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
-    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) { return e.into_response(); }
-    let (_sid, sess) = match require_auth(&st, &headers) {
-        Ok(v) => v,
-        Err(r) => return r.into_response(),
-    };
-
-    let user = match fetch_user_by_id(&st.db, id).await {
-        Ok(Some(v)) => v,
-        Ok(None) => return (StatusCode::NOT_FOUND, "Пользователь не найден").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Ошибка БД: {e}")).into_response(),
-    };
-    let reports = fetch_user_reports(&st.db, id, 8).await.unwrap_or_default();
-    let fallback = user_page_url("/admin/users", false, "", "all", Some(id));
-    let return_to = safe_admin_return_to(q.return_to.as_deref().unwrap_or(""), &fallback);
-    Html(render_user_detail_card(&sess, &user, &reports, &return_to)).into_response()
 }
 
 pub(crate) async fn admin_user_details_fragment(
@@ -1254,4 +1304,29 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+pub(crate) async fn admin_user_kick_from_server(
+    State(st): State<AppState>,
+    ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Path((user_id, server_id)): Path<(i64, i64)>,
+    Form(f): Form<ActionForm>,
+) -> impl IntoResponse {
+    if let Err(e) = require_admin_panel_enabled() { return e.into_response(); }
+    if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) { return e.into_response(); }
+    let (_sid, sess) = match require_auth(&st, &headers) { Ok(v) => v, Err(r) => return r.into_response() };
+    let return_to = safe_admin_return_to(&f.return_to, "/admin/users");
+    if f.csrf != sess.csrf { return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response(); }
+
+    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = ? AND user_id = ?")
+        .bind(server_id).bind(user_id).execute(&st.db).await;
+    
+    let _ = sqlx::query("DELETE FROM chat_participants WHERE user_id = ? AND chat_id IN (SELECT id FROM chats WHERE server_id = ?)")
+        .bind(user_id).bind(server_id).execute(&st.db).await;
+
+    let _ = sqlx::query("DELETE FROM chat_reads WHERE user_id = ? AND chat_id IN (SELECT id FROM chats WHERE server_id = ?)")
+        .bind(user_id).bind(server_id).execute(&st.db).await;
+
+    admin_redirect_with_msg(&return_to, "Пользователь исключен из сервера").into_response()
 }

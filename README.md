@@ -825,10 +825,8 @@ LaBerry-Server/
 │   ├── delegated-ripencc-latest # GeoIP data
 │   └── custom_blocked_cidr      # Custom blocks
 │
-├── .cargo/
-│   └── config.toml              # Cargo config
-│
-└── .roo/                        # Roo IDE config
+└── .cargo/
+    └── config.toml              # Cargo config
 ```
 
 ### Ключевые компоненты

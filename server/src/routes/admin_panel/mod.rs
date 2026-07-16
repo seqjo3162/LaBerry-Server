@@ -44,6 +44,7 @@ pub fn router() -> Router<AppState> {
         .route("/users/{id}/unban", post(user_unban))
         .route("/users/{id}/ban_forever", post(user_ban_forever))
         .route("/users/{id}/purge", post(user_purge_content))
+        .route("/users/{user_id}/kick_from/{server_id}", post(admin_user_kick_from_server))
         .route("/reports/{id}/status", post(admin_report_status))
         .route("/suggestions", get(suggestions_page))
         .route("/suggestions/{id}/status", post(admin_suggestion_status))
@@ -419,7 +420,7 @@ pub(super) fn page(title: &str, body: &str, msg: Option<&str>) -> Html<String> {
         ""
     };
     let users_script = if title.contains("Центр") || title.contains("Пользователи") {
-        "<script src='/static/js/admin-users.js?v=1' defer></script>"
+        "<script src='/static/js/admin-users.js?v=2' defer></script>"
     } else {
         ""
     };
@@ -1202,29 +1203,15 @@ fn render_suggestions_panel_body(
     )
 }
 
-// moved to users.rs
-
-// moved to servers.rs
-
-
-// moved to content.rs
-
-// moved to users.rs
-
-
-// moved to users.rs
 
 #[derive(Deserialize)]
 pub(crate) struct ActionForm {
-    csrf: String,
-    #[serde(default)]
-    phrase: String,
-    #[serde(default)]
-    admin_password: String,
-    #[serde(default)]
-    return_to: String,
-    #[serde(default)]
-    reason: String,
+    pub csrf: String,
+    #[serde(default)] pub phrase: String,
+    #[serde(default)] pub admin_password: String,
+    #[serde(default)] pub return_to: String,
+    #[serde(default)] pub reason: String,
+    #[serde(default)] pub user_id: String,
 }
 
 
@@ -1445,6 +1432,10 @@ async fn center_page(
         Some(id) => fetch_user_reports(&st.db, id, 8).await.unwrap_or_default(),
         None => Vec::new(),
     };
+    let selected_servers = match selected_id {
+        Some(id) => fetch_user_servers(&st.db, id).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
     let users_panel = render_users_panel_body(
         &sess,
         &users,
@@ -1454,6 +1445,7 @@ async fn center_page(
         selected_id,
         &users_return_to,
         &user_reports,
+        &selected_servers,
     );
 
     let servers = fetch_servers(&st.db, "", 200).await.unwrap_or_default();
