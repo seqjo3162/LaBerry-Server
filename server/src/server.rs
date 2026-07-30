@@ -124,8 +124,8 @@ pub async fn run_server(
     let geo_guard = GeoGuardState::from_custom_file("assets/custom_blocked_cidr")?;
     // Упрощено: без Arc
     let trusted_proxies = vec![
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-        std::net::IpAddr::V6(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+        std::net::IpAddr::V6(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)),
     ];
 
     let state = AppState {
