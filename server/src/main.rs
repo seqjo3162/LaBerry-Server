@@ -27,14 +27,12 @@ fn install_panic_logger() {
 }
 
 fn load_env_file() {
-    // Load .env from workspace root (cargo run) or current dir.
     if dotenvy::dotenv().is_err() {
         let _ = dotenvy::from_filename("../.env");
     }
 
     repair_admin_secrets_from_dotenv_file();
 
-    // Legacy aliases from .env.example / older configs.
     if std::env::var("LB_HOST").is_err() {
         if let Ok(v) = std::env::var("HOST") {
             std::env::set_var("LB_HOST", v);
@@ -52,7 +50,6 @@ fn load_env_file() {
     }
 }
 
-/// dotenvy expands `$` in values; Argon2 hashes break. Re-read the raw line when needed.
 fn repair_admin_secrets_from_dotenv_file() {
     let hash_ok = std::env::var("LB_ADMIN_PASSWORD_HASH")
         .ok()

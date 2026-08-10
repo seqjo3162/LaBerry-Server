@@ -1,11 +1,31 @@
-use sqlx::SqlitePool;
+use sqlx::PgPool;
+use chrono::Utc;
+
+use crate::models::{ServerIden, UserIden, ChatIden, ServerMemberIden};
 
 pub const GLOBAL_SERVER_ID: i64 = 1;
 
-pub async fn ensure_global_server(db: &SqlitePool) -> anyhow::Result<()> {
-    // проверяем, существует ли global server
+async fn ensure_voice_channel(db: &PgPool, server_id: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chats (server_id, name, kind, created_at)
+        SELECT $1, 'General chat', 'voice', $2
+        WHERE NOT EXISTS (
+            SELECT 1 FROM chats
+            WHERE server_id = $1 AND kind = 'voice' AND name = 'General chat'
+        )
+        "#
+    )
+    .bind(server_id)
+    .bind(Utc::now())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn ensure_global_server(db: &PgPool) -> anyhow::Result<()> {
     let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM servers WHERE id = ?"
+        &format!("SELECT id FROM {} WHERE id = $1", ServerIden::Table.to_string())
     )
     .bind(GLOBAL_SERVER_ID)
     .fetch_optional(db)
@@ -14,83 +34,73 @@ pub async fn ensure_global_server(db: &SqlitePool) -> anyhow::Result<()> {
     if exists.is_some() {
         return Ok(());
     }
-    
+
     let system_user_id: i64 = match sqlx::query_scalar(
-        "SELECT id FROM users WHERE username = '__system__' LIMIT 1"
+        &format!("SELECT id FROM {} WHERE username = '__system__' LIMIT 1", UserIden::Table.to_string())
     )
     .fetch_optional(db)
     .await? {
         Some(id) => id,
         None => {
             let res = sqlx::query(
-                r#"
-                INSERT INTO users (username, password_hash, is_banned, created_at)
-                VALUES ('__system__', '', 1, datetime('now'))
-                "#
+                &format!(
+                    "INSERT INTO {} (username, password_hash, is_banned, created_at)
+                     VALUES ('__system__', '', false, $1)
+                     RETURNING id",
+                    UserIden::Table.to_string()
+                )
             )
+            .bind(Utc::now())
             .execute(db)
             .await?;
-
             res.last_insert_rowid()
         }
     };
 
     sqlx::query(
-        r#"
-        INSERT INTO servers (id, name, owner_id, created_at)
-        VALUES (?, 'Global', ?, datetime('now'))
-        "#
+        &format!(
+            "INSERT INTO {} (id, name, owner_id, created_at)
+             VALUES ($1, 'Global', $2, $3)",
+            ServerIden::Table.to_string()
+        )
     )
     .bind(GLOBAL_SERVER_ID)
     .bind(system_user_id)
+    .bind(Utc::now())
     .execute(db)
     .await?;
 
     sqlx::query(
-        r#"
-        INSERT INTO chats (server_id, name, kind, created_at)
-        VALUES (?, 'general', 'text', datetime('now'))"#
+        &format!(
+            "INSERT INTO {} (server_id, name, kind, created_at)
+             VALUES ($1, 'general', 'text', $2)",
+            ChatIden::Table.to_string()
+        )
     )
     .bind(GLOBAL_SERVER_ID)
+    .bind(Utc::now())
     .execute(db)
     .await?;
 
-    let _ = sqlx::query(
-        r#"
-        INSERT INTO chats (server_id, name, kind, created_at)
-        SELECT ?, 'General chat', 'voice', datetime('now')
-        WHERE NOT EXISTS (
-            SELECT 1 FROM chats
-            WHERE server_id = ? AND COALESCE(kind,'text') = 'voice' AND COALESCE(name,'') = 'General chat'
-        )
-        "#
-    )
-    .bind(GLOBAL_SERVER_ID)
-    .bind(GLOBAL_SERVER_ID)
-    .execute(db)
-    .await;
+    ensure_voice_channel(db, GLOBAL_SERVER_ID).await?;
 
     Ok(())
 }
 
-pub async fn add_user_to_global_server(
-    db: &SqlitePool,
-    user_id: i64,
-) -> anyhow::Result<()> {
-    let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM servers WHERE id = ?"
+pub async fn add_user_to_global_server(db: &PgPool, user_id: i64) -> anyhow::Result<()> {
+    let server_exists: Option<i64> = sqlx::query_scalar(
+        &format!("SELECT id FROM {} WHERE id = $1", ServerIden::Table.to_string())
     )
     .bind(GLOBAL_SERVER_ID)
     .fetch_optional(db)
     .await?;
 
-    if exists.is_none() {
+    if server_exists.is_none() {
         anyhow::bail!("Global server does not exist");
     }
 
-    // гарантируем, что пользователь существует
     let user_exists: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM users WHERE id = ?"
+        &format!("SELECT id FROM {} WHERE id = $1", UserIden::Table.to_string())
     )
     .bind(user_id)
     .fetch_optional(db)
@@ -100,64 +110,19 @@ pub async fn add_user_to_global_server(
         anyhow::bail!("User does not exist");
     }
 
-    // добавляем пользователя в global server
     sqlx::query(
-        r#"
-        INSERT INTO server_members (server_id, user_id)
-        VALUES (?, ?)
-        ON CONFLICT(server_id, user_id) DO NOTHING
-        "#
+        &format!(
+            "INSERT INTO {} (server_id, user_id)
+             VALUES ($1, $2)
+             ON CONFLICT(server_id, user_id) DO NOTHING",
+            ServerMemberIden::Table.to_string()
+        )
     )
     .bind(GLOBAL_SERVER_ID)
     .bind(user_id)
     .execute(db)
     .await?;
-
-    // default voice channel (do not duplicate)
-    let _ = sqlx::query(
-        r#"
-        INSERT INTO chats (server_id, name, kind, created_at)
-        SELECT ?, 'General chat', 'voice', datetime('now')
-        WHERE NOT EXISTS (
-            SELECT 1 FROM chats
-            WHERE server_id = ? AND COALESCE(kind,'text') = 'voice' AND COALESCE(name,'') = 'General chat'
-        )
-        "#
-    )
-    .bind(GLOBAL_SERVER_ID)
-    .bind(GLOBAL_SERVER_ID)
-    .execute(db)
-    .await;
-    
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS payment_orders (
-            id TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            plan_id TEXT NOT NULL,
-            amount INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            paid_at TEXT
-        )
-        "#,
-    )
-    .execute(db)
-    .await?;
-
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            plan_id TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-        "#,
-    )
-    .execute(db)
-    .await?;
+    ensure_voice_channel(db, GLOBAL_SERVER_ID).await?;
 
     Ok(())
 }
