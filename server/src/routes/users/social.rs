@@ -84,7 +84,7 @@ pub async fn list_blocks(State(st): State<AppState>, me: AuthUser) -> impl IntoR
         .map(|r| BlockView {
             user_id: r.get("user_id"),
             username: r.get("username"),
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         })
         .collect::<Vec<_>>();
 
@@ -96,7 +96,7 @@ pub async fn block_user(State(st): State<AppState>, me: AuthUser, Path(user_id):
         return StatusCode::BAD_REQUEST.into_response();
     }
 
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE id = $1 LIMIT 1")
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1::bigint FROM users WHERE id = $1 LIMIT 1")
         .bind(user_id)
         .fetch_optional(&st.db)
         .await
@@ -156,8 +156,8 @@ pub async fn list_my_suggestions(
             title: r.try_get("title").unwrap_or_default(),
             message: r.try_get("message").unwrap_or_default(),
             status: r.try_get("status").unwrap_or_else(|_| "open".to_string()),
-            created_at: r.try_get("created_at").unwrap_or_default(),
-            reviewed_at: r.try_get("reviewed_at").ok(),
+            created_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at").ok().map(|d| d.to_rfc3339()).unwrap_or_default(),
+            reviewed_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("reviewed_at").ok().map(|d| d.to_rfc3339()),
             admin_note: r.try_get("admin_note").unwrap_or_default(),
         })
         .collect::<Vec<_>>();
@@ -272,7 +272,7 @@ pub async fn report_user(
             .into_response();
     }
 
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE id = $1 LIMIT 1")
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1::bigint FROM users WHERE id = $1 LIMIT 1")
         .bind(target_user_id)
         .fetch_optional(&st.db)
         .await

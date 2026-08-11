@@ -82,7 +82,7 @@ async fn get_user_dm_mode(db: &sqlx::PgPool, user_id: i64) -> String {
 
 async fn are_friends(db: &sqlx::PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM friendships WHERE user_id = $1 AND friend_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM friendships WHERE user_id = $1 AND friend_id = $2 LIMIT 1",
     )
     .bind(a)
     .bind(b)
@@ -96,7 +96,7 @@ async fn are_friends(db: &sqlx::PgPool, a: i64, b: i64) -> bool {
 async fn share_server(db: &sqlx::PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT 1
+        SELECT 1::bigint
         FROM server_members s1
         JOIN server_members s2 ON s1.server_id = s2.server_id
         WHERE s1.user_id = $1 AND s2.user_id = $2
@@ -131,7 +131,7 @@ async fn create(
 
                 // ensure user exists & not banned (also avoids leaking)
                 let ok_user = sqlx::query_scalar::<_, i64>(
-                    "SELECT 1 FROM users WHERE id = $1 AND NOT is_banned LIMIT 1",
+                    "SELECT 1::bigint FROM users WHERE id = $1 AND NOT is_banned LIMIT 1",
                 )
                 .bind(uid)
                 .fetch_optional(db)
@@ -167,7 +167,7 @@ async fn create(
     // server chat: creator MUST be server member
     if let Some(server_id) = body.server_id {
         let member = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(me.id)
@@ -220,7 +220,7 @@ async fn create(
 
                 // ensure user exists & not banned
                 let ok = sqlx::query_scalar::<_, i64>(
-                    "SELECT 1 FROM users WHERE id = $1 AND NOT is_banned LIMIT 1",
+                    "SELECT 1::bigint FROM users WHERE id = $1 AND NOT is_banned LIMIT 1",
                 )
                 .bind(uid)
                 .fetch_optional(db)
@@ -277,7 +277,7 @@ async fn join(
     // server chat: must be server member
     if let Some(sid) = server_id {
         let member = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(me.id)
@@ -333,7 +333,7 @@ async fn get_one(
     // access: private -> participants; server public -> server_members
     let member = if meta.is_private {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(me.id)
@@ -344,7 +344,7 @@ async fn get_one(
         .is_some()
     } else if let Some(sid) = meta.server_id {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(me.id)
@@ -390,7 +390,7 @@ async fn get_one(
         name: r.get("name"),
         server_id: r.get("server_id"),
         is_private: r.get::<bool, _>("is_private") as i64,
-        created_at: r.get("created_at"),
+        created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         kind: r.get::<String, _>("kind"),
         unread_count: 0,
         has_unread: false,
@@ -446,7 +446,7 @@ async fn list_pins(
 
     let allowed = if let Some(server_id) = chat.server_id {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(me.id)
@@ -458,7 +458,7 @@ async fn list_pins(
     } else {
         // Support both current and legacy DM/private chat rows.
         let in_participants = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(me.id)
@@ -472,7 +472,7 @@ async fn list_pins(
             true
         } else {
             sqlx::query_scalar::<_, i64>(
-                "SELECT 1 FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $3) LIMIT 1",
+                "SELECT 1::bigint FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $3) LIMIT 1",
             )
             .bind(chat_id)
             .bind(me.id)
@@ -522,7 +522,7 @@ async fn list_pins(
             message_id: r.get("message_id"),
             pinned_by: r.get("pinned_by"),
             pinned_by_username: r.get("pinned_by_username"),
-            pinned_at: r.get("pinned_at"),
+            pinned_at: r.get::<chrono::DateTime<chrono::Utc>, _>("pinned_at").to_rfc3339(),
             message_exists: r.try_get::<i64, _>("message_exists_id").ok().is_some(),
             sender_id: r.try_get::<i64, _>("sender_id").ok(),
             sender_username: r.try_get::<String, _>("sender_username").ok(),
@@ -549,18 +549,18 @@ async fn mark_read(
 
     let access = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT 1
+        SELECT 1::bigint
         FROM chats c
         WHERE c.id = $1
           AND (
             EXISTS (
-                SELECT 1
+                SELECT 1::bigint
                 FROM chat_participants p
                 WHERE p.chat_id = c.id AND p.user_id = $2
             )
             OR (
                 c.server_id IS NOT NULL AND c.is_private = FALSE AND EXISTS (
-                    SELECT 1
+                    SELECT 1::bigint
                     FROM server_members sm
                     WHERE sm.server_id = c.server_id AND sm.user_id = $3
                 )
@@ -666,7 +666,7 @@ async fn list_my(
                   ), 0)
             ) AS last_read_message_id,
             CASE WHEN EXISTS(
-                SELECT 1
+                SELECT 1::bigint
                 FROM messages m
                 WHERE m.chat_id = c.id
                   AND m.id > COALESCE((
@@ -697,7 +697,7 @@ async fn list_my(
             name: r.get("name"),
             server_id: r.get("server_id"),
             is_private: r.get::<bool, _>("is_private") as i64,
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
             kind: r.get::<String, _>("kind"),
             unread_count: r.get::<i64, _>("unread_count"),
             has_unread: r.get::<i64, _>("unread_count") > 0,

@@ -95,7 +95,7 @@ pub async fn me(
         email_pending: r.get("email_pending"),
         public_encryption_key: r.get("public_encryption_key"),
         cookie_consent_status: r.get("cookie_consent_status"),
-        cookie_consent_at: r.get("cookie_consent_at"),
+        cookie_consent_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("cookie_consent_at").ok().map(|d| d.to_rfc3339()),
         trust_factor: r.get("trust_factor"),
         trust_review_status: r.get("trust_review_status"),
         trust_review_reason: r.get("trust_review_reason"),
@@ -193,7 +193,7 @@ pub async fn update_me(
         email_pending: r.get("email_pending"),
         public_encryption_key: r.get("public_encryption_key"),
         cookie_consent_status: r.get("cookie_consent_status"),
-        cookie_consent_at: r.get("cookie_consent_at"),
+        cookie_consent_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("cookie_consent_at").ok().map(|d| d.to_rfc3339()),
         trust_factor: r.get("trust_factor"),
         trust_review_status: r.get("trust_review_status"),
         trust_review_reason: r.get("trust_review_reason"),
@@ -225,7 +225,7 @@ async fn get_or_create_profile(db: &sqlx::PgPool, user_id: i64) -> UserProfileVi
             about: r.try_get("about").ok(),
             status_text: r.try_get("status_text").ok(),
             integrations,
-            updated_at: r.get("updated_at"),
+            updated_at: r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at").to_rfc3339(),
         };
     }
 
@@ -246,7 +246,7 @@ async fn get_or_create_profile(db: &sqlx::PgPool, user_id: i64) -> UserProfileVi
         about: None,
         status_text: None,
         integrations: serde_json::json!({}),
-        updated_at: now,
+        updated_at: now.to_rfc3339(),
     }
 }
 
@@ -263,7 +263,7 @@ async fn get_public_profile(db: &sqlx::PgPool, user_id: i64) -> Option<PublicPro
     }
 
     let username: String = user.get("username");
-    let created_at: String = user.get("created_at");
+    let created_at: String = user.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339();
     let profile = get_or_create_profile(db, user_id).await;
     let settings = settings::load_user_settings(db, user_id).await.unwrap_or_else(default_settings);
 

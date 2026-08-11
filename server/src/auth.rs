@@ -66,9 +66,9 @@ pub fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
-/// Unix time (seconds) as string — подходит для SQLite TEXT.
-pub fn now_iso() -> String {
-    now_unix().to_string()
+/// Current UTC timestamp. PostgreSQL TIMESTAMPTZ-compatible.
+pub fn now_iso() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
 }
 
 fn issuer() -> String {

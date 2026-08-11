@@ -91,7 +91,7 @@ impl FromRequestParts<AppState> for AuthUser {
         // sessions (best-effort)
         let now = auth::now_iso();
 
-        if let Ok(Some(revoked_at)) = sqlx::query_scalar::<_, Option<String>>(
+        if let Ok(Some(revoked_at)) = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
             "SELECT revoked_at FROM user_sessions WHERE token_hash = $1 LIMIT 1",
         )
         .bind(&token_hash)

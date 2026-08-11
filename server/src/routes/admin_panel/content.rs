@@ -273,7 +273,7 @@ pub(super) async fn fetch_admin_global_gifs(db: &PgPool) -> Vec<AdminGifRow> {
         id: r.get("id"),
         original_name: r.get("original_name"),
         file_size: r.get("file_size"),
-        created_at: r.get("created_at"),
+        created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
     })
     .collect()
 }
@@ -510,7 +510,7 @@ pub(super) async fn fetch_admin_downloads(db: &PgPool) -> Vec<AdminDownloadRow> 
         version: r.try_get("version").unwrap_or_default(),
         original_name: r.try_get("original_name").unwrap_or_default(),
         file_size: r.try_get("file_size").unwrap_or(0),
-        uploaded_at: r.try_get("uploaded_at").unwrap_or_default(),
+        uploaded_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("uploaded_at").ok().map(|d| d.to_rfc3339()).unwrap_or_default(),
         is_active: r.try_get::<bool, _>("is_active").unwrap_or(false),
     })
     .collect()
@@ -1007,8 +1007,8 @@ pub(super) async fn db_list_expired_files_get(
             "filename": r.get::<String, _>("filename"),
             "storage_path": r.get::<String, _>("storage_path"),
             "storage_kind": r.get::<String, _>("storage_kind"),
-            "expires_at": r.try_get::<String, _>("expires_at").ok(),
-            "deleted_at": r.try_get::<String, _>("deleted_at").ok(),
+            "expires_at": r.try_get::<chrono::DateTime<chrono::Utc>, _>("expires_at").ok().map(|d| d.to_rfc3339()),
+            "deleted_at": r.try_get::<chrono::DateTime<chrono::Utc>, _>("deleted_at").ok().map(|d| d.to_rfc3339()),
             "uploaded_by": r.try_get::<i64, _>("uploaded_by").ok(),
             "chat_id": r.try_get::<i64, _>("chat_id").ok(),
         })

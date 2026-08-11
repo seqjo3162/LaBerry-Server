@@ -70,14 +70,14 @@ async fn get_2fa_status(
     let db = &st.db;
 
     let r = sqlx::query(
-        r#"SELECT is_2fa_enabled FROM users WHERE id = $1"#,
+        r#"SELECT is2fa_enabled FROM users WHERE id = $1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
     .await;
 
     let is_enabled = match r {
-        Ok(Some(row)) => row.get::<bool, _>("is_2fa_enabled"),
+        Ok(Some(row)) => row.get::<bool, _>("is2fa_enabled"),
         _ => false,
     };
 
@@ -110,7 +110,7 @@ async fn setup_2fa(
     let db = &st.db;
 
     let r = sqlx::query(
-        r#"SELECT is_2fa_enabled FROM users WHERE id = $1"#,
+        r#"SELECT is2fa_enabled FROM users WHERE id = $1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -120,6 +120,7 @@ async fn setup_2fa(
         // Generate and store initial backup codes
         let backup_codes = auth::generate_2fa_backup_codes();
         let now = auth::now_iso();
+        let now_str = now.to_rfc3339();
 
         for code in &backup_codes {
             let code_hash = auth::sha256_hex(code);
@@ -138,7 +139,7 @@ async fn setup_2fa(
 
         // Enable 2FA on user account
         let _ = sqlx::query(
-            r#"UPDATE users SET is_2fa_enabled = TRUE WHERE id = $1"#,
+            r#"UPDATE users SET is2fa_enabled = TRUE WHERE id = $1"#,
         )
         .bind(me.id)
         .execute(db)
@@ -147,9 +148,9 @@ async fn setup_2fa(
         return (StatusCode::OK, Json(BackupCodesResponse {
             backup_codes: backup_codes.into_iter().map(|code| BackupCode {
                 code,
-                created_at: now.clone(),
+                created_at: now_str.clone(),
             }).collect(),
-            created_at: now,
+            created_at: now_str,
             note: "⚠️  Save these backup codes in a secure place. Each code can be used ONCE to recover your account if you lose access to your 2FA device.".to_string(),
         })).into_response();
     }
@@ -168,7 +169,7 @@ async fn disable_2fa(
     let db = &st.db;
 
     let result = sqlx::query(
-        r#"UPDATE users SET is_2fa_enabled = FALSE WHERE id = $1"#,
+        r#"UPDATE users SET is2fa_enabled = FALSE WHERE id = $1"#,
     )
     .bind(me.id)
     .execute(db)
@@ -200,7 +201,7 @@ async fn generate_backup_codes(
 
     // Check if 2FA is enabled
     let r = sqlx::query_scalar::<_, bool>(
-        r#"SELECT is_2fa_enabled FROM users WHERE id = $1"#,
+        r#"SELECT is2fa_enabled FROM users WHERE id = $1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -225,6 +226,7 @@ async fn generate_backup_codes(
     // Generate new codes
     let backup_codes = auth::generate_2fa_backup_codes();
     let now = auth::now_iso();
+    let now_str = now.to_rfc3339();
 
     for code in &backup_codes {
         let code_hash = auth::sha256_hex(code);
@@ -244,9 +246,9 @@ async fn generate_backup_codes(
     (StatusCode::OK, Json(BackupCodesResponse {
         backup_codes: backup_codes.into_iter().map(|code| BackupCode {
             code,
-            created_at: now.clone(),
+            created_at: now_str.clone(),
         }).collect(),
-        created_at: now,
+        created_at: now_str,
         note: "⚠️  Your previous backup codes have been invalidated. Save these new codes securely.".to_string(),
     })).into_response()
 }

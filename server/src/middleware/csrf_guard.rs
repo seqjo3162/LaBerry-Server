@@ -25,10 +25,7 @@ pub async fn store_csrf_token(
 ) -> Result<(), sqlx::Error> {
     let token_hash = hash_csrf_token(token);
     let now = auth::now_iso();
-    let expires_at = auth::now_unix() + ttl_seconds;
-    let expires_at_iso = chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at, 0)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| now.clone());
+    let expires_at = now + chrono::Duration::seconds(ttl_seconds);
 
     sqlx::query(
         r#"
@@ -39,7 +36,7 @@ pub async fn store_csrf_token(
     .bind(&token_hash)
     .bind(user_id)
     .bind(&now)
-    .bind(&expires_at_iso)
+    .bind(&expires_at)
     .execute(db)
     .await?;
 

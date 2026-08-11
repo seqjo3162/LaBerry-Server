@@ -280,7 +280,7 @@ pub async fn my_status(
     if let Some(r) = row {
         let status: String = r.get::<String, _>("status");
         let is_online = r.get::<bool, _>("is_online");
-        let updated_at: Option<String> = r.get("updated_at");
+        let updated_at: Option<String> = r.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at").ok().map(|d| d.to_rfc3339());
         return (StatusCode::OK, Json(MyStatus { status, is_online, updated_at })).into_response();
     }
 
@@ -293,7 +293,7 @@ pub async fn my_status(
     .execute(db)
     .await;
 
-    (StatusCode::OK, Json(MyStatus { status: "online".to_string(), is_online: false, updated_at: Some(now) })).into_response()
+    (StatusCode::OK, Json(MyStatus { status: "online".to_string(), is_online: false, updated_at: Some(now.to_rfc3339()) })).into_response()
 }
 
 pub async fn set_my_status(
@@ -334,7 +334,7 @@ pub async fn set_my_status(
     .flatten()
     .unwrap_or(false);
 
-    (StatusCode::OK, Json(MyStatus { status, is_online, updated_at: Some(now) })).into_response()
+    (StatusCode::OK, Json(MyStatus { status, is_online, updated_at: Some(now.to_rfc3339()) })).into_response()
 }
 
 pub async fn set_cookie_consent(
@@ -412,7 +412,7 @@ pub async fn set_cookie_consent(
     .bind(&review_reason)
     .bind(status)
     .bind(status)
-    .bind(if body.accepted { None::<String> } else { Some(now.clone()) })
+    .bind(if body.accepted { None } else { Some(now) })
     .bind(me.id)
     .execute(db)
     .await;
@@ -509,7 +509,7 @@ pub async fn change_username(
     }
 
     let taken = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM users WHERE username = $1 AND id != $2 LIMIT 1",
+        "SELECT 1::bigint FROM users WHERE username = $1 AND id != $2 LIMIT 1",
     )
     .bind(&new_username)
     .bind(me.id)
@@ -601,7 +601,7 @@ pub async fn request_email_code(
     };
 
     let taken = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM users WHERE email = $1 AND id != $2 LIMIT 1",
+        "SELECT 1::bigint FROM users WHERE email = $1 AND id != $2 LIMIT 1",
     )
     .bind(&email)
     .bind(me.id)
@@ -638,12 +638,11 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    let now = auth::now_unix();
-    let now_s = now.to_string();
+    let now = auth::now_iso();
     let _ = sqlx::query(
         "UPDATE email_codes SET consumed_at = $1 WHERE user_id = $2 AND purpose = $3 AND consumed_at IS NULL",
     )
-    .bind(&now_s)
+    .bind(&now)
     .bind(me.id)
     .bind(&purpose)
     .execute(db)
@@ -651,7 +650,7 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
 
     let code = auth::generate_2fa_code_6();
     let code_hash = auth::sha256_hex(&format!("{}:{}:{}", me.id, &purpose, &code));
-    let expires_at = (now + 10 * 60).to_string();
+    let expires_at = now + chrono::Duration::seconds(10 * 60);
 
     let ins = sqlx::query(
         r#"
@@ -663,7 +662,7 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
     .bind(&purpose)
     .bind(&code_hash)
     .bind(&email)
-    .bind(&now_s)
+    .bind(&now)
     .bind(&expires_at)
     .execute(db)
     .await;
@@ -726,8 +725,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     )
         .into_response();
 }
-    let now = auth::now_unix();
-    let now_s = now.to_string();
+    let now = auth::now_iso();
     let want_hash = auth::sha256_hex(&format!("{}:{}:{}", me.id, &purpose, code));
 
     let row = sqlx::query(
@@ -756,11 +754,10 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
 
     let code_id: i64 = r.get("id");
     let code_hash: String = r.get("code_hash");
-    let expires_at: String = r.get("expires_at");
-    let exp = expires_at.parse::<i64>().unwrap_or(0);
-    if exp <= now {
+    let expires_at: chrono::DateTime<chrono::Utc> = r.get("expires_at");
+    if expires_at <= chrono::Utc::now() {
         let _ = sqlx::query("UPDATE email_codes SET consumed_at = $1 WHERE id = $2")
-            .bind(&now_s)
+            .bind(&now)
             .bind(code_id)
             .execute(db)
             .await;
@@ -780,7 +777,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     }
 
     let _ = sqlx::query("UPDATE email_codes SET consumed_at = $1 WHERE id = $2")
-        .bind(&now_s)
+        .bind(&now)
         .bind(code_id)
         .execute(db)
         .await;
@@ -803,7 +800,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     };
 
     let taken = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM users WHERE email = $1 AND id != $2 LIMIT 1",
+        "SELECT 1::bigint FROM users WHERE email = $1 AND id != $2 LIMIT 1",
     )
     .bind(&pending_email)
     .bind(me.id)

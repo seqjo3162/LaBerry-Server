@@ -152,7 +152,7 @@ async fn upload(
             original_name,
             file_size: file_bytes.len() as i64,
             mime_type,
-            created_at,
+            created_at: created_at.to_rfc3339(),
         }),
     )
         .into_response()

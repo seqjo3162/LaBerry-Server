@@ -149,7 +149,7 @@ async fn get_one(
         sender_username: r.get("sender_username"),
         sender_avatar_file_id: r.try_get::<i64, _>("sender_avatar_file_id").ok(),
         content: r.get::<String, _>("content"),
-        timestamp: r.get::<String, _>("timestamp"),
+        timestamp: r.get::<chrono::DateTime<chrono::Utc>, _>("timestamp").to_rfc3339(),
         reply_to_id: r.try_get::<i64, _>("reply_to_id").ok(),
     };
 
@@ -198,7 +198,7 @@ async fn can_access_message(
 
     let allowed = if let Some(sid) = server_id.filter(|sid| *sid > 0) {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(user_id)
@@ -208,7 +208,7 @@ async fn can_access_message(
     } else {
         // Support both current and legacy DM/private chat rows.
         let in_participants = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(user_id)
@@ -220,7 +220,7 @@ async fn can_access_message(
             true
         } else {
             sqlx::query_scalar::<_, i64>(
-                "SELECT 1 FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
+                "SELECT 1::bigint FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
             )
             .bind(chat_id)
             .bind(user_id)
@@ -536,7 +536,7 @@ pub async fn list(
 
     // проверка: пользователь состоит в сервере
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -652,7 +652,7 @@ pub async fn list(
         let mut content: String = r.get("content");
 
         let blocked = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2 LIMIT 1",
         )
         .bind(me.id)
         .bind(sender_id)
@@ -690,7 +690,7 @@ pub async fn list(
             sender_username: r.get("sender_username"),
             sender_avatar_file_id,
             content,
-            timestamp: r.get("timestamp"),
+            timestamp: r.get::<chrono::DateTime<chrono::Utc>, _>("timestamp").to_rfc3339(),
             reply_to_id,
             reply_preview,
             reactions: None,
@@ -816,7 +816,7 @@ pub async fn send(
 
     // проверка: пользователь состоит в сервере
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -860,7 +860,7 @@ pub async fn send(
 
     if let Some(reply_to_id) = body.reply_to_id {
         let reply_ok = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM messages WHERE id = $1 AND chat_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM messages WHERE id = $1 AND chat_id = $2 LIMIT 1",
         )
         .bind(reply_to_id)
         .bind(chat_id)

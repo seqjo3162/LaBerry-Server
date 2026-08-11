@@ -257,7 +257,7 @@ async fn ensure_default_channels(db: &sqlx::PgPool, server_id: i64) {
     // Плюс это чинит старые сервера, созданные до добавления voice.
 
     let has_text = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chats WHERE server_id = $1 AND LOWER(TRIM(COALESCE(kind,'text'))) = 'text' LIMIT 1",
+        "SELECT 1::bigint FROM chats WHERE server_id = $1 AND LOWER(TRIM(COALESCE(kind,'text'))) = 'text' LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -267,7 +267,7 @@ async fn ensure_default_channels(db: &sqlx::PgPool, server_id: i64) {
     .is_some();
 
     let has_voice = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chats WHERE server_id = $1 AND LOWER(TRIM(COALESCE(kind,'text'))) = 'voice' LIMIT 1",
+        "SELECT 1::bigint FROM chats WHERE server_id = $1 AND LOWER(TRIM(COALESCE(kind,'text'))) = 'voice' LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -341,7 +341,7 @@ async fn create_chat(
 
     // membership check
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -424,7 +424,7 @@ async fn delete_chat(
 
     // membership check
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -679,7 +679,7 @@ async fn list(
             id: r.get("id"),
             name: r.get("name"),
             owner_id: r.get("owner_id"),
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
             is_public: r.get::<bool, _>("is_public"),
             my_role: r.get::<String, _>("my_role"),
         })
@@ -711,7 +711,7 @@ async fn discover(
         FROM servers s
         WHERE ($1 = '' OR s.name LIKE $2)
           AND NOT EXISTS (
-                SELECT 1 FROM server_members m
+                SELECT 1::bigint FROM server_members m
                 WHERE m.server_id = s.id AND m.user_id = $3
           )
         ORDER BY members_count DESC, s.id DESC
@@ -730,7 +730,7 @@ async fn discover(
         id: r.get("id"),
         name: r.get("name"),
         owner_id: r.get("owner_id"),
-        created_at: r.get("created_at"),
+        created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         is_public: r.get::<bool, _>("is_public"),
         members_count: r.get::<i64, _>("members_count"),
     }).collect::<Vec<_>>();
@@ -763,7 +763,7 @@ async fn create_join_request(
     let is_public = r.get::<bool, _>("is_public");
 
     let already_member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -795,7 +795,7 @@ async fn create_join_request(
     let from_server_id = match body.from_server_id {
         Some(v) if v > 0 => {
             let allowed = sqlx::query_scalar::<_, i64>(
-                "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+                "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
             )
             .bind(v)
             .bind(me.id)
@@ -929,7 +929,7 @@ fn join_request_from_row(r: sqlx::postgres::PgRow) -> JoinRequestView {
         from_server_id: r.try_get("from_server_id").ok(),
         from_server_name: r.try_get("from_server_name").ok(),
         status: r.get("status"),
-        created_at: r.get("created_at"),
+        created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
     }
 }
 
@@ -1039,7 +1039,7 @@ async fn invite_member(
     let db = &st.db;
 
     let exists = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM servers WHERE id = $1 LIMIT 1",
+        "SELECT 1::bigint FROM servers WHERE id = $1 LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -1093,7 +1093,7 @@ async fn list_chats(
     let db = &st.db;
 
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -1171,7 +1171,7 @@ async fn list_chats(
             kind: r.get("kind"),
             server_id: r.get("server_id"),
             is_private: r.get::<bool, _>("is_private") as i64,
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
             unread_count: r.get::<i64, _>("unread_count"),
             last_message_id: r.try_get("last_message_id").ok(),
             last_message_sender: r.try_get("last_message_sender").ok(),
@@ -1191,7 +1191,7 @@ async fn list_members(
 
     // membership check
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -1465,7 +1465,7 @@ async fn server_remove_user(
         }
 
         let member = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(me.id)
@@ -1498,7 +1498,7 @@ async fn server_remove_user(
     }
 
     let target_member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(body.user_id)

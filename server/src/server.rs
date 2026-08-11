@@ -182,7 +182,7 @@ pub async fn run_server(
                             Ok(rows) => if rows > 0 { tracing::info!("[CLEANUP] Deleted {} rate limit logs", rows); },
                             Err(e) => tracing::error!("[ERROR] Failed to cleanup rate limit logs: {}", e),
                         }
-                        let now = chrono::Utc::now().to_rfc3339();
+                        let now = chrono::Utc::now();
                         match sqlx::query(r#"DELETE FROM csrf_tokens WHERE expires_at < $1"#)
                             .bind(&now)
                             .execute(&cleanup_db)

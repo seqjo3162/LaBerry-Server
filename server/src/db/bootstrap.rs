@@ -12,7 +12,7 @@ async fn ensure_voice_channel(db: &PgPool, server_id: i64) -> anyhow::Result<()>
         INSERT INTO chats (server_id, name, kind, created_at)
         SELECT $1, 'General chat', 'voice', $2
         WHERE NOT EXISTS (
-            SELECT 1 FROM chats
+            SELECT 1::bigint FROM chats
             WHERE server_id = $1 AND kind = 'voice' AND name = 'General chat'
         )
         "#

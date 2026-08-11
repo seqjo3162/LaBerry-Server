@@ -41,7 +41,7 @@ pub async fn save_room_key(
     Json(body): Json<SaveRoomKeyBody>,
 ) -> impl IntoResponse {
     let is_participant = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1"
+        "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1"
     )
     .bind(chat_id)
     .bind(me.id)
@@ -55,7 +55,7 @@ pub async fn save_room_key(
         return StatusCode::FORBIDDEN.into_response();
     }
     
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = chrono::Utc::now();
     let result = sqlx::query(
         "INSERT INTO e2ee_room_keys (user_id, chat_id, encrypted_key, nonce, created_at)
          VALUES ($1, $2, $3, $4, $5)

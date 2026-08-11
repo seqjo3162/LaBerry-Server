@@ -118,7 +118,7 @@ async fn get_user_settings_json(db: &PgPool, user_id: i64) -> Value {
 async fn have_mutual_friend(db: &PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT 1
+        SELECT 1::bigint
         FROM friendships f1
         JOIN friendships f2 ON f1.friend_id = f2.friend_id
         WHERE f1.user_id = $1 AND f2.user_id = $2
@@ -137,7 +137,7 @@ async fn have_mutual_friend(db: &PgPool, a: i64, b: i64) -> bool {
 async fn share_server(db: &PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT 1
+        SELECT 1::bigint
         FROM server_members s1
         JOIN server_members s2 ON s1.server_id = s2.server_id
         WHERE s1.user_id = $1 AND s2.user_id = $2
@@ -227,7 +227,7 @@ async fn request_friend(
     }
 
     let already = sqlx::query_scalar::<_, i64>(
-        r#"SELECT 1 FROM friendships
+        r#"SELECT 1::bigint FROM friendships
            WHERE (user_id = $1 AND friend_id = $2)
               OR (user_id = $3 AND friend_id = $4)
            LIMIT 1"#,
@@ -251,7 +251,7 @@ async fn request_friend(
     }
 
     let already_pending = sqlx::query_scalar::<_, i64>(
-        r#"SELECT 1 FROM friend_requests
+        r#"SELECT 1::bigint FROM friend_requests
            WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'
            LIMIT 1"#,
     )
@@ -272,7 +272,7 @@ async fn request_friend(
     }
 
     let incoming_pending = sqlx::query_scalar::<_, i64>(
-        r#"SELECT 1 FROM friend_requests
+        r#"SELECT 1::bigint FROM friend_requests
            WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'
            LIMIT 1"#,
     )
@@ -356,7 +356,7 @@ async fn incoming(State(st): State<AppState>, headers: HeaderMap) -> impl IntoRe
             sender_id: r.get("sender_id"),
             receiver_id: r.get("receiver_id"),
             status: r.get("status"),
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
             is_favorite: false,
         })
         .collect::<Vec<_>>();
@@ -400,7 +400,7 @@ async fn outgoing(State(st): State<AppState>, headers: HeaderMap) -> impl IntoRe
             sender_id: r.get("sender_id"),
             receiver_id: r.get("receiver_id"),
             status: r.get("status"),
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
             is_favorite: false,
         })
         .collect::<Vec<_>>();
@@ -655,7 +655,7 @@ async fn list_friends(State(st): State<AppState>, headers: HeaderMap) -> impl In
             username: r.get("username"),
             is_online: r.get::<i64, _>("is_online") != 0,
             status: r.get::<String, _>("status"),
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
             is_favorite: false,
         })
         .collect::<Vec<_>>();
@@ -708,7 +708,7 @@ async fn list_active_friends(State(st): State<AppState>, headers: HeaderMap) -> 
             username: r.get("username"),
             is_online: r.get::<i64, _>("is_online") != 0,
             status: r.get::<String, _>("status"),
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
             is_favorite: false,
         })
         .collect::<Vec<_>>();

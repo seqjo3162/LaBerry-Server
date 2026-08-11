@@ -40,7 +40,7 @@ async fn exec_sql(db: &PgPool, sql: &str) -> anyhow::Result<()> {
 async fn column_exists(db: &PgPool, table: &str, column: &str) -> anyhow::Result<bool> {
     let row: (bool,) = sqlx::query_as(
         "SELECT EXISTS(
-            SELECT 1 FROM information_schema.columns
+            SELECT 1::bigint FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
         )"
     )
@@ -116,7 +116,7 @@ pub async fn init(db: &PgPool) -> anyhow::Result<()> {
             .col(ColumnDef::new(UserIden::PasswordHash).string().not_null())
             .col(ColumnDef::new(UserIden::IsBanned).boolean().not_null().default(false))
             .col(ColumnDef::new(UserIden::CreatedAt).timestamp_with_time_zone().not_null())
-            .col(ColumnDef::new(UserIden::TokenVersion).integer().not_null().default(1))
+            .col(ColumnDef::new(UserIden::TokenVersion).big_integer().not_null().default(1))
             .col(ColumnDef::new(UserIden::Is2faEnabled).boolean().not_null().default(false))
             .col(ColumnDef::new(UserIden::TwoFactorSecretCodeHash).string())
             .col(ColumnDef::new(UserIden::TwoFactorCodeSentAt).timestamp_with_time_zone())
@@ -125,12 +125,12 @@ pub async fn init(db: &PgPool) -> anyhow::Result<()> {
             .col(ColumnDef::new(UserIden::TermsAgreementVersion).string())
             .col(ColumnDef::new(UserIden::CookieConsentStatus).string().not_null().default("unknown"))
             .col(ColumnDef::new(UserIden::CookieConsentAt).timestamp_with_time_zone())
-            .col(ColumnDef::new(UserIden::TrustFactor).integer().not_null().default(100))
+            .col(ColumnDef::new(UserIden::TrustFactor).big_integer().not_null().default(100))
             .col(ColumnDef::new(UserIden::TrustReviewStatus).string().not_null().default("clear"))
             .col(ColumnDef::new(UserIden::TrustReviewReason).string())
             .col(ColumnDef::new(UserIden::TrustReviewAt).timestamp_with_time_zone())
                         .col(ColumnDef::new(UserIden::TwoFactorCodeExpiresAt).timestamp_with_time_zone())
-            .col(ColumnDef::new(UserIden::TwoFactorCodeAttempts).integer().not_null().default(0))
+            .col(ColumnDef::new(UserIden::TwoFactorCodeAttempts).big_integer().not_null().default(0))
             .col(ColumnDef::new(UserIden::TwoFactorLockedUntil).timestamp_with_time_zone())
             .to_string(PostgresQueryBuilder);
         exec_sql(db, &sql).await?;
@@ -652,12 +652,12 @@ pub async fn init(db: &PgPool) -> anyhow::Result<()> {
         add_column_if_not_exists(db, "users", "terms_agreement_version TEXT", "terms_agreement_version").await?;
         add_column_if_not_exists(db, "users", "cookie_consent_status TEXT NOT NULL DEFAULT 'unknown'", "cookie_consent_status").await?;
         add_column_if_not_exists(db, "users", "cookie_consent_at TIMESTAMPTZ", "cookie_consent_at").await?;
-        add_column_if_not_exists(db, "users", "trust_factor INTEGER NOT NULL DEFAULT 100", "trust_factor").await?;
+        add_column_if_not_exists(db, "users", "trust_factor BIGINT NOT NULL DEFAULT 100", "trust_factor").await?;
         add_column_if_not_exists(db, "users", "trust_review_status TEXT NOT NULL DEFAULT 'clear'", "trust_review_status").await?;
         add_column_if_not_exists(db, "users", "trust_review_reason TEXT", "trust_review_reason").await?;
         add_column_if_not_exists(db, "users", "trust_review_at TIMESTAMPTZ", "trust_review_at").await?;
         add_column_if_not_exists(db, "users", "two_factor_code_expires_at TIMESTAMPTZ", "two_factor_code_expires_at").await?;
-        add_column_if_not_exists(db, "users", "two_factor_code_attempts INTEGER NOT NULL DEFAULT 0", "two_factor_code_attempts").await?;
+        add_column_if_not_exists(db, "users", "two_factor_code_attempts BIGINT NOT NULL DEFAULT 0", "two_factor_code_attempts").await?;
         add_column_if_not_exists(db, "users", "two_factor_locked_until TIMESTAMPTZ", "two_factor_locked_until").await?;
 
         add_column_if_not_exists(db, "servers", "is_public BOOLEAN NOT NULL DEFAULT true", "is_public").await?;

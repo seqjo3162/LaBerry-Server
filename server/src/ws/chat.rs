@@ -901,7 +901,7 @@ async fn is_voice_allowed(db: &PgPool, chat_id: i64) -> bool {
     is_private && server_id.is_none()
 }
 
-async fn persist_message(db: &PgPool, chat_id: i64, user_id: UserId, content: &str, ts: &str) -> i64 {
+async fn persist_message(db: &PgPool, chat_id: i64, user_id: UserId, content: &str, ts: &chrono::DateTime<chrono::Utc>) -> i64 {
     let res = sqlx::query_scalar::<_, i64>(
         r#"INSERT INTO messages (chat_id, sender_id, content, timestamp)
            VALUES ($1, $2, $3, $4) RETURNING id"#,
@@ -970,7 +970,7 @@ async fn can_access_chat(db: &PgPool, user_id: UserId, chat_id: i64) -> bool {
 
     if is_private {
         return sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(user_id)
@@ -983,7 +983,7 @@ async fn can_access_chat(db: &PgPool, user_id: UserId, chat_id: i64) -> bool {
 
     if let Some(sid) = server_id {
         return sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(user_id)
@@ -995,7 +995,7 @@ async fn can_access_chat(db: &PgPool, user_id: UserId, chat_id: i64) -> bool {
     }
 
     sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(chat_id)
     .bind(user_id)

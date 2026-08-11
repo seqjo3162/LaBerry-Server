@@ -30,7 +30,6 @@ const MAX_IMAGE_DIM: u32 = 12000;
 const MAX_IMAGE_PIXELS: u64 = 80_000_000;
 const THUMB_MAX_W: u32 = 800;
 const THUMB_MAX_H: u32 = 800;
-const TEMP_FILE_EXPIRES_SQL_MODIFIER: &str = "+24 hours";
 const ORPHAN_CLEANUP_GRACE_SECS: u64 = 60 * 60;
 
 pub fn router() -> Router<AppState> {
@@ -157,7 +156,7 @@ pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat
 
     if let Some(server_id) = chat.server_id.filter(|sid| *sid > 0) {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(user_id)
@@ -168,7 +167,7 @@ pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat
         .is_some()
     } else {
         let in_participants = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(user_id)
@@ -182,7 +181,7 @@ pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat
             true
         } else {
             sqlx::query_scalar::<_, i64>(
-                "SELECT 1 FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
+                "SELECT 1::bigint FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
             )
             .bind(chat_id)
             .bind(user_id)

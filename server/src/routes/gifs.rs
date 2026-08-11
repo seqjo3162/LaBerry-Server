@@ -159,7 +159,7 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
     let server_id: Option<i64> = chat.try_get("server_id").ok();
     if let Some(server_id) = server_id.filter(|sid| *sid > 0) {
         return sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(user_id)
@@ -171,7 +171,7 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
     }
 
     let in_participants = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(chat_id)
     .bind(user_id)
@@ -186,7 +186,7 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
     }
 
     sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
+        "SELECT 1::bigint FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
     )
     .bind(chat_id)
     .bind(user_id)
@@ -221,7 +221,7 @@ async fn load_asset(db: &PgPool, asset_id: i64) -> anyhow::Result<Option<GifAsse
         file_size: r.get("file_size"),
         mime_type: r.get("mime_type"),
         storage_path: r.get("storage_path"),
-        created_at: r.get("created_at"),
+        created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
     }))
 }
 
@@ -311,7 +311,7 @@ async fn list_gifs(State(st): State<AppState>, me: AuthUser) -> impl IntoRespons
             file_size: r.get("file_size"),
             mime_type: r.get("mime_type"),
             storage_path: r.get("storage_path"),
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         })
         .collect();
 
@@ -479,10 +479,7 @@ async fn clone_gif_to_chat(
     }
 
     let created_at = auth::now_iso();
-    let expires_at = sqlx::query_scalar::<_, String>(r#"SELECT to_char(now() + interval '24 hours', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')"#)
-        .fetch_one(&st.db)
-        .await
-        .unwrap_or_else(|_| created_at.clone());
+    let expires_at = created_at + chrono::Duration::hours(24);
 
     let res = sqlx::query_scalar::<_, i64>(
         r#"

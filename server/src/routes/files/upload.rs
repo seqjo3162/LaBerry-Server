@@ -17,7 +17,6 @@ use tracing;
 
 use super::can_access_chat_by_user_id;
 use super::{MAX_IMAGE_DIM, MAX_IMAGE_PIXELS, MAX_UPLOAD_BYTES, THUMB_MAX_W, THUMB_MAX_H, ORPHAN_CLEANUP_GRACE_SECS};
-use super::TEMP_FILE_EXPIRES_SQL_MODIFIER;
 
 fn upload_json_error(status: StatusCode, detail: &'static str) -> axum::response::Response {
     (status, Json(serde_json::json!({ "detail": detail }))).into_response()
@@ -148,7 +147,7 @@ pub(crate) async fn cleanup_file_artifacts_if_unreferenced(
 }
 
 pub(crate) async fn mark_file_expired(st: &AppState, file_id: i64, storage_path: &str, filename: &str) {
-    let deleted_at = sqlite_now_iso(st)
+    let deleted_at = sqlite_now_iso()
         .await
         .unwrap_or_else(|_| auth::now_iso());
 
@@ -892,21 +891,12 @@ fn detect_upload_type(head: &[u8], original_name: &str, provided_mime: &str) -> 
     ("application/octet-stream".to_string(), "bin".to_string())
 }
 
-async fn temporary_file_expires_at(st: &AppState) -> Result<String, StatusCode> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT to_char(now() + ($1::text)::interval, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
-    )
-    .bind(TEMP_FILE_EXPIRES_SQL_MODIFIER)
-    .fetch_one(&st.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+fn temporary_file_expires_at() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::Duration::hours(24)
 }
 
-async fn sqlite_now_iso(st: &AppState) -> Result<String, StatusCode> {
-    sqlx::query_scalar::<_, String>("SELECT to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
-        .fetch_one(&st.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+async fn sqlite_now_iso() -> Result<chrono::DateTime<chrono::Utc>, StatusCode> {
+    Ok(chrono::Utc::now())
 }
 
 pub(crate) async fn upload_file(
@@ -1178,14 +1168,7 @@ pub(crate) async fn upload_file(
     let stored_filename = final_filename.to_owned();
 
     let created_at = auth::now_iso();
-    let expires_at = match temporary_file_expires_at(&st).await {
-        Ok(v) => v,
-        Err(code) => {
-            let _ = fs::remove_file(&path).await;
-            let _ = fs::remove_file(thumb_path_for(&stored_filename)).await;
-            return upload_json_error(code, "expires_at_failed");
-        }
-    };
+    let expires_at = temporary_file_expires_at();
     let file_id = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO files (

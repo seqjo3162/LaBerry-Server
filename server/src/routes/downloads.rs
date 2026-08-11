@@ -112,7 +112,7 @@ async fn list_downloads(State(st): State<AppState>) -> impl IntoResponse {
                 version: r.try_get("version").unwrap_or_default(),
                 original_name: r.try_get("original_name").ok(),
                 file_size: r.try_get("file_size").ok(),
-                uploaded_at: r.try_get("uploaded_at").ok(),
+                uploaded_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("uploaded_at").ok().map(|d| d.to_rfc3339()),
                 available: true,
                 download_url: Some(format!("/api/downloads/{}/file", platform)),
             });

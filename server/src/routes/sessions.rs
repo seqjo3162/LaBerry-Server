@@ -48,13 +48,13 @@ async fn list_my(State(st): State<AppState>, me: AuthUser) -> impl IntoResponse 
     let out = rows
         .into_iter()
         .map(|r| {
-            let revoked_at: Option<String> = r.try_get("revoked_at").ok();
+            let revoked_at: Option<String> = r.try_get::<chrono::DateTime<chrono::Utc>, _>("revoked_at").ok().map(|d| d.to_rfc3339());
             let token_hash: String = r.get("token_hash");
             SessionView {
                 id: r.get("id"),
                 user_agent: r.try_get("user_agent").ok(),
-                created_at: r.try_get("created_at").unwrap_or_else(|_| String::new()),
-                last_seen_at: r.try_get("last_seen_at").unwrap_or_else(|_| String::new()),
+                created_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at").ok().map(|d| d.to_rfc3339()).unwrap_or_default(),
+                last_seen_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("last_seen_at").ok().map(|d| d.to_rfc3339()).unwrap_or_default(),
                 is_current: token_hash == me.token_hash,
                 is_active: revoked_at.is_none(),
                 revoked_at,

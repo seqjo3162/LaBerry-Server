@@ -1618,19 +1618,19 @@ fn map_user_row(r: sqlx::postgres::PgRow) -> UserRow {
         username: r.get("username"),
         email: r.get("email"),
         is_banned: r.get::<bool, _>("is_banned"),
-        created_at: r.get("created_at"),
+        created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         is_online: r.get::<bool, _>("is_online"),
         presence_status: r.get("presence_status"),
-        presence_updated_at: r.get("presence_updated_at"),
+        presence_updated_at: r.get::<chrono::DateTime<chrono::Utc>, _>("presence_updated_at").to_rfc3339(),
         avatar_file_id: r.get("avatar_file_id"),
         ban_reason: r.get("ban_reason"),
-        ban_at: r.get("ban_at"),
+        ban_at: r.get::<chrono::DateTime<chrono::Utc>, _>("ban_at").to_rfc3339(),
         cookie_consent_status: r.get("cookie_consent_status"),
-        cookie_consent_at: r.get("cookie_consent_at"),
+        cookie_consent_at: r.get::<chrono::DateTime<chrono::Utc>, _>("cookie_consent_at").to_rfc3339(),
         trust_factor: r.get("trust_factor"),
         trust_review_status: r.get("trust_review_status"),
         trust_review_reason: r.get("trust_review_reason"),
-        trust_review_at: r.get("trust_review_at"),
+        trust_review_at: r.get::<chrono::DateTime<chrono::Utc>, _>("trust_review_at").to_rfc3339(),
     }
 }
 
@@ -1746,7 +1746,7 @@ async fn fetch_user_reports(db: &PgPool, user_id: i64, limit: i64) -> anyhow::Re
             reason: r.get("reason"),
             message: r.get("message"),
             status: r.get("status"),
-            created_at: r.get("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         })
         .collect())
 }
@@ -1793,8 +1793,8 @@ async fn fetch_suggestions(db: &PgPool, status: &str, limit: i64) -> anyhow::Res
             title: r.get("title"),
             message: r.get("message"),
             status: r.get("status"),
-            created_at: r.get("created_at"),
-            reviewed_at: r.try_get("reviewed_at").ok(),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+            reviewed_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("reviewed_at").ok().map(|d| d.to_rfc3339()),
             admin_note: r.get("admin_note"),
         })
         .collect())
@@ -1821,7 +1821,7 @@ async fn fetch_test_users(db: &PgPool, re: &Regex, limit: i64) -> anyhow::Result
                 username,
                 email,
                 is_banned: r.get::<bool, _>("is_banned"),
-                created_at: r.get("created_at"),
+                created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
                 is_online: false,
                 presence_status: "offline".to_string(),
                 presence_updated_at: String::new(),

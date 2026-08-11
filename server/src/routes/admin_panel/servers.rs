@@ -24,7 +24,7 @@ pub(crate) async fn fetch_servers(db: &PgPool, q: &str, limit: i64) -> anyhow::R
         ).bind(limit).fetch_all(db).await?;
         return Ok(rows.into_iter().map(|r| ServerRow {
             id: r.get("id"), name: r.get("name"), owner_id: r.get("owner_id"),
-            owner_username: r.get("owner_username"), created_at: r.get("created_at"),
+            owner_username: r.get("owner_username"), created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         }).collect());
     }
     if let Ok(id) = q.parse::<i64>() {
@@ -34,7 +34,7 @@ pub(crate) async fn fetch_servers(db: &PgPool, q: &str, limit: i64) -> anyhow::R
         ).bind(id).bind(limit).fetch_all(db).await?;
         return Ok(rows.into_iter().map(|r| ServerRow {
             id: r.get("id"), name: r.get("name"), owner_id: r.get("owner_id"),
-            owner_username: r.get("owner_username"), created_at: r.get("created_at"),
+            owner_username: r.get("owner_username"), created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
         }).collect());
     }
     let like = format!("%{}%", q);
@@ -44,7 +44,7 @@ pub(crate) async fn fetch_servers(db: &PgPool, q: &str, limit: i64) -> anyhow::R
     ).bind(&like).bind(limit).fetch_all(db).await?;
     Ok(rows.into_iter().map(|r| ServerRow {
         id: r.get("id"), name: r.get("name"), owner_id: r.get("owner_id"),
-        owner_username: r.get("owner_username"), created_at: r.get("created_at"),
+        owner_username: r.get("owner_username"), created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
     }).collect())
 }
 
@@ -136,7 +136,7 @@ pub(crate) async fn server_add_all_users(State(st): State<AppState>, ConnectInfo
     let (_sid, sess) = match require_auth(&st, &headers) { Ok(v) => v, Err(r) => return r.into_response() };
     let return_to = safe_admin_return_to(&f.return_to, "/admin/servers");
     if f.csrf != sess.csrf { return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response(); }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM servers WHERE id = $1 LIMIT 1").bind(id).fetch_optional(&st.db).await.ok().flatten().is_some();
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1::bigint FROM servers WHERE id = $1 LIMIT 1").bind(id).fetch_optional(&st.db).await.ok().flatten().is_some();
     if !exists { return admin_redirect_with_msg(&return_to, "Сервер не найден").into_response(); }
     let res = sqlx::query(r#"INSERT INTO server_members(server_id, user_id, role) SELECT $1, id, 'member' FROM users WHERE NOT is_banned ON CONFLICT DO NOTHING"#).bind(id).execute(&st.db).await;
     match res {

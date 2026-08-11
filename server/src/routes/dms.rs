@@ -112,7 +112,7 @@ pub fn router() -> Router<AppState> {
 async fn is_blocked_pair(db: &sqlx::PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT 1
+        SELECT 1::bigint
         FROM user_blocks
         WHERE (blocker_id = $1 AND blocked_id = $2)
            OR (blocker_id = $3 AND blocked_id = $4)
@@ -145,7 +145,7 @@ async fn can_dm(db: &sqlx::PgPool, me: i64, other: i64) -> bool {
         .unwrap_or_else(|| "friends_and_server".to_string());
 
     let are_friends = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM friendships WHERE user_id = $1 AND friend_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM friendships WHERE user_id = $1 AND friend_id = $2 LIMIT 1",
     )
     .bind(me)
     .bind(other)
@@ -157,7 +157,7 @@ async fn can_dm(db: &sqlx::PgPool, me: i64, other: i64) -> bool {
 
     let share_server = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT 1
+        SELECT 1::bigint
         FROM server_members s1
         JOIN server_members s2 ON s1.server_id = s2.server_id
         WHERE s1.user_id = $1 AND s2.user_id = $2
@@ -533,7 +533,7 @@ async fn list_my(
             member_count,
             member_names,
             last_message_id: r.try_get("last_message_id").ok(),
-            last_message_at: r.try_get("last_message_at").ok(),
+            last_message_at: r.try_get::<chrono::DateTime<chrono::Utc>, _>("last_message_at").ok().map(|d| d.to_rfc3339()),
             last_message_preview: r.try_get("last_message_preview").ok(),
         });
     }
@@ -543,7 +543,7 @@ async fn list_my(
 
 async fn ensure_dm_participant(db: &sqlx::PgPool, chat_id: i64, _user_id: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+        "SELECT 1::bigint FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(chat_id)
     .bind(_user_id)
@@ -695,7 +695,7 @@ async fn list_messages(
         let mut content: String = r.get("content");
 
         let blocked = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2 LIMIT 1",
         )
         .bind(me.id)
         .bind(sender_id)
@@ -733,7 +733,7 @@ async fn list_messages(
             sender_username: r.get("sender_username"),
             sender_avatar_file_id,
             content,
-            timestamp: r.get("timestamp"),
+            timestamp: r.get::<chrono::DateTime<chrono::Utc>, _>("timestamp").to_rfc3339(),
             reply_to_id,
             reply_preview,
             reactions: None,
@@ -864,7 +864,7 @@ async fn send_message(
 
     if let Some(reply_to_id) = body.reply_to_id {
         let reply_ok = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM messages WHERE id = $1 AND chat_id = $2 LIMIT 1",
+            "SELECT 1::bigint FROM messages WHERE id = $1 AND chat_id = $2 LIMIT 1",
         )
         .bind(reply_to_id)
         .bind(chat_id)

@@ -564,18 +564,18 @@ async fn search(
            WHERE u.username ILIKE $1
              AND u.id != $2
               AND NOT EXISTS (
-                SELECT 1 FROM user_blocks b
+                SELECT 1::bigint FROM user_blocks b
                 WHERE (b.blocker_id = $3 AND b.blocked_id = u.id)
                    OR (b.blocker_id = u.id AND b.blocked_id = $4)
               )
              AND NOT EXISTS (
-               SELECT 1
+               SELECT 1::bigint
                FROM friendships f
                WHERE (f.user_id = $5 AND f.friend_id = u.id)
                   OR (f.user_id = u.id AND f.friend_id = $6)
              )
              AND NOT EXISTS (
-               SELECT 1
+               SELECT 1::bigint
                FROM friend_requests fr
                WHERE fr.status = 'pending'
                  AND ((fr.sender_id = $7 AND fr.receiver_id = u.id)

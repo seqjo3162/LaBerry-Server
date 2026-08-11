@@ -99,7 +99,7 @@ async fn register(
 
     let username_exists = sqlx::query_scalar::<_, i64>(
         sqlx::AssertSqlSafe(format!(
-            "SELECT 1 FROM {} WHERE {} = $1 LIMIT 1",
+            "SELECT 1::bigint FROM {} WHERE {} = $1 LIMIT 1",
             UserIden::Table.to_string(),
             UserIden::Username.to_string()
         ))
@@ -117,7 +117,7 @@ async fn register(
     if let Some(email) = &body.email {
         let email_exists = sqlx::query_scalar::<_, i64>(
             sqlx::AssertSqlSafe(format!(
-                "SELECT 1 FROM {} WHERE {} = $1 LIMIT 1",
+                "SELECT 1::bigint FROM {} WHERE {} = $1 LIMIT 1",
                 UserIden::Table.to_string(),
                 UserIden::Email.to_string()
             ))
@@ -251,7 +251,7 @@ async fn login(
         let code = auth::generate_2fa_code_6();
         let code_hash = auth::sha256_hex(&code);
         let sent_at = auth::now_iso();
-        let expires_at = (auth::now_unix() + 300).to_string();
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(300);
 
         sqlx::query(
             sqlx::AssertSqlSafe(format!(
@@ -350,7 +350,8 @@ async fn login(
 
     let refresh_claims = auth::decode_refresh_claims(&refresh)
         .map_err(|_| ApiError::Internal("Token error"))?;
-    let expires_at = refresh_claims.exp.to_string();
+    let expires_at = chrono::DateTime::from_timestamp(refresh_claims.exp, 0)
+        .unwrap_or_else(chrono::Utc::now);
 
     let _ = sqlx::query(
         sqlx::AssertSqlSafe(format!(
@@ -422,15 +423,14 @@ async fn verify_2fa(
     let username: String = r.get(UserIden::Username.as_str());
     let token_version: i64 = r.get(UserIden::TokenVersion.as_str());
     let stored_hash: Option<String> = r.get(UserIden::TwoFactorSecretCodeHash.as_str());
-    let expires_at_str: Option<String> = r.get(UserIden::TwoFactorCodeExpiresAt.as_str());
+    let expires_at_dt: Option<chrono::DateTime<chrono::Utc>> = r.get(UserIden::TwoFactorCodeExpiresAt.as_str());
     let attempts: i64 = r.get(UserIden::TwoFactorCodeAttempts.as_str());
-    let locked_until_str: Option<String> = r.get(UserIden::TwoFactorLockedUntil.as_str());
+    let locked_until_dt: Option<chrono::DateTime<chrono::Utc>> = r.get(UserIden::TwoFactorLockedUntil.as_str());
 
     let stored_hash = stored_hash.ok_or(ApiError::NotFound("2FA not active"))?;
 
-    if let Some(locked_until) = locked_until_str {
-        if let Ok(locked_ts) = locked_until.parse::<i64>() {
-            if auth::now_unix() < locked_ts {
+    if let Some(locked_until) = locked_until_dt {
+        if chrono::Utc::now() < locked_until {
                 let _ = sqlx::query(
                     sqlx::AssertSqlSafe(format!(
                         "INSERT INTO {} ({}, {}, {}, {}, {})
@@ -453,11 +453,9 @@ async fn verify_2fa(
                 return Err(ApiError::Forbidden("Account locked. Try again in 15 minutes"));
             }
         }
-    }
 
-    if let Some(exp_at) = expires_at_str {
-        if let Ok(exp_ts) = exp_at.parse::<i64>() {
-            if auth::now_unix() > exp_ts {
+    if let Some(exp_at) = expires_at_dt {
+        if chrono::Utc::now() > exp_at {
                 let _ = sqlx::query(
                     sqlx::AssertSqlSafe(format!(
                         "INSERT INTO {} ({}, {}, {}, {}, {})
@@ -480,7 +478,6 @@ async fn verify_2fa(
                 return Err(ApiError::Unauthorized("2FA code expired. Please request a new one"));
             }
         }
-    }
 
     let code_matches = auth::constant_time_eq(&auth::sha256_hex(&body.code), &stored_hash);
 
@@ -488,7 +485,7 @@ async fn verify_2fa(
         let new_attempts = attempts + 1;
 
         if new_attempts >= 3 {
-            let locked_until = auth::now_unix() + 900;
+            let locked_until = chrono::Utc::now() + chrono::Duration::seconds(900);
             sqlx::query(
                 sqlx::AssertSqlSafe(format!(
                     "UPDATE {}
@@ -502,7 +499,7 @@ async fn verify_2fa(
                     UserIden::Id.to_string())
                 )
             )
-            .bind(locked_until.to_string())
+            .bind(locked_until)
             .bind(user_id)
             .execute(db)
             .await
@@ -597,7 +594,8 @@ async fn verify_2fa(
     let now = auth::now_iso();
     let refresh_claims = auth::decode_refresh_claims(&refresh)
         .map_err(|_| ApiError::Internal("Token error"))?;
-    let expires_at = refresh_claims.exp.to_string();
+    let expires_at = chrono::DateTime::from_timestamp(refresh_claims.exp, 0)
+        .unwrap_or_else(chrono::Utc::now);
 
     let _ = sqlx::query(
         sqlx::AssertSqlSafe(format!(
@@ -707,7 +705,6 @@ async fn refresh(
     }
 
     let now = auth::now_iso();
-    let now_u = auth::now_unix();
 
     let token_hash = auth::sha256_hex(token);
 
@@ -732,14 +729,13 @@ async fn refresh(
     .map_err(|_| ApiError::Internal("Database error"))?
     .ok_or(ApiError::Unauthorized("Invalid token"))?;
 
-    let revoked_at: Option<String> = sess.get(RefreshSessionIden::RevokedAt.as_str());
+    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = sess.get(RefreshSessionIden::RevokedAt.as_str());
     if revoked_at.is_some() {
         return Err(ApiError::Unauthorized("Invalid token"));
     }
 
-    let expires_at: String = sess.get(RefreshSessionIden::ExpiresAt.as_str());
-    let exp = expires_at.parse::<i64>().unwrap_or(0);
-    if exp <= now_u {
+    let expires_at: chrono::DateTime<chrono::Utc> = sess.get(RefreshSessionIden::ExpiresAt.as_str());
+    if expires_at <= chrono::Utc::now() {
         let _ = sqlx::query(
             sqlx::AssertSqlSafe(format!(
                 "UPDATE {}
@@ -791,7 +787,8 @@ async fn refresh(
         .map(|s| s.to_string());
     let ip = rate_limit::extract_ip(&headers, Some(peer.ip()), st.trusted_proxies.as_slice());
 
-    let expires_at_new = refresh_claims.exp.to_string();
+    let expires_at_new = chrono::DateTime::from_timestamp(refresh_claims.exp, 0)
+        .unwrap_or_else(chrono::Utc::now);
 
     let _ = sqlx::query(
         sqlx::AssertSqlSafe(format!(

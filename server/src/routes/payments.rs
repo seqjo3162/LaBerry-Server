@@ -49,7 +49,7 @@ pub struct CreatePaymentResponse {
 async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::PgPool) {
     let duration_days = 30;
     let now = chrono::Utc::now();
-    let expires_at_str = (now + chrono::Duration::days(duration_days)).to_rfc3339();
+    let expires_at = now + chrono::Duration::days(duration_days);
 
     let existing = sqlx::query(
         "SELECT id FROM subscriptions WHERE user_id = $1 AND expires_at > NOW()",
@@ -63,7 +63,7 @@ async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::PgPool) {
     if let Some(row) = existing {
         let sub_id: i64 = row.get(0);
         sqlx::query("UPDATE subscriptions SET expires_at = $1 WHERE id = $2")
-            .bind(&expires_at_str)
+            .bind(&expires_at)
             .bind(sub_id)
             .execute(db)
             .await
@@ -74,7 +74,7 @@ async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::PgPool) {
         )
         .bind(user_id)
         .bind(plan_id)
-        .bind(&expires_at_str)
+        .bind(&expires_at)
         .execute(db)
         .await
         .ok();
