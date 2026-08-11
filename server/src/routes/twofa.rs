@@ -132,7 +132,7 @@ async fn setup_2fa(
             )
             .bind(me.id)
             .bind(&code_hash)
-            .bind(&now)
+            .bind(now)
             .execute(db)
             .await;
         }
@@ -238,7 +238,7 @@ async fn generate_backup_codes(
         )
         .bind(me.id)
         .bind(&code_hash)
-        .bind(&now)
+        .bind(now)
         .execute(db)
         .await;
     }
@@ -322,7 +322,7 @@ async fn verify_backup_code(
     sqlx::query(
         r#"UPDATE two_factor_backup_codes SET is_used = TRUE, used_at = $1 WHERE id = $2"#,
     )
-    .bind(&now)
+    .bind(now)
     .bind(r.get::<i64, _>("id"))
     .execute(db)
     .await

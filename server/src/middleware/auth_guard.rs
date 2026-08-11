@@ -104,7 +104,7 @@ impl FromRequestParts<AppState> for AuthUser {
         }
 
         let _ = sqlx::query("UPDATE user_sessions SET last_seen_at = $1 WHERE token_hash = $2")
-            .bind(&now)
+            .bind(now)
             .bind(&token_hash)
             .execute(&state.db)
             .await;

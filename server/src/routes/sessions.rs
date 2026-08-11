@@ -91,7 +91,7 @@ async fn revoke(
     let ip: Option<String> = session.try_get("ip").ok();
 
     let _ = sqlx::query("UPDATE user_sessions SET revoked_at = $1 WHERE id = $2")
-        .bind(&now)
+        .bind(now)
         .bind(session_id)
         .execute(db)
         .await;
@@ -106,7 +106,7 @@ async fn revoke(
           AND ((ip IS NULL AND $4 IS NULL) OR ip = $4)
         "#,
     )
-    .bind(&now)
+    .bind(now)
     .bind(me.id)
     .bind(user_agent)
     .bind(ip)

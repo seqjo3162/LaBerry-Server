@@ -191,7 +191,7 @@ async fn create(
     .bind(&body.name)
     .bind(body.server_id)
     .bind(is_private)
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(db)
     .await;
 
@@ -614,7 +614,7 @@ async fn mark_read(
     .bind(chat_id)
     .bind(me.id)
     .bind(last_read)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 

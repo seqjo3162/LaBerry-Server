@@ -35,8 +35,8 @@ pub async fn store_csrf_token(
     )
     .bind(&token_hash)
     .bind(user_id)
-    .bind(&now)
-    .bind(&expires_at)
+    .bind(now)
+    .bind(expires_at)
     .execute(db)
     .await?;
 
@@ -54,7 +54,7 @@ pub async fn validate_csrf_token(
     sqlx::query(
         r#"DELETE FROM csrf_tokens WHERE expires_at < $1"#
     )
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await.ok();
 
@@ -66,7 +66,7 @@ pub async fn validate_csrf_token(
     )
     .bind(&token_hash)
     .bind(user_id)
-    .bind(&now)
+    .bind(now)
     .fetch_one(db)
     .await?;
 

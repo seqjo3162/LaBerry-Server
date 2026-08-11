@@ -460,7 +460,7 @@ async fn accept(
     )
     .bind(sender)
     .bind(receiver)
-    .bind(&created_at)
+    .bind(created_at)
     .execute(&st.db)
     .await;
 
@@ -470,7 +470,7 @@ async fn accept(
     )
     .bind(receiver)
     .bind(sender)
-    .bind(&created_at)
+    .bind(created_at)
     .execute(&st.db)
     .await;
 

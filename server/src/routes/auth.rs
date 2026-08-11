@@ -166,8 +166,8 @@ async fn register(
     .bind(&username)
     .bind(&body.email)
     .bind(&password_hash)
-    .bind(&created_at)
-    .bind(&created_at)
+    .bind(created_at)
+    .bind(created_at)
     .bind(agreement_version)
     .fetch_one(db)
     .await
@@ -343,8 +343,8 @@ async fn login(
     .bind(&token_hash)
     .bind(ua.clone())
     .bind(ip.clone())
-    .bind(&now)
-    .bind(&now)
+    .bind(now)
+    .bind(now)
     .execute(db)
     .await;
 
@@ -372,9 +372,9 @@ async fn login(
     .bind(&refresh_hash)
     .bind(ua)
     .bind(ip)
-    .bind(&now)
-    .bind(&now)
-    .bind(&expires_at)
+    .bind(now)
+    .bind(now)
+    .bind(expires_at)
     .execute(db)
     .await;
 
@@ -614,9 +614,9 @@ async fn verify_2fa(
     )
     .bind(user_id)
     .bind(&refresh_hash)
-    .bind(&now)
-    .bind(&now)
-    .bind(&expires_at)
+    .bind(now)
+    .bind(now)
+    .bind(expires_at)
     .execute(db)
     .await;
 
@@ -746,7 +746,7 @@ async fn refresh(
                 RefreshSessionIden::RefreshTokenHash.to_string()
             ))
         )
-        .bind(&now)
+        .bind(now)
         .bind(&token_hash)
         .execute(&st.db)
         .await;
@@ -764,8 +764,8 @@ async fn refresh(
             RefreshSessionIden::RefreshTokenHash.to_string()
         ))
     )
-    .bind(&now)
-    .bind(&now)
+    .bind(now)
+    .bind(now)
     .bind(&token_hash)
     .execute(&st.db)
     .await;
@@ -809,9 +809,9 @@ async fn refresh(
     .bind(&refresh_hash)
     .bind(ua.clone())
     .bind(ip.clone())
-    .bind(&now)
-    .bind(&now)
-    .bind(&expires_at_new)
+    .bind(now)
+    .bind(now)
+    .bind(expires_at_new)
     .execute(&st.db)
     .await;
 
@@ -835,8 +835,8 @@ async fn refresh(
     .bind(&access_hash)
     .bind(ua)
     .bind(ip)
-    .bind(&now)
-    .bind(&now)
+    .bind(now)
+    .bind(now)
     .execute(&st.db)
     .await;
 
@@ -869,7 +869,7 @@ async fn logout(
             UserSessionIden::RevokedAt.to_string()
         ))
     )
-    .bind(&now)
+    .bind(now)
     .bind(user.id)
     .bind(&user.token_hash)
     .execute(&st.db)
@@ -892,7 +892,7 @@ async fn logout(
                     RefreshSessionIden::RevokedAt.to_string())
                 )
             )
-            .bind(&now)
+            .bind(now)
             .bind(user.id)
             .bind(refresh_hash)
             .execute(&st.db)
@@ -938,7 +938,7 @@ async fn logout_all(
             RefreshSessionIden::RevokedAt.to_string()
         ))
     )
-    .bind(&now)
+    .bind(now)
     .bind(user.id)
     .execute(&st.db)
     .await;
@@ -958,7 +958,7 @@ async fn logout_all(
             UserPresenceIden::UserId.to_string()
         ))
     )
-    .bind(&now)
+    .bind(now)
     .bind(user.id)
     .execute(&st.db)
     .await;

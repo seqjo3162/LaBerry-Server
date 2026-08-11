@@ -246,7 +246,7 @@ async fn get_or_create_with(
     let res = sqlx::query_scalar::<_, i64>(
         r#"INSERT INTO chats(name, server_id, is_private, created_at) VALUES(NULL, NULL, TRUE, $1) RETURNING id"#,
     )
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(db)
     .await;
 
@@ -271,7 +271,7 @@ async fn get_or_create_with(
     .bind(chat_id)
     .bind(a)
     .bind(b)
-    .bind(&created_at)
+    .bind(created_at)
     .execute(db)
     .await;
 
@@ -383,7 +383,7 @@ async fn create_group(
         "INSERT INTO chats(name, server_id, is_private, kind, created_at) VALUES($1, NULL, TRUE, 'text', $2) RETURNING id",
     )
     .bind(&title)
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(db)
     .await;
 
@@ -894,7 +894,7 @@ async fn send_message(
     .bind(chat_id)
     .bind(me.id)
     .bind(content_trimmed)
-    .bind(&timestamp)
+    .bind(timestamp)
     .bind(body.reply_to_id)
     .fetch_one(db)
     .await;

@@ -47,7 +47,7 @@ pub async fn handle_single_ws(
         "#,
     )
     .bind(user_id)
-    .bind(&now)
+    .bind(now)
     .execute(&db)
     .await;
 
@@ -164,7 +164,7 @@ pub async fn handle_single_ws(
         let _ = sqlx::query(
             "UPDATE user_presence SET is_online = FALSE, updated_at = $1 WHERE user_id = $2",
         )
-        .bind(&now)
+        .bind(now)
         .bind(user_id)
         .execute(&db)
         .await;

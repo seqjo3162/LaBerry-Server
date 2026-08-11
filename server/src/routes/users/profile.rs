@@ -234,7 +234,7 @@ async fn get_or_create_profile(db: &sqlx::PgPool, user_id: i64) -> UserProfileVi
         r#"INSERT INTO user_profile(user_id, integrations_json, updated_at) VALUES($1, '{}', $2)"#,
     )
     .bind(user_id)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 
@@ -367,7 +367,7 @@ pub async fn update_my_profile(
     .bind(about)
     .bind(status_text)
     .bind(integrations_json)
-    .bind(&now)
+    .bind(now)
     .bind(me.id)
     .execute(db)
     .await;

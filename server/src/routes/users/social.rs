@@ -114,7 +114,7 @@ pub async fn block_user(State(st): State<AppState>, me: AuthUser, Path(user_id):
     )
     .bind(me.id)
     .bind(user_id)
-    .bind(&now)
+    .bind(now)
     .execute(&st.db)
     .await;
 
@@ -231,7 +231,7 @@ pub async fn create_suggestion(
     .bind(me.id)
     .bind(&title)
     .bind(&message)
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(&st.db)
     .await;
 
@@ -303,7 +303,7 @@ pub async fn report_user(
     .bind(message_id)
     .bind(&reason)
     .bind(&message)
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(&st.db)
     .await;
 

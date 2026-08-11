@@ -412,7 +412,7 @@ async fn add_favorite(
     .bind(&source.original_name)
     .bind(source.file_size)
     .bind(&source.storage_path)
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(&st.db)
     .await;
 
@@ -496,8 +496,8 @@ async fn clone_gif_to_chat(
     .bind(&asset.storage_path)
     .bind(me.id)
     .bind(body.chat_id)
-    .bind(&created_at)
-    .bind(&expires_at)
+    .bind(created_at)
+    .bind(expires_at)
     .fetch_one(&st.db)
     .await;
 
@@ -622,7 +622,7 @@ pub(crate) async fn save_global_gif_asset(db: &PgPool, original_name: &str, byte
     .bind(name)
     .bind(bytes.len() as i64)
     .bind(storage_path.to_string_lossy().to_string())
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(db)
     .await;
 

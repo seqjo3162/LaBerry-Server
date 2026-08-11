@@ -781,7 +781,7 @@ pub async fn list(
             .bind(chat_id)
             .bind(me.id)
             .bind(last.id)
-            .bind(&now)
+            .bind(now)
             .execute(db)
             .await;
         }
@@ -890,7 +890,7 @@ pub async fn send(
     .bind(chat_id)
     .bind(me.id)
     .bind(&content)
-    .bind(&timestamp)
+    .bind(timestamp)
     .bind(body.reply_to_id)
     .fetch_one(db)
     .await;
@@ -1019,7 +1019,7 @@ async fn pin_message(
     .bind(chat_id)
     .bind(message_id)
     .bind(me.id)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 

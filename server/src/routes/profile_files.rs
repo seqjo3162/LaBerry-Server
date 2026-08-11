@@ -136,7 +136,7 @@ async fn upload(
     .bind(&mime_type)
     .bind(storage_path.to_string_lossy().to_string())
     .bind(me.id)
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(db)
     .await;
 

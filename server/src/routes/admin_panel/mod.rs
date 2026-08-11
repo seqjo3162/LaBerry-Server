@@ -1273,7 +1273,7 @@ async fn admin_report_status(
     } else {
         sqlx::query("UPDATE user_reports SET status = $1, resolved_at = $2, resolved_by = NULL WHERE id = $3")
             .bind(status)
-            .bind(&now)
+            .bind(now)
             .bind(id)
             .execute(&st.db)
             .await
@@ -1362,7 +1362,7 @@ async fn admin_suggestion_status(
             "UPDATE user_suggestions SET status = $1, reviewed_at = $2, reviewed_by = NULL, admin_note = $3 WHERE id = $4",
         )
         .bind(status)
-        .bind(&now)
+        .bind(now)
         .bind(&note)
         .bind(id)
         .execute(&st.db)

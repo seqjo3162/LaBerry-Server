@@ -161,7 +161,7 @@ pub async fn get_my_settings(
     )
     .bind(me.id)
     .bind(raw)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 
@@ -192,7 +192,7 @@ pub async fn update_my_settings(
     )
     .bind(me.id)
     .bind(raw)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 
@@ -289,7 +289,7 @@ pub async fn my_status(
         "INSERT INTO user_presence(user_id, is_online, status, updated_at) VALUES($1, FALSE, 'online', $2)",
     )
     .bind(me.id)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 
@@ -316,7 +316,7 @@ pub async fn set_my_status(
     )
     .bind(me.id)
     .bind(&status)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 
@@ -400,7 +400,7 @@ pub async fn set_cookie_consent(
         "#,
     )
     .bind(status)
-    .bind(&now)
+    .bind(now)
     .bind(status)
     .bind(trust_factor)
     .bind(trust_factor)
@@ -553,7 +553,7 @@ pub async fn change_username(
     let _ = sqlx::query(
         "UPDATE user_sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL",
     )
-    .bind(&now)
+    .bind(now)
     .bind(me.id)
     .execute(&mut *tx)
     .await;
@@ -561,7 +561,7 @@ pub async fn change_username(
     let _ = sqlx::query(
         "UPDATE refresh_sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL",
     )
-    .bind(&now)
+    .bind(now)
     .bind(me.id)
     .execute(&mut *tx)
     .await;
@@ -642,7 +642,7 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
     let _ = sqlx::query(
         "UPDATE email_codes SET consumed_at = $1 WHERE user_id = $2 AND purpose = $3 AND consumed_at IS NULL",
     )
-    .bind(&now)
+    .bind(now)
     .bind(me.id)
     .bind(&purpose)
     .execute(db)
@@ -662,8 +662,8 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
     .bind(&purpose)
     .bind(&code_hash)
     .bind(&email)
-    .bind(&now)
-    .bind(&expires_at)
+    .bind(now)
+    .bind(expires_at)
     .execute(db)
     .await;
 
@@ -757,7 +757,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     let expires_at: chrono::DateTime<chrono::Utc> = r.get("expires_at");
     if expires_at <= chrono::Utc::now() {
         let _ = sqlx::query("UPDATE email_codes SET consumed_at = $1 WHERE id = $2")
-            .bind(&now)
+            .bind(now)
             .bind(code_id)
             .execute(db)
             .await;
@@ -777,7 +777,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     }
 
     let _ = sqlx::query("UPDATE email_codes SET consumed_at = $1 WHERE id = $2")
-        .bind(&now)
+        .bind(now)
         .bind(code_id)
         .execute(db)
         .await;

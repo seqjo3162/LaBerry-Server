@@ -184,7 +184,7 @@ pub async fn run_server(
                         }
                         let now = chrono::Utc::now();
                         match sqlx::query(r#"DELETE FROM csrf_tokens WHERE expires_at < $1"#)
-                            .bind(&now)
+                            .bind(now)
                             .execute(&cleanup_db)
                             .await {
                             Ok(result) => {

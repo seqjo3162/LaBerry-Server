@@ -63,7 +63,7 @@ async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::PgPool) {
     if let Some(row) = existing {
         let sub_id: i64 = row.get(0);
         sqlx::query("UPDATE subscriptions SET expires_at = $1 WHERE id = $2")
-            .bind(&expires_at)
+            .bind(expires_at)
             .bind(sub_id)
             .execute(db)
             .await
@@ -74,7 +74,7 @@ async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::PgPool) {
         )
         .bind(user_id)
         .bind(plan_id)
-        .bind(&expires_at)
+        .bind(expires_at)
         .execute(db)
         .await
         .ok();

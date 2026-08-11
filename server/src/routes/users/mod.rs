@@ -221,7 +221,7 @@ async fn save_key_backup(
     .bind(&body.salt_password)
     .bind(&body.blob_email)
     .bind(&body.salt_email)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 
@@ -679,7 +679,7 @@ async fn register_device_key(
                label = excluded.label,
                last_seen = excluded.last_seen"#,
     )
-    .bind(did).bind(me.id).bind(&pub_key_b64).bind(label).bind(&now).bind(&now)
+    .bind(did).bind(me.id).bind(&pub_key_b64).bind(label).bind(now).bind(now)
     .execute(db).await;
 
     (StatusCode::OK, Json(serde_json::json!({

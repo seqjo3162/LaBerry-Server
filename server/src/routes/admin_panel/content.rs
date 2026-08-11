@@ -736,7 +736,7 @@ pub(super) async fn admin_download_upload(
         .bind(mime)
         .bind(data.len() as i64)
         .bind(&storage_path_str)
-        .bind(&now)
+        .bind(now)
         .execute(&mut *tx)
         .await?;
         tx.commit().await

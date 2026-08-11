@@ -68,7 +68,7 @@ pub async fn save_room_key(
     .bind(chat_id)
     .bind(&body.encrypted_key)
     .bind(&body.nonce)
-    .bind(&now)
+    .bind(now)
     .execute(&st.db)
     .await;
     

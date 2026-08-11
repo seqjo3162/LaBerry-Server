@@ -1186,10 +1186,10 @@ pub(crate) async fn upload_file(
     .bind(path.to_string_lossy().to_string())
     .bind(me.id)
     .bind(chat_id)
-    .bind(&created_at)
+    .bind(created_at)
     .bind(&content_hash)
     .bind(normalized_hash.as_deref())
-    .bind(&expires_at)
+    .bind(expires_at)
     .fetch_one(&st.db)
     .await;
 

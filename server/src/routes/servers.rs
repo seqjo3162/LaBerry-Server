@@ -204,7 +204,7 @@ async fn cleanup_duplicate_channels(db: &sqlx::PgPool, server_id: i64) {
                 .bind(keep_id)
                 .bind(user_id)
                 .bind(last_read)
-                .bind(&now)
+                .bind(now)
                 .execute(db)
                 .await;
             }
@@ -284,7 +284,7 @@ async fn ensure_default_channels(db: &sqlx::PgPool, server_id: i64) {
         )
         .bind("general")
         .bind(server_id)
-        .bind(&now)
+        .bind(now)
         .execute(db)
         .await;
     }
@@ -295,7 +295,7 @@ async fn ensure_default_channels(db: &sqlx::PgPool, server_id: i64) {
         )
         .bind("Voice")
         .bind(server_id)
-        .bind(&now)
+        .bind(now)
         .execute(db)
         .await;
     }
@@ -401,7 +401,7 @@ async fn create_chat(
     .bind(name)
     .bind(server_id)
     .bind(kind)
-    .bind(&created_at)
+    .bind(created_at)
     .fetch_one(db)
     .await;
 
@@ -585,7 +585,7 @@ async fn create(
     )
     .bind(&body.name)
     .bind(me.id)
-    .bind(&created_at)
+    .bind(created_at)
     .bind(is_public)
     .fetch_one(db)
     .await;
@@ -825,7 +825,7 @@ async fn create_join_request(
     .bind(server_id)
     .bind(me.id)
     .bind(from_server_id)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await;
 
@@ -978,7 +978,7 @@ async fn accept_join_request(
     let _ = sqlx::query(
         "UPDATE server_join_requests SET status = 'accepted', decided_at = $1, decided_by = $2 WHERE id = $3",
     )
-    .bind(&now)
+    .bind(now)
     .bind(me.id)
     .bind(request_id)
     .execute(db)
@@ -1021,7 +1021,7 @@ async fn reject_join_request(
     let _ = sqlx::query(
         "UPDATE server_join_requests SET status = 'rejected', decided_at = $1, decided_by = $2 WHERE id = $3",
     )
-    .bind(&now)
+    .bind(now)
     .bind(me.id)
     .bind(request_id)
     .execute(db)
