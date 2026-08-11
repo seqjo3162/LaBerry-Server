@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, PgPool};
 use std::path::PathBuf;
 use tokio::{fs, fs::File, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -140,7 +140,7 @@ fn sanitize_filename(input: &str) -> String {
 }
 
 async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -> bool {
-    let row = sqlx::query("SELECT server_id, is_private, COALESCE(kind,'text') AS kind FROM chats WHERE id = ? LIMIT 1")
+    let row = sqlx::query("SELECT server_id, is_private, COALESCE(kind,'text') AS kind FROM chats WHERE id = $1 LIMIT 1")
         .bind(chat_id)
         .fetch_optional(&st.db)
         .await
@@ -159,7 +159,7 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
     let server_id: Option<i64> = chat.try_get("server_id").ok();
     if let Some(server_id) = server_id.filter(|sid| *sid > 0) {
         return sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(user_id)
@@ -171,7 +171,7 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
     }
 
     let in_participants = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(chat_id)
     .bind(user_id)
@@ -186,7 +186,7 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
     }
 
     sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
+        "SELECT 1 FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
     )
     .bind(chat_id)
     .bind(user_id)
@@ -197,13 +197,13 @@ async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat_id: i64) -
     .is_some()
 }
 
-async fn load_asset(db: &SqlitePool, asset_id: i64) -> anyhow::Result<Option<GifAssetRow>> {
+async fn load_asset(db: &PgPool, asset_id: i64) -> anyhow::Result<Option<GifAssetRow>> {
     let row = sqlx::query(
         r#"
         SELECT id, scope, owner_id, source_file_id, filename, original_name,
                file_size, mime_type, storage_path, created_at
         FROM gif_assets
-        WHERE id = ?
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -234,9 +234,9 @@ async fn load_source_file(st: &AppState, file_id: i64) -> anyhow::Result<Option<
         r#"
         SELECT id, filename, original_name, file_size, mime_type, storage_path, chat_id
         FROM files
-        WHERE id = ?
+        WHERE id = $1
           AND deleted_at IS NULL
-          AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+          AND (expires_at IS NULL OR expires_at > NOW())
         LIMIT 1
         "#,
     )
@@ -255,8 +255,8 @@ async fn load_source_file(st: &AppState, file_id: i64) -> anyhow::Result<Option<
     }))
 }
 
-async fn token_version_for(db: &SqlitePool, user_id: i64) -> i64 {
-    sqlx::query_scalar("SELECT token_version FROM users WHERE id = ? LIMIT 1")
+async fn token_version_for(db: &PgPool, user_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT token_version FROM users WHERE id = $1 LIMIT 1")
         .bind(user_id)
         .fetch_optional(db)
         .await
@@ -289,7 +289,7 @@ async fn list_gifs(State(st): State<AppState>, me: AuthUser) -> impl IntoRespons
         SELECT id, scope, owner_id, source_file_id, filename, original_name,
                file_size, mime_type, storage_path, created_at
         FROM gif_assets
-        WHERE scope = 'global' OR (scope = 'favorite' AND owner_id = ?)
+        WHERE scope = 'global' OR (scope = 'favorite' AND owner_id = $1)
         ORDER BY CASE scope WHEN 'favorite' THEN 0 ELSE 1 END, id DESC
         LIMIT 240
         "#,
@@ -383,7 +383,7 @@ async fn add_favorite(
     }
 
     let existing = sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM gif_assets WHERE scope = 'favorite' AND owner_id = ? AND storage_path = ? LIMIT 1",
+        "SELECT id FROM gif_assets WHERE scope = 'favorite' AND owner_id = $1 AND storage_path = $2 LIMIT 1",
     )
     .bind(me.id)
     .bind(&source.storage_path)
@@ -397,13 +397,13 @@ async fn add_favorite(
     }
 
     let created_at = auth::now_iso();
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO gif_assets(
             scope, owner_id, source_file_id, filename, original_name,
             file_size, mime_type, storage_path, created_by_admin, created_at
         )
-        VALUES('favorite', ?, ?, ?, ?, ?, 'image/gif', ?, 0, ?)
+        VALUES('favorite', $1, $2, $3, $4, $5, 'image/gif', $6, FALSE, $7) RETURNING id
         "#,
     )
     .bind(me.id)
@@ -413,15 +413,15 @@ async fn add_favorite(
     .bind(source.file_size)
     .bind(&source.storage_path)
     .bind(&created_at)
-    .execute(&st.db)
+    .fetch_one(&st.db)
     .await;
 
-    let Ok(done) = res else {
+    let Ok(id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
     if source.id > 0 {
-        let _ = sqlx::query("UPDATE files SET storage_kind = 'gif_asset', expires_at = NULL, deleted_at = NULL WHERE id = ?")
+        let _ = sqlx::query("UPDATE files SET storage_kind = 'gif_asset', expires_at = NULL, deleted_at = NULL WHERE id = $1")
             .bind(source.id)
             .execute(&st.db)
             .await;
@@ -429,7 +429,7 @@ async fn add_favorite(
 
     (
         StatusCode::OK,
-        Json(GifMutationResponse { ok: true, id: done.last_insert_rowid() }),
+        Json(GifMutationResponse { ok: true, id }),
     )
         .into_response()
 }
@@ -439,7 +439,7 @@ async fn remove_favorite(
     me: AuthUser,
     Path(asset_id): Path<i64>,
 ) -> impl IntoResponse {
-    let res = sqlx::query("DELETE FROM gif_assets WHERE id = ? AND scope = 'favorite' AND owner_id = ?")
+    let res = sqlx::query("DELETE FROM gif_assets WHERE id = $1 AND scope = 'favorite' AND owner_id = $2")
         .bind(asset_id)
         .bind(me.id)
         .execute(&st.db)
@@ -479,18 +479,18 @@ async fn clone_gif_to_chat(
     }
 
     let created_at = auth::now_iso();
-    let expires_at = sqlx::query_scalar::<_, String>("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+24 hours')")
+    let expires_at = sqlx::query_scalar::<_, String>(r#"SELECT to_char(now() + interval '24 hours', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')"#)
         .fetch_one(&st.db)
         .await
         .unwrap_or_else(|_| created_at.clone());
 
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO files(
             filename, original_name, file_size, mime_type, storage_path,
             uploaded_by, chat_id, created_at, storage_kind, expires_at
         )
-        VALUES(?, ?, ?, 'image/gif', ?, ?, ?, ?, 'temporary', ?)
+        VALUES($1, $2, $3, 'image/gif', $4, $5, $6, $7, 'temporary', $8) RETURNING id
         "#,
     )
     .bind(&asset.filename)
@@ -501,10 +501,10 @@ async fn clone_gif_to_chat(
     .bind(body.chat_id)
     .bind(&created_at)
     .bind(&expires_at)
-    .execute(&st.db)
+    .fetch_one(&st.db)
     .await;
 
-    let Ok(done) = res else {
+    let Ok(file_id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
@@ -512,7 +512,7 @@ async fn clone_gif_to_chat(
         StatusCode::OK,
         Json(GifCloneResponse {
             ok: true,
-            file_id: done.last_insert_rowid(),
+            file_id,
             original_name: asset.original_name,
             file_size: asset.file_size,
             mime_type: "image/gif".to_string(),
@@ -593,7 +593,7 @@ async fn get_gif_raw(
         .into_response()
 }
 
-pub(crate) async fn save_global_gif_asset(db: &SqlitePool, original_name: &str, bytes: &[u8]) -> anyhow::Result<i64> {
+pub(crate) async fn save_global_gif_asset(db: &PgPool, original_name: &str, bytes: &[u8]) -> anyhow::Result<i64> {
     if bytes.is_empty() || bytes.len() > MAX_GIF_BYTES || !is_gif_magic(bytes) {
         anyhow::bail!("gif_required");
     }
@@ -612,13 +612,13 @@ pub(crate) async fn save_global_gif_asset(db: &SqlitePool, original_name: &str, 
         if raw.is_empty() { "global.gif" } else { raw }
     };
     let created_at = auth::now_iso();
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO gif_assets(
             scope, owner_id, source_file_id, filename, original_name,
             file_size, mime_type, storage_path, created_by_admin, created_at
         )
-        VALUES('global', NULL, NULL, ?, ?, ?, 'image/gif', ?, 1, ?)
+        VALUES('global', NULL, NULL, $1, $2, $3, 'image/gif', $4, TRUE, $5) RETURNING id
         "#,
     )
     .bind(&stored_filename)
@@ -626,11 +626,11 @@ pub(crate) async fn save_global_gif_asset(db: &SqlitePool, original_name: &str, 
     .bind(bytes.len() as i64)
     .bind(storage_path.to_string_lossy().to_string())
     .bind(&created_at)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
     match res {
-        Ok(done) => Ok(done.last_insert_rowid()),
+        Ok(id) => Ok(id),
         Err(e) => {
             let _ = fs::remove_file(storage_path).await;
             Err(e.into())

@@ -46,7 +46,7 @@ async fn online(
     _me: AuthUser,
 ) -> impl IntoResponse {
     let rows = sqlx::query(
-        "SELECT user_id FROM user_presence WHERE is_online = 1 ORDER BY user_id",
+        "SELECT user_id FROM user_presence WHERE is_online = TRUE ORDER BY user_id",
     )
     .fetch_all(&st.db)
     .await

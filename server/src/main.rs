@@ -6,7 +6,6 @@ use std::{
 };
 
 use laberry_server::ws::Hub;
-use tracing;
 use tokio::{signal, sync::oneshot};
 
 fn install_panic_logger() {
@@ -85,10 +84,8 @@ fn read_raw_dotenv_value(content: &str, key: &str) -> Option<String> {
             continue;
         }
         let mut v = line[prefix.len()..].trim().to_string();
-        if v.len() >= 2 {
-            if (v.starts_with('\'') && v.ends_with('\'')) || (v.starts_with('"') && v.ends_with('"')) {
-                v = v[1..v.len() - 1].to_string();
-            }
+        if v.len() >= 2 && ((v.starts_with('\'') && v.ends_with('\'')) || (v.starts_with('"') && v.ends_with('"'))) {
+            v = v[1..v.len() - 1].to_string();
         }
         if !v.is_empty() {
             return Some(v);

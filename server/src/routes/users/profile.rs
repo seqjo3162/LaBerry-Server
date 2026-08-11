@@ -75,7 +75,7 @@ pub async fn me(
                   COALESCE(trust_factor, 100) AS trust_factor,
                   COALESCE(trust_review_status, 'clear') AS trust_review_status,
                   trust_review_reason
-           FROM users WHERE id = ? LIMIT 1"#,
+           FROM users WHERE id = $1 LIMIT 1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -91,7 +91,7 @@ pub async fn me(
         id: r.get("id"),
         username: r.get("username"),
         email: r.get("email"),
-        email_verified: r.get::<i64, _>("email_verified") != 0,
+        email_verified: r.get::<bool, _>("email_verified"),
         email_pending: r.get("email_pending"),
         public_encryption_key: r.get("public_encryption_key"),
         cookie_consent_status: r.get("cookie_consent_status"),
@@ -122,8 +122,8 @@ pub async fn update_me(
 
         let q = sqlx::query(
             r#"UPDATE users
-               SET email_pending = ?, email_verified = 0
-               WHERE id = ?"#,
+               SET email_pending = $1, email_verified = FALSE
+               WHERE id = $2"#,
         )
         .bind(email)
         .bind(me.id)
@@ -137,7 +137,7 @@ pub async fn update_me(
 
     // Валидация и сохранение публичного E2EE ключа
     if let Some(ref pub_key) = body.public_encryption_key {
-        use crate::e2ee::E2eeKeyPair;
+        use crate::crypto::e2ee::E2eeKeyPair;
         // Валидируем что это корректный base64-encoded X25519 public key (32 bytes)
         if E2eeKeyPair::from_public_b64(pub_key).is_none() {
             return (
@@ -149,8 +149,8 @@ pub async fn update_me(
     
     if sqlx::query(
         r#"UPDATE users
-           SET public_encryption_key = ?
-           WHERE id = ?"#,
+           SET public_encryption_key = $1
+           WHERE id = $2"#,
     )
     .bind(body.public_encryption_key)
     .bind(me.id)
@@ -173,7 +173,7 @@ pub async fn update_me(
                   COALESCE(trust_factor, 100) AS trust_factor,
                   COALESCE(trust_review_status, 'clear') AS trust_review_status,
                   trust_review_reason
-           FROM users WHERE id = ? LIMIT 1"#,
+           FROM users WHERE id = $1 LIMIT 1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -189,7 +189,7 @@ pub async fn update_me(
         id: r.get("id"),
         username: r.get("username"),
         email: r.get("email"),
-        email_verified: r.get::<i64, _>("email_verified") != 0,
+        email_verified: r.get::<bool, _>("email_verified"),
         email_pending: r.get("email_pending"),
         public_encryption_key: r.get("public_encryption_key"),
         cookie_consent_status: r.get("cookie_consent_status"),
@@ -202,10 +202,10 @@ pub async fn update_me(
     (StatusCode::OK, Json(resp)).into_response()
 }
 
-async fn get_or_create_profile(db: &sqlx::SqlitePool, user_id: i64) -> UserProfileView {
+async fn get_or_create_profile(db: &sqlx::PgPool, user_id: i64) -> UserProfileView {
     let row = sqlx::query(
         r#"SELECT user_id, avatar_file_id, banner_file_id, accent_color, about, status_text, integrations_json, updated_at
-           FROM user_profile WHERE user_id = ? LIMIT 1"#,
+           FROM user_profile WHERE user_id = $1 LIMIT 1"#,
     )
     .bind(user_id)
     .fetch_optional(db)
@@ -231,7 +231,7 @@ async fn get_or_create_profile(db: &sqlx::SqlitePool, user_id: i64) -> UserProfi
 
     let now = auth::now_iso();
     let _ = sqlx::query(
-        r#"INSERT INTO user_profile(user_id, integrations_json, updated_at) VALUES(?, '{}', ?)"#,
+        r#"INSERT INTO user_profile(user_id, integrations_json, updated_at) VALUES($1, '{}', $2)"#,
     )
     .bind(user_id)
     .bind(&now)
@@ -250,15 +250,15 @@ async fn get_or_create_profile(db: &sqlx::SqlitePool, user_id: i64) -> UserProfi
     }
 }
 
-async fn get_public_profile(db: &sqlx::SqlitePool, user_id: i64) -> Option<PublicProfileView> {
-    let user = sqlx::query("SELECT username, is_banned, created_at FROM users WHERE id = ? LIMIT 1")
+async fn get_public_profile(db: &sqlx::PgPool, user_id: i64) -> Option<PublicProfileView> {
+    let user = sqlx::query("SELECT username, is_banned, created_at FROM users WHERE id = $1 LIMIT 1")
         .bind(user_id)
         .fetch_optional(db)
         .await
         .ok()
         .flatten()?;
 
-    if user.get::<i64, _>("is_banned") != 0 {
+    if user.get::<bool, _>("is_banned") {
         return None;
     }
 
@@ -267,7 +267,7 @@ async fn get_public_profile(db: &sqlx::SqlitePool, user_id: i64) -> Option<Publi
     let profile = get_or_create_profile(db, user_id).await;
     let settings = settings::load_user_settings(db, user_id).await.unwrap_or_else(default_settings);
 
-    let presence = sqlx::query("SELECT status, is_online FROM user_presence WHERE user_id = ? LIMIT 1")
+    let presence = sqlx::query("SELECT status, is_online FROM user_presence WHERE user_id = $1 LIMIT 1")
         .bind(user_id)
         .fetch_optional(db)
         .await
@@ -280,7 +280,7 @@ async fn get_public_profile(db: &sqlx::SqlitePool, user_id: i64) -> Option<Publi
         .unwrap_or_else(|| "offline".to_string());
     let mut is_online = presence
         .as_ref()
-        .map(|r| r.get::<i64, _>("is_online") != 0)
+        .map(|r| r.get::<bool, _>("is_online"))
         .unwrap_or(false);
 
     if status == "invisible" || !is_online {
@@ -351,14 +351,14 @@ pub async fn update_my_profile(
     let q = sqlx::query(
         r#"
         UPDATE user_profile
-        SET avatar_file_id = ?,
-            banner_file_id = ?,
-            accent_color = ?,
-            about = ?,
-            status_text = ?,
-            integrations_json = ?,
-            updated_at = ?
-        WHERE user_id = ?
+        SET avatar_file_id = $1,
+            banner_file_id = $2,
+            accent_color = $3,
+            about = $4,
+            status_text = $5,
+            integrations_json = $6,
+            updated_at = $7
+        WHERE user_id = $8
         "#,
     )
     .bind(avatar_file_id)
@@ -381,7 +381,7 @@ pub async fn update_my_profile(
 }
 
 pub async fn get_profile_by_id(State(st): State<AppState>, _me: AuthUser, Path(id): Path<i64>) -> impl IntoResponse {
-    let banned = sqlx::query_scalar::<_, i64>("SELECT is_banned FROM users WHERE id = ? LIMIT 1")
+    let banned = sqlx::query_scalar::<_, bool>("SELECT is_banned FROM users WHERE id = $1 LIMIT 1")
         .bind(id)
         .fetch_optional(&st.db)
         .await
@@ -391,7 +391,7 @@ pub async fn get_profile_by_id(State(st): State<AppState>, _me: AuthUser, Path(i
     let Some(b) = banned else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if b != 0 {
+    if b {
         return StatusCode::FORBIDDEN.into_response();
     }
 

@@ -7,7 +7,7 @@ use axum::{
     response::{Html, IntoResponse},
 };
 use serde::Deserialize;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, PgPool};
 
 pub(crate) fn normalized_user_mode(input: Option<&str>) -> &'static str {
     match input.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
@@ -18,12 +18,12 @@ pub(crate) fn normalized_user_mode(input: Option<&str>) -> &'static str {
     }
 }
 
-pub(crate) async fn fetch_user_servers(db: &SqlitePool, user_id: i64) -> anyhow::Result<Vec<(i64, String)>> {
+pub(crate) async fn fetch_user_servers(db: &PgPool, user_id: i64) -> anyhow::Result<Vec<(i64, String)>> {
     let rows = sqlx::query(
         r#"SELECT s.id, s.name 
            FROM servers s 
            JOIN server_members m ON m.server_id = s.id 
-           WHERE m.user_id = ? 
+           WHERE m.user_id = $1
            ORDER BY s.name"#
     )
     .bind(user_id)
@@ -345,19 +345,27 @@ pub(crate) fn render_user_detail_card(
     )
 }
 
+pub(crate) struct UsersPanelFilter<'a> {
+    pub query: &'a str,
+    pub mode: &'a str,
+    pub requested_user_id: Option<i64>,
+    pub current_return_to: &'a str,
+}
+
 pub(crate) fn render_users_panel_body(
     sess: &AdminSession,
     users: &[UserRow],
-    query: &str,
+    filter: &UsersPanelFilter,
     embedded: bool,
-    mode: &str,
-    requested_user_id: Option<i64>,
-    current_return_to: &str,
     selected_reports: &[UserReportRow],
     selected_servers: &[(i64, String)],
 ) -> String {
+    let query = filter.query;
+    let mode_src = filter.mode;
+    let current_return_to = filter.current_return_to;
+    let requested_user_id = filter.requested_user_id;
     let base_path = if embedded { "/admin/center" } else { "/admin/users" };
-    let mode = normalized_user_mode(Some(mode));
+    let mode = normalized_user_mode(Some(mode_src));
     let filtered: Vec<&UserRow> = users.iter().filter(|u| user_mode_matches(u, mode)).collect();
     let selected = requested_user_id
         .and_then(|id| filtered.iter().copied().find(|u| u.id == id))
@@ -510,11 +518,13 @@ pub(crate) async fn users_list(
             render_users_panel_body(
                 &sess,
                 &list,
-                &query,
+                &UsersPanelFilter {
+                    query: &query,
+                    mode,
+                    requested_user_id: selected_id,
+                    current_return_to: &current_return_to,
+                },
                 embed,
-                mode,
-                selected_id,
-                &current_return_to,
                 &reports,
                 &servers,
             )
@@ -695,7 +705,7 @@ async fn action_user_common(
         return admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/users"), "CSRF-токен не совпадает").into_response();
     }
 
-    let user_row = sqlx::query("SELECT username, COALESCE(email,'') AS email FROM users WHERE id = ?")
+    let user_row = sqlx::query("SELECT username, COALESCE(email,'') AS email FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(&st.db)
         .await;
@@ -792,14 +802,14 @@ pub(crate) async fn test_users_page(
                 rows = rows
             );
 
-            return page("Админка • Тестовые пользователи", &body, q.msg.as_deref()).into_response();
+            page("Админка • Тестовые пользователи", &body, q.msg.as_deref()).into_response()
         }
         Err(e) => {
             let body = format!(
                 "<div class='card'>Ошибка БД: {}</div>",
                 escape_html(&format!("{}", e))
             );
-            return page("Админка • Тестовые пользователи", &body, q.msg.as_deref()).into_response();
+            page("Админка • Тестовые пользователи", &body, q.msg.as_deref()).into_response()
         }
     }
 }
@@ -839,7 +849,7 @@ pub(crate) async fn test_users_delete(
     // Safety: verify they are actually test users
     let re = test_user_re();
     for id in &f.user_ids {
-        let row = sqlx::query("SELECT username, COALESCE(email,'') AS email FROM users WHERE id = ?")
+        let row = sqlx::query("SELECT username, COALESCE(email,'') AS email FROM users WHERE id = $1")
             .bind(*id)
             .fetch_optional(&st.db)
             .await;
@@ -874,11 +884,11 @@ fn clean_admin_reason(raw: &str) -> String {
     out
 }
 
-async fn insert_moderation_event(db: &SqlitePool, user_id: i64, kind: &str, reason: &str, details: &str) -> anyhow::Result<()> {
+async fn insert_moderation_event(db: &PgPool, user_id: i64, kind: &str, reason: &str, details: &str) -> anyhow::Result<()> {
     let now = auth::now_iso();
     sqlx::query(
         r#"INSERT INTO moderation_events(user_id, admin_id, kind, reason, details, created_at)
-           VALUES(?, NULL, ?, ?, ?, ?)"#,
+           VALUES($1, NULL, $2, $3, $4, $5)"#,
     )
     .bind(user_id)
     .bind(kind)
@@ -890,9 +900,9 @@ async fn insert_moderation_event(db: &SqlitePool, user_id: i64, kind: &str, reas
     Ok(())
 }
 
-async fn ban_user_exec(db: &SqlitePool, user_id: i64, reason: &str) -> anyhow::Result<()> {
+async fn ban_user_exec(db: &PgPool, user_id: i64, reason: &str) -> anyhow::Result<()> {
     let clean_reason = clean_admin_reason(reason);
-    let affected = sqlx::query("UPDATE users SET is_banned = 1, token_version = token_version + 1 WHERE id = ?")
+    let affected = sqlx::query("UPDATE users SET is_banned = TRUE, token_version = token_version + 1 WHERE id = $1")
         .bind(user_id)
         .execute(db)
         .await?
@@ -904,8 +914,8 @@ async fn ban_user_exec(db: &SqlitePool, user_id: i64, reason: &str) -> anyhow::R
     Ok(())
 }
 
-async fn unban_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
-    let affected = sqlx::query("UPDATE users SET is_banned = 0, token_version = token_version + 1 WHERE id = ?")
+async fn unban_user_exec(db: &PgPool, user_id: i64) -> anyhow::Result<()> {
+    let affected = sqlx::query("UPDATE users SET is_banned = FALSE, token_version = token_version + 1 WHERE id = $1")
         .bind(user_id)
         .execute(db)
         .await?
@@ -917,12 +927,12 @@ async fn unban_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
+async fn purge_user_content_exec(db: &PgPool, user_id: i64) -> anyhow::Result<()> {
     use std::path::PathBuf;
 
     let mut tx = db.begin().await?;
 
-    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE uploaded_by = ?")
+    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE uploaded_by = $1")
         .bind(user_id)
         .fetch_all(&mut *tx)
         .await?;
@@ -941,7 +951,7 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
         file_paths.push((main, Some(thumb)));
     }
 
-    let profile_rows = sqlx::query("SELECT storage_path FROM profile_files WHERE uploaded_by = ?")
+    let profile_rows = sqlx::query("SELECT storage_path FROM profile_files WHERE uploaded_by = $1")
         .bind(user_id)
         .fetch_all(&mut *tx)
         .await?;
@@ -953,7 +963,7 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
 
     let _ = sqlx::query(
         r#"DELETE FROM message_reactions
-           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = ?)"#,
+           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = $1)"#,
     )
     .bind(user_id)
     .execute(&mut *tx)
@@ -961,13 +971,13 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
 
     let _ = sqlx::query(
         r#"DELETE FROM pinned_messages
-           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = ?)"#,
+           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = $1)"#,
     )
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
-    let _ = sqlx::query("DELETE FROM gif_assets WHERE owner_id = ?")
+    let _ = sqlx::query("DELETE FROM gif_assets WHERE owner_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
@@ -975,13 +985,13 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
     let _ = sqlx::query(
         r#"UPDATE gif_assets
            SET source_file_id = NULL
-           WHERE source_file_id IN (SELECT id FROM files WHERE uploaded_by = ?)"#,
+           WHERE source_file_id IN (SELECT id FROM files WHERE uploaded_by = $1)"#,
     )
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
-    let _ = sqlx::query("DELETE FROM files WHERE uploaded_by = ?")
+    let _ = sqlx::query("DELETE FROM files WHERE uploaded_by = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
@@ -989,18 +999,18 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
     let _ = sqlx::query(
         r#"UPDATE user_reports
            SET message_id = NULL
-           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = ?)"#,
+           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = $1)"#,
     )
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
-    let _ = sqlx::query("DELETE FROM messages WHERE sender_id = ?")
+    let _ = sqlx::query("DELETE FROM messages WHERE sender_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM profile_files WHERE uploaded_by = ?")
+    let _ = sqlx::query("DELETE FROM profile_files WHERE uploaded_by = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
@@ -1016,13 +1026,13 @@ async fn purge_user_content_exec(db: &SqlitePool, user_id: i64) -> anyhow::Resul
     Ok(())
 }
 
-async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
+async fn purge_user_exec(db: &PgPool, user_id: i64) -> anyhow::Result<()> {
     use std::path::PathBuf;
 
     // delete owned servers first (needs separate tx because purge_server_exec uses its own tx)
     {
         let mut tx = db.begin().await?;
-        let owned_servers = sqlx::query_scalar::<_, i64>("SELECT id FROM servers WHERE owner_id = ?")
+        let owned_servers = sqlx::query_scalar::<_, i64>("SELECT id FROM servers WHERE owner_id = $1")
             .bind(user_id)
             .fetch_all(&mut *tx)
             .await?;
@@ -1036,7 +1046,7 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
     let mut tx = db.begin().await?;
 
     let dm_chat_ids = sqlx::query_scalar::<_, i64>(
-        "SELECT chat_id FROM dm_chats WHERE user_a = ? OR user_b = ?",
+        "SELECT chat_id FROM dm_chats WHERE user_a = $1 OR user_b = $1",
     )
     .bind(user_id)
     .fetch_all(&mut *tx)
@@ -1048,7 +1058,7 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         sqlx::query(
             r#"SELECT f.storage_path, f.filename
                FROM files f
-               WHERE f.chat_id IN (SELECT chat_id FROM dm_chats WHERE user_a = ? OR user_b = ?)"#,
+               WHERE f.chat_id IN (SELECT chat_id FROM dm_chats WHERE user_a = $1 OR user_b = $1)"#,
         )
         .bind(user_id)
         .fetch_all(&mut *tx)
@@ -1070,7 +1080,7 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         file_paths.push((main, Some(thumb)));
     }
 
-    let user_file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE uploaded_by = ?")
+    let user_file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE uploaded_by = $1")
         .bind(user_id)
         .fetch_all(&mut *tx)
         .await?;
@@ -1088,7 +1098,7 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         file_paths.push((main, Some(thumb)));
     }
 
-    let profile_rows = sqlx::query("SELECT storage_path FROM profile_files WHERE uploaded_by = ?")
+    let profile_rows = sqlx::query("SELECT storage_path FROM profile_files WHERE uploaded_by = $1")
         .bind(user_id)
         .fetch_all(&mut *tx)
         .await?;
@@ -1098,108 +1108,108 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         profile_paths.push(PathBuf::from(p));
     }
 
-    let _ = sqlx::query("DELETE FROM message_reactions WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM message_reactions WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
     let _ = sqlx::query(
         r#"DELETE FROM message_reactions
-           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = ?)"#,
+           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = $1)"#,
     )
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
-    let _ = sqlx::query("DELETE FROM pinned_messages WHERE pinned_by = ?")
+    let _ = sqlx::query("DELETE FROM pinned_messages WHERE pinned_by = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
     let _ = sqlx::query(
         r#"DELETE FROM pinned_messages
-           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = ?)"#,
+           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = $1)"#,
     )
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
-    let _ = sqlx::query("DELETE FROM chat_reads WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM chat_reads WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM chat_participants WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM chat_participants WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM server_members WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM server_members WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM friendships WHERE user_id = ? OR friend_id = ?")
+    let _ = sqlx::query("DELETE FROM friendships WHERE user_id = $1 OR friend_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM friend_requests WHERE sender_id = ? OR receiver_id = ?")
+    let _ = sqlx::query("DELETE FROM friend_requests WHERE sender_id = $1 OR receiver_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM user_reports WHERE reporter_id = ? OR target_user_id = ?")
+    let _ = sqlx::query("DELETE FROM user_reports WHERE reporter_id = $1 OR target_user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM user_suggestions WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM user_suggestions WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM gif_assets WHERE owner_id = ?")
+    let _ = sqlx::query("DELETE FROM gif_assets WHERE owner_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM user_blocks WHERE blocker_id = ? OR blocked_id = ?")
+    let _ = sqlx::query("DELETE FROM user_blocks WHERE blocker_id = $1 OR blocked_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM user_presence WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM user_presence WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM user_settings WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM user_settings WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM user_profile WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM user_profile WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM user_sessions WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM user_sessions WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM refresh_sessions WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM refresh_sessions WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM email_codes WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM email_codes WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM profile_files WHERE uploaded_by = ?")
+    let _ = sqlx::query("DELETE FROM profile_files WHERE uploaded_by = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
@@ -1207,13 +1217,13 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
     let _ = sqlx::query(
         r#"UPDATE gif_assets
            SET source_file_id = NULL
-           WHERE source_file_id IN (SELECT id FROM files WHERE uploaded_by = ?)"#,
+           WHERE source_file_id IN (SELECT id FROM files WHERE uploaded_by = $1)"#,
     )
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
-    let _ = sqlx::query("DELETE FROM files WHERE uploaded_by = ?")
+    let _ = sqlx::query("DELETE FROM files WHERE uploaded_by = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
@@ -1221,31 +1231,31 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
     let _ = sqlx::query(
         r#"UPDATE user_reports
            SET message_id = NULL
-           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = ?)"#,
+           WHERE message_id IN (SELECT id FROM messages WHERE sender_id = $1)"#,
     )
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
-    let _ = sqlx::query("DELETE FROM messages WHERE sender_id = ?")
+    let _ = sqlx::query("DELETE FROM messages WHERE sender_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
     for chat_id in dm_chat_ids {
         let _ = sqlx::query(
-            r#"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?)"#,
+            r#"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = $1)"#,
         )
         .bind(chat_id)
         .execute(&mut *tx)
         .await?;
 
-        let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = $1")
             .bind(chat_id)
             .execute(&mut *tx)
             .await?;
 
-        let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = $1")
             .bind(chat_id)
             .execute(&mut *tx)
             .await?;
@@ -1253,39 +1263,39 @@ async fn purge_user_exec(db: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
         let _ = sqlx::query(
             r#"UPDATE gif_assets
                SET source_file_id = NULL
-               WHERE source_file_id IN (SELECT id FROM files WHERE chat_id = ?)"#,
+               WHERE source_file_id IN (SELECT id FROM files WHERE chat_id = $1)"#,
         )
         .bind(chat_id)
         .execute(&mut *tx)
         .await?;
 
-        let _ = sqlx::query("DELETE FROM files WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM files WHERE chat_id = $1")
             .bind(chat_id)
             .execute(&mut *tx)
             .await?;
 
-        let _ = sqlx::query("DELETE FROM messages WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM messages WHERE chat_id = $1")
             .bind(chat_id)
             .execute(&mut *tx)
             .await?;
 
-        let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = $1")
             .bind(chat_id)
             .execute(&mut *tx)
             .await?;
 
-        let _ = sqlx::query("DELETE FROM dm_chats WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM dm_chats WHERE chat_id = $1")
             .bind(chat_id)
             .execute(&mut *tx)
             .await?;
 
-        let _ = sqlx::query("DELETE FROM chats WHERE id = ?")
+        let _ = sqlx::query("DELETE FROM chats WHERE id = $1")
             .bind(chat_id)
             .execute(&mut *tx)
             .await?;
     }
 
-    let affected = sqlx::query("DELETE FROM users WHERE id = ?")
+    let affected = sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?
@@ -1319,13 +1329,13 @@ pub(crate) async fn admin_user_kick_from_server(
     let return_to = safe_admin_return_to(&f.return_to, "/admin/users");
     if f.csrf != sess.csrf { return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response(); }
 
-    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = ? AND user_id = ?")
+    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id = $2")
         .bind(server_id).bind(user_id).execute(&st.db).await;
-    
-    let _ = sqlx::query("DELETE FROM chat_participants WHERE user_id = ? AND chat_id IN (SELECT id FROM chats WHERE server_id = ?)")
+
+    let _ = sqlx::query("DELETE FROM chat_participants WHERE user_id = $1 AND chat_id IN (SELECT id FROM chats WHERE server_id = $2)")
         .bind(user_id).bind(server_id).execute(&st.db).await;
 
-    let _ = sqlx::query("DELETE FROM chat_reads WHERE user_id = ? AND chat_id IN (SELECT id FROM chats WHERE server_id = ?)")
+    let _ = sqlx::query("DELETE FROM chat_reads WHERE user_id = $1 AND chat_id IN (SELECT id FROM chats WHERE server_id = $2)")
         .bind(user_id).bind(server_id).execute(&st.db).await;
 
     admin_redirect_with_msg(&return_to, "Пользователь исключен из сервера").into_response()

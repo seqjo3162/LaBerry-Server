@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sea_query::Iden;
 
 #[derive(Iden)]
-#[sea_query(rename = "files")]
+#[iden(rename = "files")]
 pub enum FileIden {
     Table,
     Id,

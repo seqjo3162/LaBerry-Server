@@ -8,7 +8,7 @@ use axum::{
 use crate::{auth, server::AppState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, PgPool};
 
 #[derive(Deserialize)]
 pub struct FriendRequestCreate {
@@ -74,7 +74,7 @@ async fn current_user_id(st: &AppState, token: &str) -> Result<i64, StatusCode> 
 
     let row = sqlx::query(
         r#"SELECT id, token_version, is_banned
-           FROM users WHERE username = ? LIMIT 1"#,
+           FROM users WHERE username = $1 LIMIT 1"#,
     )
     .bind(username)
     .fetch_optional(&st.db)
@@ -82,7 +82,7 @@ async fn current_user_id(st: &AppState, token: &str) -> Result<i64, StatusCode> 
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if row.get::<i64, _>("is_banned") != 0 {
+    if row.get::<bool, _>("is_banned") {
         return Err(StatusCode::FORBIDDEN);
     }
     if row.get::<i64, _>("token_version") != token_version {
@@ -99,8 +99,8 @@ fn default_settings_json() -> Value {
     })
 }
 
-async fn get_user_settings_json(db: &SqlitePool, user_id: i64) -> Value {
-    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = ? LIMIT 1")
+async fn get_user_settings_json(db: &PgPool, user_id: i64) -> Value {
+    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = $1 LIMIT 1")
         .bind(user_id)
         .fetch_optional(db)
         .await
@@ -115,13 +115,13 @@ async fn get_user_settings_json(db: &SqlitePool, user_id: i64) -> Value {
     serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| default_settings_json())
 }
 
-async fn have_mutual_friend(db: &SqlitePool, a: i64, b: i64) -> bool {
+async fn have_mutual_friend(db: &PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT 1
         FROM friendships f1
         JOIN friendships f2 ON f1.friend_id = f2.friend_id
-        WHERE f1.user_id = ? AND f2.user_id = ?
+        WHERE f1.user_id = $1 AND f2.user_id = $2
         LIMIT 1
         "#,
     )
@@ -134,13 +134,13 @@ async fn have_mutual_friend(db: &SqlitePool, a: i64, b: i64) -> bool {
     .is_some()
 }
 
-async fn share_server(db: &SqlitePool, a: i64, b: i64) -> bool {
+async fn share_server(db: &PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT 1
         FROM server_members s1
         JOIN server_members s2 ON s1.server_id = s2.server_id
-        WHERE s1.user_id = ? AND s2.user_id = ?
+        WHERE s1.user_id = $1 AND s2.user_id = $2
         LIMIT 1
         "#,
     )
@@ -179,7 +179,7 @@ async fn request_friend(
             .into_response();
     }
 
-    let rec = match sqlx::query("SELECT is_banned FROM users WHERE id = ? LIMIT 1")
+    let rec = match sqlx::query("SELECT is_banned FROM users WHERE id = $1 LIMIT 1")
         .bind(receiver_id)
         .fetch_optional(&st.db)
         .await
@@ -195,8 +195,8 @@ async fn request_friend(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    let is_banned: i64 = rec.get(0);
-    if is_banned != 0 {
+    let is_banned: bool = rec.get(0);
+    if is_banned {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "detail": "User banned" })),
@@ -228,8 +228,8 @@ async fn request_friend(
 
     let already = sqlx::query_scalar::<_, i64>(
         r#"SELECT 1 FROM friendships
-           WHERE (user_id = ? AND friend_id = ?)
-              OR (user_id = ? AND friend_id = ?)
+           WHERE (user_id = $1 AND friend_id = $2)
+              OR (user_id = $3 AND friend_id = $4)
            LIMIT 1"#,
     )
     .bind(sender_id)
@@ -252,7 +252,7 @@ async fn request_friend(
 
     let already_pending = sqlx::query_scalar::<_, i64>(
         r#"SELECT 1 FROM friend_requests
-           WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'
+           WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'
            LIMIT 1"#,
     )
     .bind(sender_id)
@@ -264,17 +264,16 @@ async fn request_friend(
     .is_some();
 
     if already_pending {
-        let accepted = crate::ai_client::auto_accept_friend_request_if_ai(st.clone(), sender_id, receiver_id).await;
         return (
             StatusCode::OK,
-            Json(serde_json::json!({ "status": "ok", "dedup": true, "accepted": accepted })),
+            Json(serde_json::json!({ "status": "ok", "dedup": true, "accepted": false })),
         )
             .into_response();
     }
 
     let incoming_pending = sqlx::query_scalar::<_, i64>(
         r#"SELECT 1 FROM friend_requests
-           WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'
+           WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'
            LIMIT 1"#,
     )
     .bind(receiver_id)
@@ -296,8 +295,8 @@ async fn request_friend(
     let created_at = auth::now_iso();
 
     let inserted = match sqlx::query(
-        r#"INSERT OR IGNORE INTO friend_requests(sender_id, receiver_id, status, created_at)
-           VALUES (?, ?, 'pending', ?)"#,
+        r#"INSERT INTO friend_requests(sender_id, receiver_id, status, created_at)
+           VALUES ($1, $2, 'pending', $3) ON CONFLICT DO NOTHING"#,
     )
     .bind(sender_id)
     .bind(receiver_id)
@@ -309,12 +308,10 @@ async fn request_friend(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    let accepted = if inserted {
+    if inserted {
         crate::ws::friends_events::friend_request_received(st.hub.as_ref(), receiver_id, sender_id).await;
-        crate::ai_client::auto_accept_friend_request_if_ai(st.clone(), sender_id, receiver_id).await
-    } else {
-        false
-    };
+    }
+    let accepted = false;
 
     (
         StatusCode::OK,
@@ -342,7 +339,7 @@ async fn incoming(State(st): State<AppState>, headers: HeaderMap) -> impl IntoRe
             status          AS status,
             MAX(created_at) AS created_at
         FROM friend_requests
-        WHERE receiver_id = ? AND status = 'pending'
+        WHERE receiver_id = $1 AND status = 'pending'
         GROUP BY sender_id, receiver_id, status
         ORDER BY MAX(id) DESC
         "#,
@@ -386,7 +383,7 @@ async fn outgoing(State(st): State<AppState>, headers: HeaderMap) -> impl IntoRe
             status          AS status,
             MAX(created_at) AS created_at
         FROM friend_requests
-        WHERE sender_id = ? AND status = 'pending'
+        WHERE sender_id = $1 AND status = 'pending'
         GROUP BY sender_id, receiver_id, status
         ORDER BY MAX(id) DESC
         "#,
@@ -427,7 +424,7 @@ async fn accept(
 
     let rq = sqlx::query(
         r#"SELECT sender_id, receiver_id, status
-           FROM friend_requests WHERE id = ? LIMIT 1"#,
+           FROM friend_requests WHERE id = $1 LIMIT 1"#,
     )
     .bind(request_id)
     .fetch_optional(&st.db)
@@ -450,7 +447,7 @@ async fn accept(
     let _ = sqlx::query(
         r#"UPDATE friend_requests
            SET status = 'accepted'
-         WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"#,
+         WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'"#,
     )
     .bind(sender)
     .bind(receiver)
@@ -458,8 +455,8 @@ async fn accept(
     .await;
 
     let _ = sqlx::query(
-        r#"INSERT OR IGNORE INTO friendships(user_id, friend_id, created_at)
-           VALUES (?, ?, ?)"#,
+        r#"INSERT INTO friendships(user_id, friend_id, created_at)
+           VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"#,
     )
     .bind(sender)
     .bind(receiver)
@@ -468,8 +465,8 @@ async fn accept(
     .await;
 
     let _ = sqlx::query(
-        r#"INSERT OR IGNORE INTO friendships(user_id, friend_id, created_at)
-           VALUES (?, ?, ?)"#,
+        r#"INSERT INTO friendships(user_id, friend_id, created_at)
+           VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"#,
     )
     .bind(receiver)
     .bind(sender)
@@ -496,7 +493,7 @@ async fn decline(
         Err(sc) => return sc.into_response(),
     };
 
-    let rq = sqlx::query(r#"SELECT sender_id, receiver_id FROM friend_requests WHERE id = ?"#)
+    let rq = sqlx::query(r#"SELECT sender_id, receiver_id FROM friend_requests WHERE id = $1"#)
         .bind(request_id)
         .fetch_optional(&st.db)
         .await
@@ -517,7 +514,7 @@ async fn decline(
     let _ = sqlx::query(
         r#"UPDATE friend_requests
            SET status = 'declined'
-         WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"#,
+         WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'"#,
     )
     .bind(sender_id)
     .bind(receiver_id)
@@ -543,7 +540,7 @@ async fn cancel(
 
     let rq = sqlx::query(
         r#"SELECT sender_id, receiver_id, status
-           FROM friend_requests WHERE id = ? LIMIT 1"#,
+           FROM friend_requests WHERE id = $1 LIMIT 1"#,
     )
     .bind(request_id)
     .fetch_optional(&st.db)
@@ -574,7 +571,7 @@ async fn cancel(
     let _ = sqlx::query(
         r#"UPDATE friend_requests
            SET status = 'cancelled'
-         WHERE sender_id = ? AND receiver_id = ? AND status = 'pending'"#,
+         WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'"#,
     )
     .bind(sender_id)
     .bind(receiver_id)
@@ -600,8 +597,8 @@ async fn remove_friend(
 
     let _ = sqlx::query(
         r#"DELETE FROM friendships
-           WHERE (user_id = ? AND friend_id = ?)
-              OR (user_id = ? AND friend_id = ?)"#,
+           WHERE (user_id = $1 AND friend_id = $2)
+              OR (user_id = $3 AND friend_id = $4)"#,
     )
     .bind(me)
     .bind(friend_id)
@@ -630,19 +627,19 @@ async fn list_friends(State(st): State<AppState>, headers: HeaderMap) -> impl In
         SELECT f.id as fid, f.created_at as created_at, f.is_favorite as is_favorite,
                u.id as id, u.username as username,
                CASE
-                 WHEN COALESCE(p.is_online, 0) = 0 THEN 0
+                 WHEN COALESCE(p.is_online, FALSE) = FALSE THEN 0
                  WHEN p.status = 'invisible' THEN 0
                  ELSE 1
                END as is_online,
                CASE
-                 WHEN COALESCE(p.is_online, 0) = 0 THEN 'offline'
+                 WHEN COALESCE(p.is_online, FALSE) = FALSE THEN 'offline'
                  WHEN p.status = 'invisible' THEN 'offline'
                  ELSE COALESCE(p.status, 'online')
                END as status
         FROM friendships f
         JOIN users u ON u.id = f.friend_id
         LEFT JOIN user_presence p ON p.user_id = u.id
-        WHERE f.user_id = ?
+        WHERE f.user_id = $1
         ORDER BY f.is_favorite DESC, f.id DESC
         "#,
     )
@@ -681,20 +678,20 @@ async fn list_active_friends(State(st): State<AppState>, headers: HeaderMap) -> 
         SELECT f.id as fid, f.created_at as created_at,
                u.id as id, u.username as username,
                CASE
-                 WHEN COALESCE(p.is_online, 0) = 0 THEN 0
+                 WHEN COALESCE(p.is_online, FALSE) = FALSE THEN 0
                  WHEN p.status = 'invisible' THEN 0
                  ELSE 1
                END as is_online,
                CASE
-                 WHEN COALESCE(p.is_online, 0) = 0 THEN 'offline'
+                 WHEN COALESCE(p.is_online, FALSE) = FALSE THEN 'offline'
                  WHEN p.status = 'invisible' THEN 'offline'
                  ELSE COALESCE(p.status, 'online')
                END as status
         FROM friendships f
         JOIN users u ON u.id = f.friend_id
         LEFT JOIN user_presence p ON p.user_id = u.id
-        WHERE f.user_id = ?
-          AND COALESCE(p.is_online, 0) = 1
+        WHERE f.user_id = $1
+          AND COALESCE(p.is_online, FALSE) = TRUE
           AND COALESCE(p.status, 'online') != 'invisible'
         ORDER BY f.is_favorite DESC, u.username ASC
         "#,
@@ -740,9 +737,9 @@ async fn set_favorite(
     };
 
     let q = sqlx::query(
-        "UPDATE friendships SET is_favorite = ? WHERE user_id = ? AND friend_id = ?",
+        "UPDATE friendships SET is_favorite = $1 WHERE user_id = $2 AND friend_id = $3",
     )
-    .bind(if body.favorite { 1 } else { 0 })
+    .bind(body.favorite)
     .bind(me)
     .bind(friend_id)
     .execute(&st.db)

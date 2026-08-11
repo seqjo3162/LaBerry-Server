@@ -207,7 +207,7 @@ async fn save_key_backup(
     let res = sqlx::query(
         r#"
         INSERT INTO user_key_backups (user_id, blob_password, salt_password, blob_email, salt_email, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT(user_id) DO UPDATE SET
             blob_password = excluded.blob_password, 
             salt_password = excluded.salt_password,
@@ -240,7 +240,7 @@ async fn get_key_backup(
 ) -> impl IntoResponse {
     let db = &st.db;
     let row = sqlx::query(
-        "SELECT blob_password, salt_password, blob_email, salt_email FROM user_key_backups WHERE user_id = ?",
+        "SELECT blob_password, salt_password, blob_email, salt_email FROM user_key_backups WHERE user_id = $1",
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -315,7 +315,7 @@ pub struct DeviceKeyView {
 }
 
 fn normalize_client_public_key(raw: &str) -> Option<String> {
-    use crate::e2ee::E2eeKeyPair;
+    use crate::crypto::e2ee::E2eeKeyPair;
 
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -561,25 +561,25 @@ async fn search(
     let rows = sqlx::query(
         r#"SELECT u.id, u.username, u.public_encryption_key
            FROM users u
-           WHERE u.username LIKE ?
-             AND u.id != ?
+           WHERE u.username ILIKE $1
+             AND u.id != $2
               AND NOT EXISTS (
                 SELECT 1 FROM user_blocks b
-                WHERE (b.blocker_id = ? AND b.blocked_id = u.id)
-                   OR (b.blocker_id = u.id AND b.blocked_id = ?)
+                WHERE (b.blocker_id = $3 AND b.blocked_id = u.id)
+                   OR (b.blocker_id = u.id AND b.blocked_id = $4)
               )
              AND NOT EXISTS (
                SELECT 1
                FROM friendships f
-               WHERE (f.user_id = ? AND f.friend_id = u.id)
-                  OR (f.user_id = u.id AND f.friend_id = ?)
+               WHERE (f.user_id = $5 AND f.friend_id = u.id)
+                  OR (f.user_id = u.id AND f.friend_id = $6)
              )
              AND NOT EXISTS (
                SELECT 1
                FROM friend_requests fr
                WHERE fr.status = 'pending'
-                 AND ((fr.sender_id = ? AND fr.receiver_id = u.id)
-                   OR (fr.sender_id = u.id AND fr.receiver_id = ?))
+                 AND ((fr.sender_id = $7 AND fr.receiver_id = u.id)
+                   OR (fr.sender_id = u.id AND fr.receiver_id = $8))
              )
            ORDER BY u.id DESC
            LIMIT 50"#,
@@ -617,7 +617,7 @@ async fn get_by_id(
 
     let row = sqlx::query(
         r#"SELECT id, username, public_encryption_key
-           FROM users WHERE id = ? LIMIT 1"#,
+           FROM users WHERE id = $1 LIMIT 1"#,
     )
     .bind(id)
     .fetch_optional(db)
@@ -667,13 +667,17 @@ async fn register_device_key(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid public_jwk"}))).into_response();
     };
 
-    let _ = sqlx::query("UPDATE users SET public_encryption_key = ? WHERE id = ?")
+    let _ = sqlx::query("UPDATE users SET public_encryption_key = $1 WHERE id = $2")
         .bind(&pub_key_b64).bind(me.id).execute(db).await;
 
     let label = body.label.as_ref().map(|s| s.trim().to_string());
     let _ = sqlx::query(
-        r#"INSERT OR REPLACE INTO user_device_keys(device_id, user_id, public_jwk, label, created_at, last_seen)
-           VALUES(?, ?, ?, ?, ?, ?)"#,
+        r#"INSERT INTO user_device_keys(device_id, user_id, public_jwk, label, created_at, last_seen)
+           VALUES($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (device_id, user_id) DO UPDATE SET
+               public_jwk = excluded.public_jwk,
+               label = excluded.label,
+               last_seen = excluded.last_seen"#,
     )
     .bind(did).bind(me.id).bind(&pub_key_b64).bind(label).bind(&now).bind(&now)
     .execute(db).await;
@@ -690,7 +694,7 @@ async fn get_user_device_keys(
     let db = &st.db;
 
     let rows = sqlx::query(
-        r#"SELECT device_id, public_jwk, label, last_seen FROM user_device_keys WHERE user_id = ?"#,
+        r#"SELECT device_id, public_jwk, label, last_seen FROM user_device_keys WHERE user_id = $1"#,
     )
     .bind(id)
     .fetch_all(db)
@@ -699,7 +703,7 @@ async fn get_user_device_keys(
     .unwrap_or_default();
 
     let account_key: Option<String> = sqlx::query_scalar(
-        "SELECT public_encryption_key FROM users WHERE id = ? LIMIT 1",
+        "SELECT public_encryption_key FROM users WHERE id = $1 LIMIT 1",
     )
     .bind(id)
     .fetch_optional(db)

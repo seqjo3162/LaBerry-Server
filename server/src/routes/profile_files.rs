@@ -126,9 +126,9 @@ async fn upload(
     }
 
     let created_at = auth::now_iso();
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"INSERT INTO profile_files(filename, original_name, file_size, mime_type, storage_path, uploaded_by, created_at)
-           VALUES(?, ?, ?, ?, ?, ?, ?)"#,
+           VALUES($1, $2, $3, $4, $5, $6, $7) RETURNING id"#,
     )
     .bind(&stored_filename)
     .bind(&original_name)
@@ -137,15 +137,13 @@ async fn upload(
     .bind(storage_path.to_string_lossy().to_string())
     .bind(me.id)
     .bind(&created_at)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
-    let Ok(r) = res else {
+    let Ok(file_id) = res else {
         let _ = fs::remove_file(&storage_path).await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-
-    let file_id = r.last_insert_rowid();
 
     (
         StatusCode::OK,
@@ -166,14 +164,14 @@ pub async fn get_raw(
 ) -> impl IntoResponse {
     let db = &st.db;
     let row = sqlx::query(
-        "SELECT original_name, mime_type, storage_path FROM profile_files WHERE id = ? LIMIT 1",
+        "SELECT original_name, mime_type, storage_path FROM profile_files WHERE id = $1 LIMIT 1",
     )
     .bind(file_id)
     .fetch_optional(db)
     .await;
 
     let Ok(Some(r)) = row else {
-        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL WHERE avatar_file_id = ?")
+        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL WHERE avatar_file_id = $1")
             .bind(file_id)
             .execute(db)
             .await;
@@ -186,11 +184,11 @@ pub async fn get_raw(
 
     let path = std::path::Path::new(&storage_path);
     if !path.exists() {
-        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL WHERE avatar_file_id = ?")
+        let _ = sqlx::query("UPDATE users SET avatar_file_id = NULL WHERE avatar_file_id = $1")
             .bind(file_id)
             .execute(db)
             .await;
-        let _ = sqlx::query("DELETE FROM profile_files WHERE id = ?")
+        let _ = sqlx::query("DELETE FROM profile_files WHERE id = $1")
             .bind(file_id)
             .execute(db)
             .await;

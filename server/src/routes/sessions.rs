@@ -35,7 +35,7 @@ async fn list_my(State(st): State<AppState>, me: AuthUser) -> impl IntoResponse 
         r#"
         SELECT id, token_hash, user_agent, created_at, last_seen_at, revoked_at
         FROM user_sessions
-        WHERE user_id = ?
+        WHERE user_id = $1
         ORDER BY COALESCE(revoked_at, '') ASC, last_seen_at DESC
         LIMIT 200
         "#,
@@ -73,7 +73,7 @@ async fn revoke(
     let db = &st.db;
 
     let session = sqlx::query(
-        "SELECT user_agent, ip FROM user_sessions WHERE id = ? AND user_id = ? LIMIT 1",
+        "SELECT user_agent, ip FROM user_sessions WHERE id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(session_id)
     .bind(me.id)
@@ -90,7 +90,7 @@ async fn revoke(
     let user_agent: Option<String> = session.try_get("user_agent").ok();
     let ip: Option<String> = session.try_get("ip").ok();
 
-    let _ = sqlx::query("UPDATE user_sessions SET revoked_at = ? WHERE id = ?")
+    let _ = sqlx::query("UPDATE user_sessions SET revoked_at = $1 WHERE id = $2")
         .bind(&now)
         .bind(session_id)
         .execute(db)
@@ -99,18 +99,16 @@ async fn revoke(
     let _ = sqlx::query(
         r#"
         UPDATE refresh_sessions
-        SET revoked_at = ?
-        WHERE user_id = ?
+        SET revoked_at = $1
+        WHERE user_id = $2
           AND revoked_at IS NULL
-          AND ((user_agent = ?) OR (user_agent IS NULL AND ? IS NULL))
-          AND ((ip = ?) OR (ip IS NULL AND ? IS NULL))
+          AND ((user_agent IS NULL AND $3 IS NULL) OR user_agent = $3)
+          AND ((ip IS NULL AND $4 IS NULL) OR ip = $4)
         "#,
     )
     .bind(&now)
     .bind(me.id)
-    .bind(user_agent.clone())
     .bind(user_agent)
-    .bind(ip.clone())
     .bind(ip)
     .execute(db)
     .await;

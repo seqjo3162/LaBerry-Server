@@ -128,7 +128,7 @@ async fn get_one(
         FROM messages m
         JOIN users u ON u.id = m.sender_id
         LEFT JOIN user_profile up ON up.user_id = u.id
-        WHERE m.id = ?
+        WHERE m.id = $1
         LIMIT 1
         "#,
     )
@@ -181,7 +181,7 @@ async fn can_access_message(
         SELECT c.id AS chat_id, c.server_id, c.is_private, COALESCE(c.kind, 'text') AS kind
         FROM messages m
         JOIN chats c ON c.id = m.chat_id
-        WHERE m.id = ?
+        WHERE m.id = $1
         LIMIT 1
         "#
     )
@@ -193,12 +193,12 @@ async fn can_access_message(
 
     let chat_id: i64 = r.get("chat_id");
     let server_id: Option<i64> = r.try_get("server_id").ok();
-    let _is_private: i64 = r.get("is_private");
+    let _is_private: bool = r.get("is_private");
     let kind: String = r.get("kind");
 
     let allowed = if let Some(sid) = server_id.filter(|sid| *sid > 0) {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(user_id)
@@ -208,7 +208,7 @@ async fn can_access_message(
     } else {
         // Support both current and legacy DM/private chat rows.
         let in_participants = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(user_id)
@@ -220,7 +220,7 @@ async fn can_access_message(
             true
         } else {
             sqlx::query_scalar::<_, i64>(
-                "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
+                "SELECT 1 FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
             )
             .bind(chat_id)
             .bind(user_id)
@@ -235,10 +235,8 @@ async fn can_access_message(
     }
 
     // voice text: visible only while user is in this voice channel
-    if kind == "voice" {
-        if st.hub.voice_get_user_channel(user_id) != Some(chat_id) {
-            return Ok(None);
-        }
+    if kind == "voice" && st.hub.voice_get_user_channel(user_id) != Some(chat_id) {
+        return Ok(None);
     }
 
     Ok(Some((chat_id, kind)))
@@ -262,7 +260,7 @@ async fn delete_message(
         r#"
         SELECT sender_id
         FROM messages
-        WHERE id = ?
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -279,7 +277,7 @@ async fn delete_message(
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"detail":"only_sender_can_delete_message"}))).into_response();
     }
 
-    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE message_id = ?")
+    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE message_id = $1")
         .bind(message_id)
         .fetch_all(db)
         .await
@@ -299,7 +297,7 @@ async fn delete_message(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    if sqlx::query("DELETE FROM message_reactions WHERE message_id = ?")
+    if sqlx::query("DELETE FROM message_reactions WHERE message_id = $1")
         .bind(message_id)
         .execute(&mut *tx)
         .await
@@ -309,7 +307,7 @@ async fn delete_message(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    if sqlx::query("DELETE FROM pinned_messages WHERE message_id = ?")
+    if sqlx::query("DELETE FROM pinned_messages WHERE message_id = $1")
         .bind(message_id)
         .execute(&mut *tx)
         .await
@@ -319,7 +317,7 @@ async fn delete_message(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    if sqlx::query("DELETE FROM files WHERE message_id = ?")
+    if sqlx::query("DELETE FROM files WHERE message_id = $1")
         .bind(message_id)
         .execute(&mut *tx)
         .await
@@ -329,7 +327,7 @@ async fn delete_message(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    let deleted = match sqlx::query("DELETE FROM messages WHERE id = ?")
+    let deleted = match sqlx::query("DELETE FROM messages WHERE id = $1")
         .bind(message_id)
         .execute(&mut *tx)
         .await
@@ -351,7 +349,7 @@ async fn delete_message(
     }
 
     for (storage_path, filename) in &file_refs {
-        crate::routes::files::cleanup_file_artifacts_if_unreferenced(&st, &storage_path, &filename).await;
+        crate::routes::files::cleanup_file_artifacts_if_unreferenced(&st, storage_path, filename).await;
     }
 
     let out = serde_json::json!({
@@ -394,7 +392,7 @@ async fn get_reactions(
         return StatusCode::FORBIDDEN.into_response();
     };
 
-    let mine = sqlx::query("SELECT emoji FROM message_reactions WHERE message_id = ? AND user_id = ?")
+    let mine = sqlx::query("SELECT emoji FROM message_reactions WHERE message_id = $1 AND user_id = $2")
         .bind(message_id)
         .bind(me.id)
         .fetch_all(db)
@@ -405,7 +403,7 @@ async fn get_reactions(
         .collect::<std::collections::HashSet<_>>();
 
     let rows = sqlx::query(
-        r#"SELECT emoji, COUNT(*) as cnt FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY cnt DESC"#,
+        r#"SELECT emoji, COUNT(*) as cnt FROM message_reactions WHERE message_id = $1 GROUP BY emoji ORDER BY cnt DESC"#,
     )
     .bind(message_id)
     .fetch_all(db)
@@ -448,7 +446,7 @@ async fn add_reaction(
 
     let now = auth::now_iso();
     let q = sqlx::query(
-        r#"INSERT OR IGNORE INTO message_reactions(message_id, user_id, emoji, created_at) VALUES(?, ?, ?, ?)"#,
+        r#"INSERT INTO message_reactions(message_id, user_id, emoji, created_at) VALUES($1, $2, $3, $4) ON CONFLICT DO NOTHING"#,
     )
     .bind(message_id)
     .bind(me.id)
@@ -499,7 +497,7 @@ async fn remove_reaction(
         return StatusCode::BAD_REQUEST.into_response();
     }
 
-    let q = sqlx::query("DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?")
+    let q = sqlx::query("DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3")
         .bind(message_id)
         .bind(me.id)
         .bind(e)
@@ -538,7 +536,7 @@ pub async fn list(
 
     // проверка: пользователь состоит в сервере
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -553,7 +551,7 @@ pub async fn list(
     }
 
     // ensure chat belongs to this server + get kind
-    let meta = sqlx::query("SELECT server_id, is_private, COALESCE(kind,'text') AS kind FROM chats WHERE id = ? LIMIT 1")
+    let meta = sqlx::query("SELECT server_id, is_private, COALESCE(kind,'text') AS kind FROM chats WHERE id = $1 LIMIT 1")
         .bind(chat_id)
         .fetch_optional(db)
         .await
@@ -565,17 +563,15 @@ pub async fn list(
     };
 
     let chat_server_id: Option<i64> = m.try_get("server_id").ok();
-    let is_private: i64 = m.get("is_private");
+    let is_private: bool = m.get("is_private");
     let kind: String = m.get("kind");
 
-    if chat_server_id != Some(server_id) || is_private != 0 {
+    if chat_server_id != Some(server_id) || is_private {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    if kind == "voice" {
-        if st.hub.voice_get_user_channel(me.id) != Some(chat_id) {
-            return StatusCode::FORBIDDEN.into_response();
-        }
+    if kind == "voice" && st.hub.voice_get_user_channel(me.id) != Some(chat_id) {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
@@ -602,10 +598,10 @@ pub async fn list(
             LEFT JOIN messages rm ON rm.id = m.reply_to_message_id
             LEFT JOIN users ru ON ru.id = rm.sender_id
             LEFT JOIN user_profile rup ON rup.user_id = ru.id
-            WHERE m.chat_id = ?
-              AND m.id < ?
+            WHERE m.chat_id = $1
+              AND m.id < $2
             ORDER BY m.id DESC
-            LIMIT ?
+            LIMIT $3
             "#,
         )
         .bind(chat_id)
@@ -636,9 +632,9 @@ pub async fn list(
             LEFT JOIN messages rm ON rm.id = m.reply_to_message_id
             LEFT JOIN users ru ON ru.id = rm.sender_id
             LEFT JOIN user_profile rup ON rup.user_id = ru.id
-            WHERE m.chat_id = ?
+            WHERE m.chat_id = $1
             ORDER BY m.id DESC
-            LIMIT ?
+            LIMIT $2
             "#,
         )
         .bind(chat_id)
@@ -656,7 +652,7 @@ pub async fn list(
         let mut content: String = r.get("content");
 
         let blocked = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_id = ? LIMIT 1",
+            "SELECT 1 FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2 LIMIT 1",
         )
         .bind(me.id)
         .bind(sender_id)
@@ -709,7 +705,7 @@ pub async fn list(
         let ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
 
         // counts per message
-        let mut qb = QueryBuilder::<sqlx::Sqlite>::new(
+        let mut qb = QueryBuilder::<sqlx::Postgres>::new(
             "SELECT message_id, emoji, COUNT(*) as cnt FROM message_reactions WHERE message_id IN (",
         );
         {
@@ -730,7 +726,7 @@ pub async fn list(
         }
 
         // my reactions for this page
-        let mut qb2 = QueryBuilder::<sqlx::Sqlite>::new(
+        let mut qb2 = QueryBuilder::<sqlx::Postgres>::new(
             "SELECT message_id, emoji FROM message_reactions WHERE user_id = ",
         );
         qb2.push_bind(me.id);
@@ -776,7 +772,7 @@ pub async fn list(
             let _ = sqlx::query(
                 r#"
                 INSERT INTO chat_reads(chat_id, user_id, last_read_message_id, updated_at)
-                VALUES(?, ?, ?, ?)
+                VALUES($1, $2, $3, $4)
                 ON CONFLICT(chat_id, user_id) DO UPDATE SET
                     last_read_message_id = excluded.last_read_message_id,
                     updated_at = excluded.updated_at
@@ -820,7 +816,7 @@ pub async fn send(
 
     // проверка: пользователь состоит в сервере
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -835,7 +831,7 @@ pub async fn send(
     }
 
     // ensure chat belongs to this server + get kind
-    let meta = sqlx::query("SELECT server_id, is_private, COALESCE(kind,'text') AS kind FROM chats WHERE id = ? LIMIT 1")
+    let meta = sqlx::query("SELECT server_id, is_private, COALESCE(kind,'text') AS kind FROM chats WHERE id = $1 LIMIT 1")
         .bind(chat_id)
         .fetch_optional(db)
         .await
@@ -847,10 +843,10 @@ pub async fn send(
     };
 
     let chat_server_id: Option<i64> = m.try_get("server_id").ok();
-    let is_private: i64 = m.get("is_private");
+    let is_private: bool = m.get("is_private");
     let kind: String = m.get("kind");
 
-    if chat_server_id != Some(server_id) || is_private != 0 {
+    if chat_server_id != Some(server_id) || is_private {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -858,15 +854,13 @@ pub async fn send(
         return encrypted_message_required_response();
     }
 
-    if kind == "voice" {
-        if st.hub.voice_get_user_channel(me.id) != Some(chat_id) {
-            return StatusCode::FORBIDDEN.into_response();
-        }
+    if kind == "voice" && st.hub.voice_get_user_channel(me.id) != Some(chat_id) {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     if let Some(reply_to_id) = body.reply_to_id {
         let reply_ok = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM messages WHERE id = ? AND chat_id = ? LIMIT 1",
+            "SELECT 1 FROM messages WHERE id = $1 AND chat_id = $2 LIMIT 1",
         )
         .bind(reply_to_id)
         .bind(chat_id)
@@ -887,10 +881,10 @@ pub async fn send(
 
     let timestamp = auth::now_iso();
 
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO messages (chat_id, sender_id, content, timestamp, reply_to_message_id)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4, $5) RETURNING id
         "#,
     )
     .bind(chat_id)
@@ -898,14 +892,12 @@ pub async fn send(
     .bind(&content)
     .bind(&timestamp)
     .bind(body.reply_to_id)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
-    let Ok(r) = res else {
+    let Ok(message_id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-
-    let message_id = r.last_insert_rowid();
 
     // привязка загруженных файлов к этому сообщению (если есть маркеры)
     let mut file_ids: Vec<i64> = RE_FILE_REFERENCE
@@ -919,12 +911,12 @@ pub async fn send(
         let _ = sqlx::query(
             r#"
                 UPDATE files
-                SET message_id = ?,
+                SET message_id = $1,
                     storage_kind = 'message',
                     expires_at = NULL
-                WHERE id = ?
-                  AND chat_id = ?
-                  AND uploaded_by = ?
+                WHERE id = $2
+                  AND chat_id = $3
+                  AND uploaded_by = $4
                   AND (message_id IS NULL OR message_id = 0)
                 "#,
         )
@@ -938,7 +930,7 @@ pub async fn send(
 
     // WS broadcast
     let sender_avatar_file_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT avatar_file_id FROM user_profile WHERE user_id = ? LIMIT 1",
+        "SELECT avatar_file_id FROM user_profile WHERE user_id = $1 LIMIT 1",
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -958,7 +950,7 @@ pub async fn send(
             FROM messages rm
             JOIN users ru ON ru.id = rm.sender_id
             LEFT JOIN user_profile rup ON rup.user_id = ru.id
-            WHERE rm.id = ?
+            WHERE rm.id = $1
             LIMIT 1
             "#,
         )
@@ -997,10 +989,6 @@ pub async fn send(
     let room = if kind == "voice" { RoomId::Voice(chat_id) } else { RoomId::Channel(chat_id) };
     st.hub.broadcast_room(&room, &out);
 
-    if kind == "text" && !content.starts_with("[[e2ee:v1|") {
-        crate::ai_client::spawn_channel_reply(st.clone(), chat_id, me.id, message_id);
-    }
-
     (
         StatusCode::OK,
         Json(serde_json::json!({ "id": message_id, "timestamp": timestamp })),
@@ -1025,8 +1013,8 @@ async fn pin_message(
     let now = auth::now_iso();
 
     let q = sqlx::query(
-        r#"INSERT OR IGNORE INTO pinned_messages(chat_id, message_id, pinned_by, pinned_at)
-           VALUES(?, ?, ?, ?)"#,
+        r#"INSERT INTO pinned_messages(chat_id, message_id, pinned_by, pinned_at)
+           VALUES($1, $2, $3, $4) ON CONFLICT DO NOTHING"#,
     )
     .bind(chat_id)
     .bind(message_id)
@@ -1057,7 +1045,7 @@ async fn unpin_message(
     };
 
 
-    let q = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = ? AND message_id = ?")
+    let q = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = $1 AND message_id = $2")
         .bind(chat_id)
         .bind(message_id)
         .execute(db)

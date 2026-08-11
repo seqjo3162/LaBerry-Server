@@ -58,17 +58,38 @@ pub mod friends_events;
 // ======================================================
 // HUB STRUCTURE
 // ======================================================
+pub type PresenceMap = DashMap<UserId, DashMap<ConnId, WsSender>>;
+pub type RoomsMap = DashMap<RoomId, DashMap<UserId, DashMap<ConnId, WsSender>>>;
+pub type PendingUserEventsMap = DashMap<UserId, Vec<Value>>;
+pub type VoiceSsMap = DashMap<VoiceChannelId, DashMap<UserId, ()>>;
+
 #[derive(Clone)]
 pub struct Hub {
-    pub presence: Arc<DashMap<UserId, DashMap<ConnId, WsSender>>>,
-    pub rooms: Arc<DashMap<RoomId, DashMap<UserId, DashMap<ConnId, WsSender>>>>,
+    pub presence: Arc<PresenceMap>,
+    pub rooms: Arc<RoomsMap>,
     pub active_conn: Arc<DashMap<UserId, ConnId>>,
     pub conn_details: Arc<DashMap<ConnId, ConnectionDetail>>,
     pub user_locks: Arc<DashMap<UserId, Arc<tokio::sync::Notify>>>,
     pub voice_by_conn: Arc<DashMap<ConnId, VoiceChannelId>>,
     pub voice_by_user: Arc<DashMap<UserId, VoiceChannelId>>,
-    pub pending_user_events: Arc<DashMap<UserId, Vec<Value>>>,
-    pub ss_by_voice: Arc<DashMap<VoiceChannelId, DashMap<UserId, ()>>>,
+    pub pending_user_events: Arc<PendingUserEventsMap>,
+    pub ss_by_voice: Arc<VoiceSsMap>,
+}
+
+impl Default for Hub {
+    fn default() -> Self {
+        Self {
+            presence: Arc::new(DashMap::new()),
+            rooms: Arc::new(DashMap::new()),
+            active_conn: Arc::new(DashMap::new()),
+            conn_details: Arc::new(DashMap::new()),
+            user_locks: Arc::new(DashMap::new()),
+            voice_by_conn: Arc::new(DashMap::new()),
+            voice_by_user: Arc::new(DashMap::new()),
+            pending_user_events: Arc::new(DashMap::new()),
+            ss_by_voice: Arc::new(DashMap::new()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -81,17 +102,7 @@ pub struct ConnectionDetail {
 
 impl Hub {
     pub fn new() -> Self {
-        Self {
-            presence: Arc::new(DashMap::new()),
-            rooms: Arc::new(DashMap::new()),
-            active_conn: Arc::new(DashMap::new()),
-            conn_details: Arc::new(DashMap::new()),
-            user_locks: Arc::new(DashMap::new()),
-            voice_by_conn: Arc::new(DashMap::new()),
-            voice_by_user: Arc::new(DashMap::new()),
-            pending_user_events: Arc::new(DashMap::new()),
-            ss_by_voice: Arc::new(DashMap::new()),
-        }
+        Self::default()
     }
 
     // ===================
@@ -157,7 +168,7 @@ impl Hub {
         }
 
         if is_on {
-            let set = self.ss_by_voice.entry(channel_id).or_insert_with(DashMap::new);
+            let set = self.ss_by_voice.entry(channel_id).or_default();
             set.insert(user_id, ());
         } else {
             if let Some(set) = self.ss_by_voice.get_mut(&channel_id) {
@@ -207,7 +218,7 @@ impl Hub {
         let user_conns = self
             .presence
             .entry(user_id)
-            .or_insert_with(DashMap::new);
+            .or_default();
 
         user_conns.insert(conn_id, tx.clone());
         
@@ -241,8 +252,8 @@ impl Hub {
         conn_id: ConnId,
         tx: WsSender,
     ) {
-        let room = self.rooms.entry(room_id).or_insert_with(DashMap::new);
-        let user_conns = room.entry(user_id).or_insert_with(DashMap::new);
+        let room = self.rooms.entry(room_id).or_default();
+        let user_conns = room.entry(user_id).or_default();
         user_conns.insert(conn_id, tx);
     }
 
@@ -361,7 +372,7 @@ impl Hub {
     }
 
     pub fn queue_for_user(&self, user_id: UserId, payload: Value) {
-        let mut entry = self.pending_user_events.entry(user_id).or_insert_with(Vec::new);
+        let mut entry = self.pending_user_events.entry(user_id).or_default();
         entry.push(payload);
 
         let len = entry.len();

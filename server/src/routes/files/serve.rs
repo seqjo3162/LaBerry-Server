@@ -57,7 +57,7 @@ pub(crate) async fn get_file_link(
 
     // Get token_version from DB
     let token_version = match sqlx::query_scalar::<_, i64>(
-        "SELECT token_version FROM users WHERE id = ? LIMIT 1"
+        "SELECT token_version FROM users WHERE id = $1 LIMIT 1"
     )
     .bind(me.id)
     .fetch_optional(&st.db)

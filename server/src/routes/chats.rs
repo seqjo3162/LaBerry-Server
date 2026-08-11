@@ -56,8 +56,8 @@ fn default_settings_json() -> Value {
     })
 }
 
-async fn get_user_settings_json(db: &sqlx::SqlitePool, user_id: i64) -> Value {
-    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = ? LIMIT 1")
+async fn get_user_settings_json(db: &sqlx::PgPool, user_id: i64) -> Value {
+    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = $1 LIMIT 1")
         .bind(user_id)
         .fetch_optional(db)
         .await
@@ -72,7 +72,7 @@ async fn get_user_settings_json(db: &sqlx::SqlitePool, user_id: i64) -> Value {
     serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| default_settings_json())
 }
 
-async fn get_user_dm_mode(db: &sqlx::SqlitePool, user_id: i64) -> String {
+async fn get_user_dm_mode(db: &sqlx::PgPool, user_id: i64) -> String {
     let s = get_user_settings_json(db, user_id).await;
     s.get("dms")
         .and_then(|v| v.as_str())
@@ -80,9 +80,9 @@ async fn get_user_dm_mode(db: &sqlx::SqlitePool, user_id: i64) -> String {
         .to_string()
 }
 
-async fn are_friends(db: &sqlx::SqlitePool, a: i64, b: i64) -> bool {
+async fn are_friends(db: &sqlx::PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM friendships WHERE user_id = ? AND friend_id = ? LIMIT 1",
+        "SELECT 1 FROM friendships WHERE user_id = $1 AND friend_id = $2 LIMIT 1",
     )
     .bind(a)
     .bind(b)
@@ -93,13 +93,13 @@ async fn are_friends(db: &sqlx::SqlitePool, a: i64, b: i64) -> bool {
     .is_some()
 }
 
-async fn share_server(db: &sqlx::SqlitePool, a: i64, b: i64) -> bool {
+async fn share_server(db: &sqlx::PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT 1
         FROM server_members s1
         JOIN server_members s2 ON s1.server_id = s2.server_id
-        WHERE s1.user_id = ? AND s2.user_id = ?
+        WHERE s1.user_id = $1 AND s2.user_id = $2
         LIMIT 1
         "#,
     )
@@ -131,7 +131,7 @@ async fn create(
 
                 // ensure user exists & not banned (also avoids leaking)
                 let ok_user = sqlx::query_scalar::<_, i64>(
-                    "SELECT 1 FROM users WHERE id = ? AND is_banned = 0 LIMIT 1",
+                    "SELECT 1 FROM users WHERE id = $1 AND NOT is_banned LIMIT 1",
                 )
                 .bind(uid)
                 .fetch_optional(db)
@@ -167,7 +167,7 @@ async fn create(
     // server chat: creator MUST be server member
     if let Some(server_id) = body.server_id {
         let member = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(me.id)
@@ -182,29 +182,27 @@ async fn create(
         }
     }
 
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO chats(name, server_id, is_private, created_at)
-        VALUES(?, ?, ?, ?)
+        VALUES($1, $2, $3, $4) RETURNING id
         "#,
     )
     .bind(&body.name)
     .bind(body.server_id)
-    .bind(if is_private { 1 } else { 0 })
+    .bind(is_private)
     .bind(&created_at)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
-    let Ok(r) = res else {
+    let Ok(chat_id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-
-    let chat_id = r.last_insert_rowid();
 
     // creator is always participant
     let _ = sqlx::query(
         r#"INSERT INTO chat_participants(chat_id, user_id)
-           VALUES(?, ?)"#,
+           VALUES($1, $2)"#,
     )
     .bind(chat_id)
     .bind(me.id)
@@ -222,7 +220,7 @@ async fn create(
 
                 // ensure user exists & not banned
                 let ok = sqlx::query_scalar::<_, i64>(
-                    "SELECT 1 FROM users WHERE id = ? AND is_banned = 0 LIMIT 1",
+                    "SELECT 1 FROM users WHERE id = $1 AND NOT is_banned LIMIT 1",
                 )
                 .bind(uid)
                 .fetch_optional(db)
@@ -233,8 +231,8 @@ async fn create(
 
                 if ok {
                     let _ = sqlx::query(
-                        r#"INSERT OR IGNORE INTO chat_participants(chat_id, user_id)
-                           VALUES(?, ?)"#,
+                        r#"INSERT INTO chat_participants(chat_id, user_id)
+                           VALUES($1, $2) ON CONFLICT DO NOTHING"#,
                     )
                     .bind(chat_id)
                     .bind(uid)
@@ -256,7 +254,7 @@ async fn join(
     let db = &st.db;
 
     let row = sqlx::query(
-        "SELECT is_private, server_id FROM chats WHERE id = ? LIMIT 1",
+        "SELECT is_private, server_id FROM chats WHERE id = $1 LIMIT 1",
     )
     .bind(chat_id)
     .fetch_optional(db)
@@ -268,18 +266,18 @@ async fn join(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let is_private: i64 = r.get("is_private");
+    let is_private: bool = r.get("is_private");
     let server_id: Option<i64> = r.get("server_id");
 
     // ❌ private chats cannot be joined
-    if is_private == 1 {
+    if is_private {
         return StatusCode::FORBIDDEN.into_response();
     }
 
     // server chat: must be server member
     if let Some(sid) = server_id {
         let member = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(me.id)
@@ -295,8 +293,8 @@ async fn join(
     }
 
     let _ = sqlx::query(
-        r#"INSERT OR IGNORE INTO chat_participants(chat_id, user_id)
-           VALUES(?, ?)"#,
+        r#"INSERT INTO chat_participants(chat_id, user_id)
+           VALUES($1, $2) ON CONFLICT DO NOTHING"#,
     )
     .bind(chat_id)
     .bind(me.id)
@@ -315,11 +313,11 @@ async fn get_one(
     #[derive(sqlx::FromRow)]
     struct ChatMeta {
         server_id: Option<i64>,
-        is_private: i64,
+        is_private: bool,
         kind: Option<String>,
     }
 
-    let meta: Option<ChatMeta> = sqlx::query_as("SELECT server_id, is_private, kind FROM chats WHERE id = ? LIMIT 1")
+    let meta: Option<ChatMeta> = sqlx::query_as("SELECT server_id, is_private, kind FROM chats WHERE id = $1 LIMIT 1")
         .bind(chat_id)
         .fetch_optional(db)
         .await
@@ -333,9 +331,9 @@ async fn get_one(
     let kind = meta.kind.unwrap_or_else(|| "text".to_string());
 
     // access: private -> participants; server public -> server_members
-    let member = if meta.is_private != 0 {
+    let member = if meta.is_private {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(me.id)
@@ -346,7 +344,7 @@ async fn get_one(
         .is_some()
     } else if let Some(sid) = meta.server_id {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(me.id)
@@ -364,10 +362,8 @@ async fn get_one(
     }
 
     // voice text: only while user is in this voice channel
-    if kind == "voice" {
-        if st.hub.voice_get_user_channel(me.id) != Some(chat_id) {
-            return StatusCode::FORBIDDEN.into_response();
-        }
+    if kind == "voice" && st.hub.voice_get_user_channel(me.id) != Some(chat_id) {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
 
@@ -375,7 +371,7 @@ async fn get_one(
         r#"
         SELECT id, name, server_id, is_private, created_at, kind
         FROM chats
-        WHERE id = ?
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -393,7 +389,7 @@ async fn get_one(
         id: r.get("id"),
         name: r.get("name"),
         server_id: r.get("server_id"),
-        is_private: r.get("is_private"),
+        is_private: r.get::<bool, _>("is_private") as i64,
         created_at: r.get("created_at"),
         kind: r.get::<String, _>("kind"),
         unread_count: 0,
@@ -434,10 +430,10 @@ async fn list_pins(
     #[derive(sqlx::FromRow)]
     struct ChatInfo {
         server_id: Option<i64>,
-        is_private: i64,
+        is_private: bool,
     }
 
-    let chat: Option<ChatInfo> = sqlx::query_as("SELECT server_id, is_private FROM chats WHERE id = ?")
+    let chat: Option<ChatInfo> = sqlx::query_as("SELECT server_id, is_private FROM chats WHERE id = $1")
         .bind(chat_id)
         .fetch_optional(db)
         .await
@@ -450,7 +446,7 @@ async fn list_pins(
 
     let allowed = if let Some(server_id) = chat.server_id {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(me.id)
@@ -462,7 +458,7 @@ async fn list_pins(
     } else {
         // Support both current and legacy DM/private chat rows.
         let in_participants = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(me.id)
@@ -476,7 +472,7 @@ async fn list_pins(
             true
         } else {
             sqlx::query_scalar::<_, i64>(
-                "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
+                "SELECT 1 FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $3) LIMIT 1",
             )
             .bind(chat_id)
             .bind(me.id)
@@ -510,7 +506,7 @@ async fn list_pins(
         LEFT JOIN messages m ON m.id = pm.message_id AND m.chat_id = pm.chat_id
         LEFT JOIN users su ON su.id = m.sender_id
         LEFT JOIN user_profile sup ON sup.user_id = su.id
-        WHERE pm.chat_id = ?
+        WHERE pm.chat_id = $1
         ORDER BY pm.pinned_at DESC
         LIMIT 100
         "#,
@@ -555,18 +551,18 @@ async fn mark_read(
         r#"
         SELECT 1
         FROM chats c
-        WHERE c.id = ?
+        WHERE c.id = $1
           AND (
             EXISTS (
                 SELECT 1
                 FROM chat_participants p
-                WHERE p.chat_id = c.id AND p.user_id = ?
+                WHERE p.chat_id = c.id AND p.user_id = $2
             )
             OR (
-                c.server_id IS NOT NULL AND c.is_private = 0 AND EXISTS (
+                c.server_id IS NOT NULL AND c.is_private = FALSE AND EXISTS (
                     SELECT 1
                     FROM server_members sm
-                    WHERE sm.server_id = c.server_id AND sm.user_id = ?
+                    WHERE sm.server_id = c.server_id AND sm.user_id = $3
                 )
             )
           )
@@ -587,7 +583,7 @@ async fn mark_read(
     }
 
     let max_id = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?",
+        "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = $1",
     )
     .bind(chat_id)
     .fetch_one(db)
@@ -597,7 +593,7 @@ async fn mark_read(
     let requested = body.last_read_message_id.unwrap_or(max_id).max(0).min(max_id);
 
     let last_read = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND id <= ?",
+        "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = $1 AND id <= $2",
     )
     .bind(chat_id)
     .bind(requested)
@@ -609,7 +605,7 @@ async fn mark_read(
     let q = sqlx::query(
         r#"
         INSERT INTO chat_reads(chat_id, user_id, last_read_message_id, updated_at)
-        VALUES(?, ?, ?, ?)
+        VALUES($1, $2, $3, $4)
         ON CONFLICT(chat_id, user_id) DO UPDATE SET
             last_read_message_id = excluded.last_read_message_id,
             updated_at = excluded.updated_at
@@ -652,7 +648,7 @@ async fn list_my(
                 LIMIT 1
             ) AS last_message_id,
             (
-                SELECT substr(m.content, 1, 120)
+                SELECT substring(m.content, 1, 120)
                 FROM messages m
                 WHERE m.chat_id = c.id
                 ORDER BY m.id DESC
@@ -665,7 +661,7 @@ async fn list_my(
                   AND m.id <= COALESCE((
                     SELECT r.last_read_message_id
                     FROM chat_reads r
-                    WHERE r.chat_id = c.id AND r.user_id = ?
+                    WHERE r.chat_id = c.id AND r.user_id = $1
                     LIMIT 1
                   ), 0)
             ) AS last_read_message_id,
@@ -676,14 +672,14 @@ async fn list_my(
                   AND m.id > COALESCE((
                     SELECT r.last_read_message_id
                     FROM chat_reads r
-                    WHERE r.chat_id = c.id AND r.user_id = ?
+                    WHERE r.chat_id = c.id AND r.user_id = $2
                     LIMIT 1
                   ), 0)
                 LIMIT 1
             ) THEN 1 ELSE 0 END AS unread_count
         FROM chats c
         JOIN chat_participants p ON p.chat_id = c.id
-        WHERE p.user_id = ?
+        WHERE p.user_id = $3
         ORDER BY COALESCE(last_message_id, c.id) DESC
         "#,
     )
@@ -700,7 +696,7 @@ async fn list_my(
             id: r.get("id"),
             name: r.get("name"),
             server_id: r.get("server_id"),
-            is_private: r.get("is_private"),
+            is_private: r.get::<bool, _>("is_private") as i64,
             created_at: r.get("created_at"),
             kind: r.get::<String, _>("kind"),
             unread_count: r.get::<i64, _>("unread_count"),

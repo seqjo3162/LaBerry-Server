@@ -9,7 +9,7 @@ use axum::{
 };
 
 use std::net::SocketAddr;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, PgPool};
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::fs::File;
@@ -40,7 +40,7 @@ pub(super) async fn admin_file_raw(
         r#"
         SELECT original_name, mime_type, storage_path, file_size
         FROM files
-        WHERE id = ?
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -105,7 +105,7 @@ pub(super) async fn admin_profile_file_raw(
         r#"
         SELECT original_name, mime_type, storage_path, file_size
         FROM profile_files
-        WHERE id = ?
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -170,7 +170,7 @@ pub(super) async fn admin_gif_raw(
         r#"
         SELECT original_name, storage_path, file_size
         FROM gif_assets
-        WHERE id = ? AND scope = 'global'
+        WHERE id = $1 AND scope = 'global'
         LIMIT 1
         "#,
     )
@@ -255,7 +255,7 @@ pub(super) struct AdminGifRow {
     created_at: String,
 }
 
-pub(super) async fn fetch_admin_global_gifs(db: &SqlitePool) -> Vec<AdminGifRow> {
+pub(super) async fn fetch_admin_global_gifs(db: &PgPool) -> Vec<AdminGifRow> {
     sqlx::query(
         r#"
         SELECT id, original_name, file_size, created_at
@@ -418,7 +418,7 @@ pub(super) async fn admin_gif_delete(
         return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
     }
 
-    let res = sqlx::query("DELETE FROM gif_assets WHERE id = ? AND scope = 'global'")
+    let res = sqlx::query("DELETE FROM gif_assets WHERE id = $1 AND scope = 'global'")
         .bind(id)
         .execute(&st.db)
         .await;
@@ -491,7 +491,7 @@ pub(super) fn admin_download_mime(ext: &str) -> &'static str {
     }
 }
 
-pub(super) async fn fetch_admin_downloads(db: &SqlitePool) -> Vec<AdminDownloadRow> {
+pub(super) async fn fetch_admin_downloads(db: &PgPool) -> Vec<AdminDownloadRow> {
     sqlx::query(
         r#"
         SELECT id, platform, version, original_name, file_size, uploaded_at, is_active
@@ -511,7 +511,7 @@ pub(super) async fn fetch_admin_downloads(db: &SqlitePool) -> Vec<AdminDownloadR
         original_name: r.try_get("original_name").unwrap_or_default(),
         file_size: r.try_get("file_size").unwrap_or(0),
         uploaded_at: r.try_get("uploaded_at").unwrap_or_default(),
-        is_active: r.try_get::<i64, _>("is_active").unwrap_or(0) != 0,
+        is_active: r.try_get::<bool, _>("is_active").unwrap_or(false),
     })
     .collect()
 }
@@ -720,14 +720,14 @@ pub(super) async fn admin_download_upload(
     };
 
     let res = async {
-        sqlx::query("UPDATE app_downloads SET is_active = 0 WHERE platform = ?")
+        sqlx::query("UPDATE app_downloads SET is_active = FALSE WHERE platform = $1")
             .bind(platform)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
             r#"
             INSERT INTO app_downloads(platform, version, original_name, mime_type, file_size, storage_path, uploaded_at, is_active)
-            VALUES(?, ?, ?, ?, ?, ?, ?, 1)
+            VALUES($1, $2, $3, $4, $5, $6, $7, TRUE)
             "#,
         )
         .bind(platform)
@@ -774,7 +774,7 @@ pub(super) async fn admin_download_delete(
         return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response();
     }
 
-    let row = sqlx::query("SELECT storage_path FROM app_downloads WHERE id = ? LIMIT 1")
+    let row = sqlx::query("SELECT storage_path FROM app_downloads WHERE id = $1 LIMIT 1")
         .bind(id)
         .fetch_optional(&st.db)
         .await
@@ -785,7 +785,7 @@ pub(super) async fn admin_download_delete(
     };
     let storage_path: String = row.try_get("storage_path").unwrap_or_default();
 
-    let res = sqlx::query("DELETE FROM app_downloads WHERE id = ?")
+    let res = sqlx::query("DELETE FROM app_downloads WHERE id = $1")
         .bind(id)
         .execute(&st.db)
         .await;
@@ -992,7 +992,7 @@ pub(super) async fn db_list_expired_files_get(
         SELECT id, filename, storage_path, storage_kind, expires_at, deleted_at, uploaded_by, chat_id
         FROM files
         WHERE expires_at IS NOT NULL
-          AND expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+          AND expires_at <= NOW()
         ORDER BY expires_at ASC
         LIMIT 1000
         "#,
@@ -1070,7 +1070,7 @@ fn admin_thumb_path_for(stored_filename: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("storage/files/thumbs").join(format!("{}.png", stem))
 }
 
-pub(super) async fn cleanup_file_storage_orphans_db(db: &SqlitePool) -> anyhow::Result<()> {
+pub(super) async fn cleanup_file_storage_orphans_db(db: &PgPool) -> anyhow::Result<()> {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -1079,7 +1079,7 @@ pub(super) async fn cleanup_file_storage_orphans_db(db: &SqlitePool) -> anyhow::
         SELECT filename, storage_path
         FROM files
         WHERE deleted_at IS NULL
-          AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+          AND (expires_at IS NULL OR expires_at > NOW())
         "#,
     )
     .fetch_all(db)
@@ -1146,7 +1146,7 @@ pub(super) async fn cleanup_file_storage_orphans_db(db: &SqlitePool) -> anyhow::
 // DB Tools (global wipe/reset)
 // =============================
 
-pub(super) async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()> {
+pub(super) async fn wipe_all_messages_exec(db: &PgPool) -> anyhow::Result<()> {
     use std::path::{Path, PathBuf};
 
     let mut tx = db.begin().await?;
@@ -1205,7 +1205,7 @@ pub(super) async fn wipe_all_messages_exec(db: &SqlitePool) -> anyhow::Result<()
     Ok(())
 }
 
-pub(super) async fn wipe_all_servers_exec(db: &SqlitePool) -> anyhow::Result<()> {
+pub(super) async fn wipe_all_servers_exec(db: &PgPool) -> anyhow::Result<()> {
     let server_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM servers ORDER BY id")
         .fetch_all(db)
         .await?;
@@ -1218,7 +1218,7 @@ pub(super) async fn wipe_all_servers_exec(db: &SqlitePool) -> anyhow::Result<()>
     Ok(())
 }
 
-pub(super) async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<()> {
+pub(super) async fn reset_db_keep_users_exec(db: &PgPool) -> anyhow::Result<()> {
     use std::path::{Path, PathBuf};
 
     let mut tx = db.begin().await?;
@@ -1348,7 +1348,7 @@ pub(super) async fn reset_db_keep_users_exec(db: &SqlitePool) -> anyhow::Result<
     Ok(())
 }
 
-pub(super) async fn vacuum_exec(db: &SqlitePool) -> anyhow::Result<()> {
+pub(super) async fn vacuum_exec(db: &PgPool) -> anyhow::Result<()> {
     sqlx::query("VACUUM;").execute(db).await?;
     Ok(())
 }

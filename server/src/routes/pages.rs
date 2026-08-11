@@ -64,8 +64,6 @@ pub fn admin_panel_url(path: &str) -> String {
     let path = path.trim();
     let path = if path.is_empty() || path == "/" {
         "/admin/".to_string()
-    } else if path.starts_with("/admin/") {
-        path.to_string()
     } else if path.starts_with("/admin") {
         path.to_string()
     } else if path.starts_with('/') {
@@ -87,8 +85,6 @@ pub fn admin_panel_url_for_request(headers: &HeaderMap, path: &str) -> String {
     let path = path.trim();
     let path = if path.is_empty() || path == "/" {
         "/admin/".to_string()
-    } else if path.starts_with("/admin/") {
-        path.to_string()
     } else if path.starts_with("/admin") {
         path.to_string()
     } else if path.starts_with('/') {

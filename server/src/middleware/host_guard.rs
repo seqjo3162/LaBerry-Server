@@ -35,7 +35,7 @@ fn request_host(headers: &HeaderMap) -> Option<String> {
 fn host_allowed(host: &str) -> bool {
     const DEFAULT_ALLOWED_DOMAINS: &[&str] = &["laberry.ru"];
 
-    if DEFAULT_ALLOWED_DOMAINS.iter().any(|d| *d == host) {
+    if DEFAULT_ALLOWED_DOMAINS.contains(&host) {
         return true;
     }
 

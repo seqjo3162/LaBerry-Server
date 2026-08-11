@@ -69,7 +69,7 @@ pub async fn list_blocks(State(st): State<AppState>, me: AuthUser) -> impl IntoR
         SELECT b.blocked_id AS user_id, u.username, b.created_at
         FROM user_blocks b
         JOIN users u ON u.id = b.blocked_id
-        WHERE b.blocker_id = ?
+        WHERE b.blocker_id = $1
         ORDER BY b.created_at DESC
         LIMIT 200
         "#,
@@ -96,7 +96,7 @@ pub async fn block_user(State(st): State<AppState>, me: AuthUser, Path(user_id):
         return StatusCode::BAD_REQUEST.into_response();
     }
 
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE id = ? LIMIT 1")
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE id = $1 LIMIT 1")
         .bind(user_id)
         .fetch_optional(&st.db)
         .await
@@ -110,7 +110,7 @@ pub async fn block_user(State(st): State<AppState>, me: AuthUser, Path(user_id):
 
     let now = auth::now_iso();
     let _ = sqlx::query(
-        "INSERT OR IGNORE INTO user_blocks(blocker_id, blocked_id, created_at) VALUES(?, ?, ?)",
+        "INSERT INTO user_blocks(blocker_id, blocked_id, created_at) VALUES($1, $2, $3) ON CONFLICT DO NOTHING",
     )
     .bind(me.id)
     .bind(user_id)
@@ -122,7 +122,7 @@ pub async fn block_user(State(st): State<AppState>, me: AuthUser, Path(user_id):
 }
 
 pub async fn unblock_user(State(st): State<AppState>, me: AuthUser, Path(user_id): Path<i64>) -> impl IntoResponse {
-    let _ = sqlx::query("DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?")
+    let _ = sqlx::query("DELETE FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2")
         .bind(me.id)
         .bind(user_id)
         .execute(&st.db)
@@ -139,7 +139,7 @@ pub async fn list_my_suggestions(
         r#"
         SELECT id, title, message, status, created_at, reviewed_at, admin_note
         FROM user_suggestions
-        WHERE user_id = ?
+        WHERE user_id = $1
         ORDER BY id DESC
         LIMIT 100
         "#,
@@ -184,9 +184,9 @@ pub async fn create_suggestion(
     const SUGGESTION_COOLDOWN_SEC: i64 = 5 * 60;
     let last_age_sec = sqlx::query_scalar::<_, Option<i64>>(
         r#"
-        SELECT CAST(strftime('%s','now') AS INTEGER) - CAST(strftime('%s', created_at) AS INTEGER)
+        SELECT EXTRACT(EPOCH FROM now())::bigint - EXTRACT(EPOCH FROM created_at)::bigint
         FROM user_suggestions
-        WHERE user_id = ?
+        WHERE user_id = $1
         ORDER BY id DESC
         LIMIT 1
         "#,
@@ -199,7 +199,7 @@ pub async fn create_suggestion(
     .flatten();
 
     if let Some(age) = last_age_sec {
-        if age >= 0 && age < SUGGESTION_COOLDOWN_SEC {
+        if (0..SUGGESTION_COOLDOWN_SEC).contains(&age) {
             let retry = SUGGESTION_COOLDOWN_SEC - age;
             return (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -222,20 +222,20 @@ pub async fn create_suggestion(
     }
 
     let created_at = auth::now_iso();
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO user_suggestions(user_id, title, message, status, created_at)
-        VALUES(?, ?, ?, 'open', ?)
+        VALUES($1, $2, $3, 'open', $4) RETURNING id
         "#,
     )
     .bind(me.id)
     .bind(&title)
     .bind(&message)
     .bind(&created_at)
-    .execute(&st.db)
+    .fetch_one(&st.db)
     .await;
 
-    let Ok(done) = res else {
+    let Ok(id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
@@ -243,7 +243,7 @@ pub async fn create_suggestion(
         StatusCode::OK,
         Json(SuggestionResponse {
             ok: true,
-            id: done.last_insert_rowid(),
+            id,
         }),
     )
         .into_response()
@@ -272,7 +272,7 @@ pub async fn report_user(
             .into_response();
     }
 
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE id = ? LIMIT 1")
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM users WHERE id = $1 LIMIT 1")
         .bind(target_user_id)
         .fetch_optional(&st.db)
         .await
@@ -292,10 +292,10 @@ pub async fn report_user(
     let message_id = body.message_id.filter(|id| *id > 0);
     let created_at = auth::now_iso();
 
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO user_reports(reporter_id, target_user_id, message_id, reason, message, status, created_at)
-        VALUES(?, ?, ?, ?, ?, 'open', ?)
+        VALUES($1, $2, $3, $4, $5, 'open', $6) RETURNING id
         "#,
     )
     .bind(me.id)
@@ -304,10 +304,10 @@ pub async fn report_user(
     .bind(&reason)
     .bind(&message)
     .bind(&created_at)
-    .execute(&st.db)
+    .fetch_one(&st.db)
     .await;
 
-    let Ok(done) = res else {
+    let Ok(id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
@@ -315,7 +315,7 @@ pub async fn report_user(
         StatusCode::OK,
         Json(ReportUserResponse {
             ok: true,
-            id: done.last_insert_rowid(),
+            id,
         }),
     )
         .into_response()
@@ -328,7 +328,7 @@ pub async fn delete_me(
 ) -> impl IntoResponse {
     let db = &st.db;
 
-    let row = sqlx::query("SELECT username FROM users WHERE id = ? LIMIT 1")
+    let row = sqlx::query("SELECT username FROM users WHERE id = $1 LIMIT 1")
         .bind(me.id)
         .fetch_optional(db)
         .await
@@ -353,24 +353,24 @@ pub async fn delete_me(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    let _ = sqlx::query("DELETE FROM user_sessions WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM user_sessions WHERE user_id = $1")
         .bind(me.id)
         .execute(&mut *tx)
         .await;
 
-    let _ = sqlx::query("DELETE FROM friendships WHERE user_id = ? OR friend_id = ?")
-        .bind(me.id)
-        .bind(me.id)
-        .execute(&mut *tx)
-        .await;
-
-    let _ = sqlx::query("DELETE FROM friend_requests WHERE sender_id = ? OR receiver_id = ?")
+    let _ = sqlx::query("DELETE FROM friendships WHERE user_id = $1 OR friend_id = $2")
         .bind(me.id)
         .bind(me.id)
         .execute(&mut *tx)
         .await;
 
-    let _ = sqlx::query("DELETE FROM server_members WHERE user_id = ?")
+    let _ = sqlx::query("DELETE FROM friend_requests WHERE sender_id = $1 OR receiver_id = $2")
+        .bind(me.id)
+        .bind(me.id)
+        .execute(&mut *tx)
+        .await;
+
+    let _ = sqlx::query("DELETE FROM server_members WHERE user_id = $1")
         .bind(me.id)
         .execute(&mut *tx)
         .await;
@@ -381,15 +381,15 @@ pub async fn delete_me(
     let _ = sqlx::query(
         r#"
         UPDATE users
-        SET username = ?,
+        SET username = $1,
             email = NULL,
             email_pending = NULL,
-            email_verified = 0,
-            password_hash = ?,
+            email_verified = FALSE,
+            password_hash = $2,
             token_version = token_version + 1,
             public_encryption_key = NULL,
-            is_banned = 1
-        WHERE id = ?
+            is_banned = TRUE
+        WHERE id = $3
         "#,
     )
     .bind(&new_username)
@@ -398,7 +398,7 @@ pub async fn delete_me(
     .execute(&mut *tx)
     .await;
 
-    let _ = sqlx::query("UPDATE user_presence SET is_online = 0, status = 'offline', updated_at = ? WHERE user_id = ?")
+    let _ = sqlx::query("UPDATE user_presence SET is_online = FALSE, status = 'offline', updated_at = $1 WHERE user_id = $2")
         .bind(auth::now_iso())
         .bind(me.id)
         .execute(&mut *tx)

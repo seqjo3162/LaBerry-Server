@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 use chrono::Utc;
-use sea_query::{ColumnDef, Table, PostgresQueryBuilder, Iden};
+use sea_query::{ColumnDef, Table, PostgresQueryBuilder};
 use crate::models::*;
 
 async fn get_applied_versions(db: &PgPool) -> anyhow::Result<Vec<i64>> {
@@ -33,12 +33,12 @@ macro_rules! migration {
 }
 
 async fn exec_sql(db: &PgPool, sql: &str) -> anyhow::Result<()> {
-    sqlx::query(sql).execute(db).await?;
+    sqlx::query(sqlx::AssertSqlSafe(sql)).execute(db).await?;
     Ok(())
 }
 
 async fn column_exists(db: &PgPool, table: &str, column: &str) -> anyhow::Result<bool> {
-    let row: Option<(bool,)> = sqlx::query_as(
+    let row: (bool,) = sqlx::query_as(
         "SELECT EXISTS(
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
@@ -48,7 +48,7 @@ async fn column_exists(db: &PgPool, table: &str, column: &str) -> anyhow::Result
     .bind(column)
     .fetch_one(db)
     .await?;
-    Ok(row.map(|r| r.0).unwrap_or(false))
+    Ok(row.0)
 }
 
 async fn add_column_if_not_exists(
@@ -129,9 +129,7 @@ pub async fn init(db: &PgPool) -> anyhow::Result<()> {
             .col(ColumnDef::new(UserIden::TrustReviewStatus).string().not_null().default("clear"))
             .col(ColumnDef::new(UserIden::TrustReviewReason).string())
             .col(ColumnDef::new(UserIden::TrustReviewAt).timestamp_with_time_zone())
-            .col(ColumnDef::new(UserIden::IsAi).boolean().not_null().default(false))
-            .col(ColumnDef::new(UserIden::AiLabel).string())
-            .col(ColumnDef::new(UserIden::TwoFactorCodeExpiresAt).timestamp_with_time_zone())
+                        .col(ColumnDef::new(UserIden::TwoFactorCodeExpiresAt).timestamp_with_time_zone())
             .col(ColumnDef::new(UserIden::TwoFactorCodeAttempts).integer().not_null().default(0))
             .col(ColumnDef::new(UserIden::TwoFactorLockedUntil).timestamp_with_time_zone())
             .to_string(PostgresQueryBuilder);
@@ -646,52 +644,7 @@ pub async fn init(db: &PgPool) -> anyhow::Result<()> {
         create_index_if_not_exists(db, "ix_app_downloads_platform_active", "app_downloads", &["platform", "is_active", "id"], false, None).await?;
     });
 
-    migration!(db, applied, 4, "AI settings and chat state", {
-        let sql = Table::create()
-            .table(AiSettingIden::Table)
-            .if_not_exists()
-            .col(ColumnDef::new(AiSettingIden::Id).big_integer().not_null().primary_key())
-            .col(ColumnDef::new(AiSettingIden::Enabled).boolean().not_null().default(false))
-            .col(ColumnDef::new(AiSettingIden::BaseUrl).string().not_null().default("http://127.0.0.1:1234/v1"))
-            .col(ColumnDef::new(AiSettingIden::Model).string().not_null().default("qwen_qwen3-4b-instruct-2507"))
-            .col(ColumnDef::new(AiSettingIden::UserName).string().not_null().default("Gemka III"))
-            .col(ColumnDef::new(AiSettingIden::Label).string().not_null().default("Тестовая функция"))
-            .col(ColumnDef::new(AiSettingIden::Mode).string().not_null().default("moderate"))
-            .col(ColumnDef::new(AiSettingIden::DmEnabled).boolean().not_null().default(true))
-            .col(ColumnDef::new(AiSettingIden::ChannelEnabled).boolean().not_null().default(false))
-            .col(ColumnDef::new(AiSettingIden::AcceptFriendRequests).boolean().not_null().default(true))
-            .col(ColumnDef::new(AiSettingIden::AcceptServerJoinRequests).boolean().not_null().default(false))
-            .col(ColumnDef::new(AiSettingIden::StartDmEnabled).boolean().not_null().default(false))
-            .col(ColumnDef::new(AiSettingIden::DmCooldownSeconds).integer().not_null().default(20))
-            .col(ColumnDef::new(AiSettingIden::ChannelCooldownSeconds).integer().not_null().default(90))
-            .col(ColumnDef::new(AiSettingIden::ContextMessages).integer().not_null().default(40))
-            .col(ColumnDef::new(AiSettingIden::MaxTokens).integer().not_null().default(180))
-            .col(ColumnDef::new(AiSettingIden::Temperature).float().not_null().default(0.35))
-            .col(ColumnDef::new(AiSettingIden::TopP).float().not_null().default(0.75))
-            .col(ColumnDef::new(AiSettingIden::SystemPrompt).string().not_null().default(""))
-            .col(ColumnDef::new(AiSettingIden::UpdatedAt).timestamp_with_time_zone().not_null())
-            .col(ColumnDef::new(AiSettingIden::KindnessScore).integer().not_null().default(100))
-            .col(ColumnDef::new(AiSettingIden::NoReplyCount).integer().not_null().default(0))
-            .col(ColumnDef::new(AiSettingIden::ViolationCount).integer().not_null().default(0))
-            .col(ColumnDef::new(AiSettingIden::LastEventAt).timestamp_with_time_zone())
-            .to_string(PostgresQueryBuilder);
-        exec_sql(db, &sql).await?;
-        exec_sql(db, "ALTER TABLE ai_settings ADD CONSTRAINT chk_ai_settings_id CHECK (id = 1);").await?;
-
-        let sql = Table::create()
-            .table(AiChatStateIden::Table)
-            .if_not_exists()
-            .col(ColumnDef::new(AiChatStateIden::ChatId).big_integer().not_null().primary_key())
-            .col(ColumnDef::new(AiChatStateIden::LastReplyAt).timestamp_with_time_zone())
-            .col(ColumnDef::new(AiChatStateIden::LastSeenMessageId).big_integer().not_null().default(0))
-            .to_string(PostgresQueryBuilder);
-        exec_sql(db, &sql).await?;
-        exec_sql(db, "ALTER TABLE ai_chat_state ADD CONSTRAINT fk_acs_chat_id FOREIGN KEY (chat_id) REFERENCES chats(id);").await?;
-    });
-
     migration!(db, applied, 5, "Column additions and indexes", {
-        add_column_if_not_exists(db, "users", "is_ai BOOLEAN NOT NULL DEFAULT false", "is_ai").await?;
-        add_column_if_not_exists(db, "users", "ai_label TEXT", "ai_label").await?;
         add_column_if_not_exists(db, "users", "email_verified BOOLEAN NOT NULL DEFAULT false", "email_verified").await?;
         add_column_if_not_exists(db, "users", "email_pending TEXT", "email_pending").await?;
         add_column_if_not_exists(db, "users", "public_encryption_key TEXT", "public_encryption_key").await?;
@@ -718,12 +671,6 @@ pub async fn init(db: &PgPool) -> anyhow::Result<()> {
         add_column_if_not_exists(db, "files", "storage_kind TEXT NOT NULL DEFAULT 'temporary'", "storage_kind").await?;
         add_column_if_not_exists(db, "files", "expires_at TIMESTAMPTZ", "expires_at").await?;
         add_column_if_not_exists(db, "files", "deleted_at TIMESTAMPTZ", "deleted_at").await?;
-
-        add_column_if_not_exists(db, "ai_settings", "accept_server_join_requests BOOLEAN NOT NULL DEFAULT false", "accept_server_join_requests").await?;
-        add_column_if_not_exists(db, "ai_settings", "kindness_score INTEGER NOT NULL DEFAULT 100", "kindness_score").await?;
-        add_column_if_not_exists(db, "ai_settings", "no_reply_count INTEGER NOT NULL DEFAULT 0", "no_reply_count").await?;
-        add_column_if_not_exists(db, "ai_settings", "violation_count INTEGER NOT NULL DEFAULT 0", "violation_count").await?;
-        add_column_if_not_exists(db, "ai_settings", "last_event_at TIMESTAMPTZ", "last_event_at").await?;
 
         create_index_if_not_exists(db, "ix_user_device_keys_user_id", "user_device_keys", &["user_id"], false, None).await.ok();
         create_index_if_not_exists(db, "ix_user_sessions_user_id", "user_sessions", &["user_id"], false, None).await.ok();
@@ -759,42 +706,6 @@ pub async fn init(db: &PgPool) -> anyhow::Result<()> {
         create_index_if_not_exists(db, "ux_gif_favorites_owner_storage", "gif_assets", &["owner_id", "storage_path"], true, Some("scope = 'favorite' AND owner_id IS NOT NULL")).await.ok();
         exec_sql(db, "UPDATE user_presence SET is_online = false;").await.ok();
     });
-
-    {
-        let ai_enabled_env = std::env::var("LB_AI_ENABLED")
-            .ok()
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                v == "1" || v == "true" || v == "yes" || v == "on"
-            })
-            .unwrap_or(false);
-        if ai_enabled_env && !applied.contains(&7) {
-            tracing::info!("[DB] Migration 7: AI user setup");
-            let ai_name = std::env::var("LB_AI_USER_NAME")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or_else(|| "Gemka III".to_string());
-            let ai_label = "Тестовая функция".to_string();
-            let now = Utc::now();
-            let _ = sqlx::query(
-                "INSERT INTO users (username, email, password_hash, is_banned, created_at, token_version, is_ai, ai_label)
-                 VALUES ($1, NULL, 'AI_LOGIN_DISABLED', false, $2, 1, true, $3)
-                 ON CONFLICT(username) DO UPDATE SET is_ai = true, ai_label = EXCLUDED.ai_label, is_banned = false"
-            )
-            .bind(&ai_name)
-            .bind(now)
-            .bind(&ai_label)
-            .execute(db)
-            .await;
-
-            let _ = sqlx::query("UPDATE users SET is_ai = true, ai_label = $1, is_banned = false WHERE username = $2")
-                .bind(&ai_label)
-                .bind(&ai_name)
-                .execute(db)
-                .await;
-            mark_applied(db, 7).await?;
-        }
-    }
 
     migration!(db, applied, 8, "E2EE Room Keys Backup", {
         let sql = Table::create()

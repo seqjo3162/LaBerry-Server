@@ -51,10 +51,6 @@
 - **Rate limiting** — ограничение запросов на уровне middleware
 - **Security headers** — HSTS, CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy
 
-### AI
-- **Gemka III** — AI-бот с интеграцией OpenAI-compatible API
-- Поддержка LM Studio / llama.cpp для локального запуска
-
 ### Администрирование
 - **Web Admin Panel** — локальная панель управления
 - **Admin CLI** — команды бан/дебан, удаление контента,purge
@@ -144,10 +140,10 @@ LaBerry — готовое решение для организации внут
 │  │              Middleware Stack                     │   │
 │  │  Auth → CSRF → GeoIP → Rate Limit → Host Guard  │   │
 │  └──────────────────────────────────────────────────┘   │
-│  ┌─────────────┐  ┌─────────────┐  ┌────────────────┐  │
-│  │   Auth      │  │   DB        │  │    AI Client   │  │
-│  │  JWT/Argon2 │  │  SQLite     │  │  OpenAI API    │  │
-│  └─────────────┘  └─────────────┘  └────────────────┘  │
+│  ┌─────────────┐  ┌─────────────┐                    │
+│  │   Auth      │  │   DB        │                    │
+│  │  JWT/Argon2 │  │  SQLite     │                    │
+│  └─────────────┘  └─────────────┘                    │
 └──────────────────────────┬──────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────┐
@@ -175,7 +171,6 @@ LaBerry — готовое решение для организации внут
 | **Кэш/State** | DashMap | 5 (concurrent HashMap) |
 | **Картинки** | image | 0.25 |
 | **E2EE** | x25519-dalek + crypto_box | ECDH P-256 + AES-GCM (X25519 compatible) |
-| **AI Integration** | reqwest | 0.12 |
 | **GeoIP** | maxminddb | 0.24 |
 
 ---
@@ -286,13 +281,6 @@ LB_ADMIN_PASSWORD_HASH=<argon2id>     # Хеш пароля админа
 # CORS
 # ============================================
 ALLOWED_ORIGINS=*                     # Разрешённые origins (через запятую)
-
-# ============================================
-# AI Bot (Gemka III)
-# ============================================
-AI_API_URL=https://api.openai.com/v1  # URL AI API
-AI_API_KEY=                           # API ключ
-AI_MODEL=gpt-3.5-turbo                # Модель
 
 # ============================================
 # Email (2FA)
@@ -747,7 +735,6 @@ LaBerry-Server/
 │   │   ├── tls.rs               # TLS конфигурация
 │   │   ├── e2ee.rs              # E2EE логика
 │   │   ├── api_error.rs         # Error handling
-│   │   ├── ai_client.rs         # AI bot integration
 │   │   ├── admin_cli.rs         # Admin CLI commands
 │   │   │
 │   │   ├── db/
@@ -974,7 +961,6 @@ docker-compose -f turn/docker-compose.yml restart
 - ✅ GeoIP blocking
 - ✅ Rate limiting
 - ✅ CSRF protection
-- ✅ AI bot integration
 - ✅ File upload/download
 - ✅ GIF support
 - ✅ Link embeds

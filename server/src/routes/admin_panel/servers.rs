@@ -4,7 +4,7 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, PgPool};
 use super::*;
 
 #[derive(Clone)]
@@ -16,11 +16,11 @@ pub(crate) struct ServerRow {
     pub(crate) created_at: String,
 }
 
-pub(crate) async fn fetch_servers(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<Vec<ServerRow>> {
+pub(crate) async fn fetch_servers(db: &PgPool, q: &str, limit: i64) -> anyhow::Result<Vec<ServerRow>> {
     if q.is_empty() {
         let rows = sqlx::query(
             r#"SELECT s.id, s.name, s.owner_id, COALESCE(u.username,'') AS owner_username, s.created_at
-               FROM servers s LEFT JOIN users u ON u.id = s.owner_id ORDER BY s.id DESC LIMIT ?"#,
+               FROM servers s LEFT JOIN users u ON u.id = s.owner_id ORDER BY s.id DESC LIMIT $1"#,
         ).bind(limit).fetch_all(db).await?;
         return Ok(rows.into_iter().map(|r| ServerRow {
             id: r.get("id"), name: r.get("name"), owner_id: r.get("owner_id"),
@@ -30,7 +30,7 @@ pub(crate) async fn fetch_servers(db: &SqlitePool, q: &str, limit: i64) -> anyho
     if let Ok(id) = q.parse::<i64>() {
         let rows = sqlx::query(
             r#"SELECT s.id, s.name, s.owner_id, COALESCE(u.username,'') AS owner_username, s.created_at
-               FROM servers s LEFT JOIN users u ON u.id = s.owner_id WHERE s.id = ? LIMIT ?"#,
+               FROM servers s LEFT JOIN users u ON u.id = s.owner_id WHERE s.id = $1 LIMIT $2"#,
         ).bind(id).bind(limit).fetch_all(db).await?;
         return Ok(rows.into_iter().map(|r| ServerRow {
             id: r.get("id"), name: r.get("name"), owner_id: r.get("owner_id"),
@@ -40,7 +40,7 @@ pub(crate) async fn fetch_servers(db: &SqlitePool, q: &str, limit: i64) -> anyho
     let like = format!("%{}%", q);
     let rows = sqlx::query(
         r#"SELECT s.id, s.name, s.owner_id, COALESCE(u.username,'') AS owner_username, s.created_at
-           FROM servers s LEFT JOIN users u ON u.id = s.owner_id WHERE s.name LIKE ? ORDER BY s.id DESC LIMIT ?"#,
+           FROM servers s LEFT JOIN users u ON u.id = s.owner_id WHERE s.name LIKE $1 ORDER BY s.id DESC LIMIT $2"#,
     ).bind(&like).bind(limit).fetch_all(db).await?;
     Ok(rows.into_iter().map(|r| ServerRow {
         id: r.get("id"), name: r.get("name"), owner_id: r.get("owner_id"),
@@ -48,10 +48,10 @@ pub(crate) async fn fetch_servers(db: &SqlitePool, q: &str, limit: i64) -> anyho
     }).collect())
 }
 
-pub(crate) async fn purge_server_exec(db: &SqlitePool, server_id: i64) -> anyhow::Result<()> {
+pub(crate) async fn purge_server_exec(db: &PgPool, server_id: i64) -> anyhow::Result<()> {
     use std::path::PathBuf;
     let mut tx = db.begin().await?;
-    let file_rows = sqlx::query(r#"SELECT f.storage_path, f.filename FROM files f JOIN chats c ON c.id = f.chat_id WHERE c.server_id = ?"#)
+    let file_rows = sqlx::query(r#"SELECT f.storage_path, f.filename FROM files f JOIN chats c ON c.id = f.chat_id WHERE c.server_id = $1"#)
         .bind(server_id).fetch_all(&mut *tx).await?;
     let mut file_paths: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
     for fr in file_rows {
@@ -62,19 +62,19 @@ pub(crate) async fn purge_server_exec(db: &SqlitePool, server_id: i64) -> anyhow
             std::path::Path::new(&stored_filename).file_stem().and_then(|s| s.to_str()).unwrap_or(&stored_filename)));
         file_paths.push((main, Some(thumb)));
     }
-    let chat_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM chats WHERE server_id = ?").bind(server_id).fetch_all(&mut *tx).await?;
+    let chat_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM chats WHERE server_id = $1").bind(server_id).fetch_all(&mut *tx).await?;
     for chat_id in &chat_ids {
-        let _ = sqlx::query(r#"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?)"#).bind(*chat_id).execute(&mut *tx).await?;
-        let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = ?").bind(*chat_id).execute(&mut *tx).await?;
-        let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = ?").bind(*chat_id).execute(&mut *tx).await?;
-        let _ = sqlx::query(r#"UPDATE gif_assets SET source_file_id = NULL WHERE source_file_id IN (SELECT id FROM files WHERE chat_id = ?)"#).bind(*chat_id).execute(&mut *tx).await?;
-        let _ = sqlx::query("DELETE FROM files WHERE chat_id = ?").bind(*chat_id).execute(&mut *tx).await?;
-        let _ = sqlx::query("DELETE FROM messages WHERE chat_id = ?").bind(*chat_id).execute(&mut *tx).await?;
-        let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = ?").bind(*chat_id).execute(&mut *tx).await?;
+        let _ = sqlx::query(r#"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = $1)"#).bind(*chat_id).execute(&mut *tx).await?;
+        let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = $1").bind(*chat_id).execute(&mut *tx).await?;
+        let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = $1").bind(*chat_id).execute(&mut *tx).await?;
+        let _ = sqlx::query(r#"UPDATE gif_assets SET source_file_id = NULL WHERE source_file_id IN (SELECT id FROM files WHERE chat_id = $1)"#).bind(*chat_id).execute(&mut *tx).await?;
+        let _ = sqlx::query("DELETE FROM files WHERE chat_id = $1").bind(*chat_id).execute(&mut *tx).await?;
+        let _ = sqlx::query("DELETE FROM messages WHERE chat_id = $1").bind(*chat_id).execute(&mut *tx).await?;
+        let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = $1").bind(*chat_id).execute(&mut *tx).await?;
     }
-    let _ = sqlx::query("DELETE FROM chats WHERE server_id = ?").bind(server_id).execute(&mut *tx).await?;
-    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = ?").bind(server_id).execute(&mut *tx).await?;
-    let affected = sqlx::query("DELETE FROM servers WHERE id = ?").bind(server_id).execute(&mut *tx).await?.rows_affected();
+    let _ = sqlx::query("DELETE FROM chats WHERE server_id = $1").bind(server_id).execute(&mut *tx).await?;
+    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = $1").bind(server_id).execute(&mut *tx).await?;
+    let affected = sqlx::query("DELETE FROM servers WHERE id = $1").bind(server_id).execute(&mut *tx).await?.rows_affected();
     if affected == 0 { anyhow::bail!("Сервер не найден") }
     tx.commit().await?;
     let _ = file_paths;
@@ -120,7 +120,7 @@ pub(crate) async fn server_delete(State(st): State<AppState>, ConnectInfo(peer):
     if let Err(e) = require_allow_ip(&st, &headers, Some(peer)) { return e.into_response(); }
     let (_sid, sess) = match require_auth(&st, &headers) { Ok(v) => v, Err(r) => return r.into_response() };
     if f.csrf != sess.csrf { return admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/servers"), "CSRF-токен не совпадает").into_response(); }
-    let row = sqlx::query("SELECT name FROM servers WHERE id = ?").bind(id).fetch_optional(&st.db).await;
+    let row = sqlx::query("SELECT name FROM servers WHERE id = $1").bind(id).fetch_optional(&st.db).await;
     let Ok(Some(r)) = row else { return admin_redirect_with_msg(&safe_admin_return_to(&f.return_to, "/admin/servers"), "Сервер не найден").into_response(); };
     let name: String = r.get("name");
     let _re = test_server_re(); let _is_test = is_test_server(&_re, &name);
@@ -136,9 +136,9 @@ pub(crate) async fn server_add_all_users(State(st): State<AppState>, ConnectInfo
     let (_sid, sess) = match require_auth(&st, &headers) { Ok(v) => v, Err(r) => return r.into_response() };
     let return_to = safe_admin_return_to(&f.return_to, "/admin/servers");
     if f.csrf != sess.csrf { return admin_redirect_with_msg(&return_to, "CSRF-токен не совпадает").into_response(); }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM servers WHERE id = ? LIMIT 1").bind(id).fetch_optional(&st.db).await.ok().flatten().is_some();
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM servers WHERE id = $1 LIMIT 1").bind(id).fetch_optional(&st.db).await.ok().flatten().is_some();
     if !exists { return admin_redirect_with_msg(&return_to, "Сервер не найден").into_response(); }
-    let res = sqlx::query(r#"INSERT OR IGNORE INTO server_members(server_id, user_id, role) SELECT ?, id, 'member' FROM users WHERE is_banned = 0"#).bind(id).execute(&st.db).await;
+    let res = sqlx::query(r#"INSERT INTO server_members(server_id, user_id, role) SELECT $1, id, 'member' FROM users WHERE NOT is_banned ON CONFLICT DO NOTHING"#).bind(id).execute(&st.db).await;
     match res {
         Ok(done) => admin_redirect_with_msg(&return_to, &format!("Готово. Добавлено: {}", done.rows_affected())).into_response(),
         Err(e) => admin_redirect_with_msg(&return_to, &format!("Ошибка: {}", e)).into_response(),
@@ -163,7 +163,7 @@ pub(crate) async fn server_remove_user(
         Err(_) => return admin_redirect_with_msg(&return_to, "Некорректный ID").into_response() 
     };
     
-    let res = sqlx::query("DELETE FROM server_members WHERE server_id = ? AND user_id = ?")
+    let res = sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id = $2")
         .bind(id)
         .bind(user_id)
         .execute(&st.db)

@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 
 use crate::auth;
 
@@ -11,7 +11,7 @@ static BUCKETS: Lazy<DashMap<String, VecDeque<i64>>> = Lazy::new(DashMap::new);
 /// Returns true if allowed.
 pub fn allow(key: &str, max: usize, window_secs: i64) -> bool {
     let now = auth::now_unix();
-    let mut entry = BUCKETS.entry(key.to_string()).or_insert_with(VecDeque::new);
+    let mut entry = BUCKETS.entry(key.to_string()).or_default();
 
     // prune
     while let Some(&t) = entry.front() {
@@ -32,7 +32,7 @@ pub fn allow(key: &str, max: usize, window_secs: i64) -> bool {
 
 /// Persistent rate limiting with database (prevents bypass on server restart)
 pub async fn allow_with_db(
-    db: &SqlitePool,
+    db: &PgPool,
     key: &str,
     max: usize,
     window_secs: i64,
@@ -43,7 +43,7 @@ pub async fn allow_with_db(
     // 🔴 SECURITY FIX: DB-backed rate limiting to prevent bypass on restart
     // Clean expired entries for this key
     sqlx::query(
-        r#"DELETE FROM rate_limit_logs WHERE key = ? AND timestamp < ?"#
+        r#"DELETE FROM rate_limit_logs WHERE key = $1 AND timestamp < $2"#
     )
     .bind(key)
     .bind(window_start)
@@ -52,7 +52,7 @@ pub async fn allow_with_db(
 
     // Count current requests in window
     let count: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM rate_limit_logs WHERE key = ? AND timestamp > ?"#
+        r#"SELECT COUNT(*) FROM rate_limit_logs WHERE key = $1 AND timestamp > $2"#
     )
     .bind(key)
     .bind(window_start)
@@ -65,7 +65,7 @@ pub async fn allow_with_db(
 
     // Record this request
     sqlx::query(
-        r#"INSERT INTO rate_limit_logs(key, timestamp) VALUES(?, ?)"#
+        r#"INSERT INTO rate_limit_logs(key, timestamp) VALUES($1, $2)"#
     )
     .bind(key)
     .bind(now)
@@ -76,11 +76,11 @@ pub async fn allow_with_db(
 }
 
 /// Background cleanup task for rate_limit_logs (call this periodically)
-pub async fn cleanup_expired_logs(db: &SqlitePool) -> Result<u64, sqlx::Error> {
+pub async fn cleanup_expired_logs(db: &PgPool) -> Result<u64, sqlx::Error> {
     let cutoff_time = auth::now_unix() - 86400; // 24 hours
     
     let result = sqlx::query(
-        r#"DELETE FROM rate_limit_logs WHERE timestamp < ?"#
+        r#"DELETE FROM rate_limit_logs WHERE timestamp < $1"#
     )
     .bind(cutoff_time)
     .execute(db)
@@ -123,7 +123,7 @@ pub fn extract_ip(
                 IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
                 IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
             }
-            || trusted_proxies.iter().any(|p| *p == peer);
+            || trusted_proxies.contains(&peer);
     }
 
     // If peer is trusted, prefer X-Forwarded-For / X-Real-IP (first value)

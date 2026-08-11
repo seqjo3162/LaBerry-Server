@@ -119,8 +119,8 @@ pub struct ConfirmEmailCodeBody {
     pub purpose: Option<String>,
 }
 
-pub async fn load_user_settings(db: &sqlx::SqlitePool, user_id: i64) -> Option<UserSettings> {
-    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = ? LIMIT 1")
+pub async fn load_user_settings(db: &sqlx::PgPool, user_id: i64) -> Option<UserSettings> {
+    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = $1 LIMIT 1")
         .bind(user_id)
         .fetch_optional(db)
         .await
@@ -153,7 +153,7 @@ pub async fn get_my_settings(
     let _ = sqlx::query(
         r#"
         INSERT INTO user_settings(user_id, settings_json, updated_at)
-        VALUES(?, ?, ?)
+        VALUES($1, $2, $3)
         ON CONFLICT(user_id) DO UPDATE SET
           settings_json = excluded.settings_json,
           updated_at = excluded.updated_at
@@ -184,7 +184,7 @@ pub async fn update_my_settings(
     let q = sqlx::query(
         r#"
         INSERT INTO user_settings(user_id, settings_json, updated_at)
-        VALUES(?, ?, ?)
+        VALUES($1, $2, $3)
         ON CONFLICT(user_id) DO UPDATE SET
           settings_json = excluded.settings_json,
           updated_at = excluded.updated_at
@@ -218,7 +218,7 @@ pub async fn change_password(
             .into_response();
     }
 
-    let row = sqlx::query("SELECT password_hash FROM users WHERE id = ? LIMIT 1")
+    let row = sqlx::query("SELECT password_hash FROM users WHERE id = $1 LIMIT 1")
         .bind(me.id)
         .fetch_optional(db)
         .await
@@ -246,8 +246,8 @@ pub async fn change_password(
     let q = sqlx::query(
         r#"
         UPDATE users
-        SET password_hash = ?, token_version = token_version + 1
-        WHERE id = ?
+        SET password_hash = $1, token_version = token_version + 1
+        WHERE id = $2
         "#,
     )
     .bind(new_hash)
@@ -269,7 +269,7 @@ pub async fn my_status(
     let db = &st.db;
 
     let row = sqlx::query(
-        r#"SELECT status, is_online, updated_at FROM user_presence WHERE user_id = ? LIMIT 1"#,
+        r#"SELECT status, is_online, updated_at FROM user_presence WHERE user_id = $1 LIMIT 1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -279,14 +279,14 @@ pub async fn my_status(
 
     if let Some(r) = row {
         let status: String = r.get::<String, _>("status");
-        let is_online = r.get::<i64, _>("is_online") != 0;
+        let is_online = r.get::<bool, _>("is_online");
         let updated_at: Option<String> = r.get("updated_at");
         return (StatusCode::OK, Json(MyStatus { status, is_online, updated_at })).into_response();
     }
 
     let now = auth::now_iso();
     let _ = sqlx::query(
-        "INSERT INTO user_presence(user_id, is_online, status, updated_at) VALUES(?, 0, 'online', ?)",
+        "INSERT INTO user_presence(user_id, is_online, status, updated_at) VALUES($1, FALSE, 'online', $2)",
     )
     .bind(me.id)
     .bind(&now)
@@ -308,7 +308,7 @@ pub async fn set_my_status(
     let q = sqlx::query(
         r#"
         INSERT INTO user_presence(user_id, is_online, status, updated_at)
-        VALUES(?, 0, ?, ?)
+        VALUES($1, FALSE, $2, $3)
         ON CONFLICT(user_id) DO UPDATE SET
           status = excluded.status,
           updated_at = excluded.updated_at
@@ -324,15 +324,15 @@ pub async fn set_my_status(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    let is_online = sqlx::query_scalar::<_, i64>(
-        "SELECT is_online FROM user_presence WHERE user_id = ? LIMIT 1",
+    let is_online = sqlx::query_scalar::<_, bool>(
+        "SELECT is_online FROM user_presence WHERE user_id = $1 LIMIT 1",
     )
     .bind(me.id)
     .fetch_optional(db)
     .await
     .ok()
     .flatten()
-    .unwrap_or(0) != 0;
+    .unwrap_or(false);
 
     (StatusCode::OK, Json(MyStatus { status, is_online, updated_at: Some(now) })).into_response()
 }
@@ -375,28 +375,28 @@ pub async fn set_cookie_consent(
     let res = sqlx::query(
         r#"
         UPDATE users
-        SET cookie_consent_status = ?,
-            cookie_consent_at = ?,
+        SET cookie_consent_status = $1,
+            cookie_consent_at = $2,
             trust_factor = CASE
-                WHEN ? = 'accepted' THEN MAX(COALESCE(trust_factor, 100), ?)
-                ELSE MIN(COALESCE(trust_factor, 100), ?)
+                WHEN $3 = 'accepted' THEN MAX(COALESCE(trust_factor, 100), $4)
+                ELSE MIN(COALESCE(trust_factor, 100), $5)
             END,
             trust_review_status = CASE
-                WHEN ? = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN 'clear'
-                WHEN ? = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_status
-                ELSE ?
+                WHEN $6 = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN 'clear'
+                WHEN $7 = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_status
+                ELSE $8
             END,
             trust_review_reason = CASE
-                WHEN ? = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN NULL
-                WHEN ? = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_reason
-                ELSE ?
+                WHEN $9 = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN NULL
+                WHEN $10 = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_reason
+                ELSE $11
             END,
             trust_review_at = CASE
-                WHEN ? = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN NULL
-                WHEN ? = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_at
-                ELSE ?
+                WHEN $12 = 'accepted' AND COALESCE(trust_review_reason, '') LIKE 'Пользователь отказался от обязательных cookies%' THEN NULL
+                WHEN $13 = 'accepted' AND COALESCE(trust_review_status, 'clear') = 'review' THEN trust_review_at
+                ELSE $14
             END
-        WHERE id = ?
+        WHERE id = $15
         "#,
     )
     .bind(status)
@@ -428,7 +428,7 @@ pub async fn set_cookie_consent(
                COALESCE(trust_review_status, 'clear') AS trust_review_status,
                trust_review_reason
         FROM users
-        WHERE id = ?
+        WHERE id = $1
         LIMIT 1
         "#,
     )
@@ -485,7 +485,7 @@ pub async fn change_username(
     };
 
     let current_username = match sqlx::query_scalar::<_, String>(
-        "SELECT username FROM users WHERE id = ? LIMIT 1",
+        "SELECT username FROM users WHERE id = $1 LIMIT 1",
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -509,7 +509,7 @@ pub async fn change_username(
     }
 
     let taken = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM users WHERE username = ? AND id != ? LIMIT 1",
+        "SELECT 1 FROM users WHERE username = $1 AND id != $2 LIMIT 1",
     )
     .bind(&new_username)
     .bind(me.id)
@@ -536,9 +536,9 @@ pub async fn change_username(
     let upd = sqlx::query(
         r#"
         UPDATE users
-        SET username = ?,
+        SET username = $1,
             token_version = token_version + 1
-        WHERE id = ?
+        WHERE id = $2
         "#,
     )
     .bind(&new_username)
@@ -551,7 +551,7 @@ pub async fn change_username(
     }
 
     let _ = sqlx::query(
-        "UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+        "UPDATE user_sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL",
     )
     .bind(&now)
     .bind(me.id)
@@ -559,7 +559,7 @@ pub async fn change_username(
     .await;
 
     let _ = sqlx::query(
-        "UPDATE refresh_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+        "UPDATE refresh_sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL",
     )
     .bind(&now)
     .bind(me.id)
@@ -601,7 +601,7 @@ pub async fn request_email_code(
     };
 
     let taken = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM users WHERE email = ? AND id != ? LIMIT 1",
+        "SELECT 1 FROM users WHERE email = $1 AND id != $2 LIMIT 1",
     )
     .bind(&email)
     .bind(me.id)
@@ -629,7 +629,7 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
         .into_response();
 }
 
-    let q = sqlx::query("UPDATE users SET email_pending = ?, email_verified = 0 WHERE id = ?")
+    let q = sqlx::query("UPDATE users SET email_pending = $1, email_verified = FALSE WHERE id = $2")
         .bind(&email)
         .bind(me.id)
         .execute(db)
@@ -641,7 +641,7 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
     let now = auth::now_unix();
     let now_s = now.to_string();
     let _ = sqlx::query(
-        "UPDATE email_codes SET consumed_at = ? WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL",
+        "UPDATE email_codes SET consumed_at = $1 WHERE user_id = $2 AND purpose = $3 AND consumed_at IS NULL",
     )
     .bind(&now_s)
     .bind(me.id)
@@ -656,7 +656,7 @@ if !rate_limit::allow(&rl_key, 5, 3600) {
     let ins = sqlx::query(
         r#"
         INSERT INTO email_codes(user_id, purpose, code_hash, sent_to_email, created_at, expires_at)
-        VALUES(?, ?, ?, ?, ?, ?)
+        VALUES($1, $2, $3, $4, $5, $6)
         "#,
     )
     .bind(me.id)
@@ -734,7 +734,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
         r#"
         SELECT id, code_hash, expires_at
         FROM email_codes
-        WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL
+        WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL
         ORDER BY id DESC
         LIMIT 1
         "#,
@@ -759,7 +759,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     let expires_at: String = r.get("expires_at");
     let exp = expires_at.parse::<i64>().unwrap_or(0);
     if exp <= now {
-        let _ = sqlx::query("UPDATE email_codes SET consumed_at = ? WHERE id = ?")
+        let _ = sqlx::query("UPDATE email_codes SET consumed_at = $1 WHERE id = $2")
             .bind(&now_s)
             .bind(code_id)
             .execute(db)
@@ -779,14 +779,14 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
             .into_response();
     }
 
-    let _ = sqlx::query("UPDATE email_codes SET consumed_at = ? WHERE id = ?")
+    let _ = sqlx::query("UPDATE email_codes SET consumed_at = $1 WHERE id = $2")
         .bind(&now_s)
         .bind(code_id)
         .execute(db)
         .await;
 
     let pending: Option<String> = sqlx::query_scalar(
-        "SELECT email_pending FROM users WHERE id = ? LIMIT 1",
+        "SELECT email_pending FROM users WHERE id = $1 LIMIT 1",
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -803,7 +803,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     };
 
     let taken = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM users WHERE email = ? AND id != ? LIMIT 1",
+        "SELECT 1 FROM users WHERE email = $1 AND id != $2 LIMIT 1",
     )
     .bind(&pending_email)
     .bind(me.id)
@@ -821,7 +821,7 @@ if !rate_limit::allow(&rl_key, 10, 3600) {
     }
 
     let q = sqlx::query(
-        "UPDATE users SET email = ?, email_verified = 1, email_pending = NULL WHERE id = ?",
+        "UPDATE users SET email = $1, email_verified = TRUE, email_pending = NULL WHERE id = $2",
     )
     .bind(&pending_email)
     .bind(me.id)

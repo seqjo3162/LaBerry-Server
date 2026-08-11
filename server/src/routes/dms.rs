@@ -109,13 +109,13 @@ pub fn router() -> Router<AppState> {
         .route("/{chat_id}/messages", get(list_messages).post(send_message))
 }
 
-async fn is_blocked_pair(db: &sqlx::SqlitePool, a: i64, b: i64) -> bool {
+async fn is_blocked_pair(db: &sqlx::PgPool, a: i64, b: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT 1
         FROM user_blocks
-        WHERE (blocker_id = ? AND blocked_id = ?)
-           OR (blocker_id = ? AND blocked_id = ?)
+        WHERE (blocker_id = $1 AND blocked_id = $2)
+           OR (blocker_id = $3 AND blocked_id = $4)
         LIMIT 1
         "#,
     )
@@ -130,12 +130,8 @@ async fn is_blocked_pair(db: &sqlx::SqlitePool, a: i64, b: i64) -> bool {
     .is_some()
 }
 
-async fn can_dm(db: &sqlx::SqlitePool, me: i64, other: i64) -> bool {
-    if crate::ai_client::is_ai_user(db, other).await {
-        return true;
-    }
-
-    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = ? LIMIT 1")
+async fn can_dm(db: &sqlx::PgPool, me: i64, other: i64) -> bool {
+    let row = sqlx::query("SELECT settings_json FROM user_settings WHERE user_id = $1 LIMIT 1")
         .bind(other)
         .fetch_optional(db)
         .await
@@ -149,7 +145,7 @@ async fn can_dm(db: &sqlx::SqlitePool, me: i64, other: i64) -> bool {
         .unwrap_or_else(|| "friends_and_server".to_string());
 
     let are_friends = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM friendships WHERE user_id = ? AND friend_id = ? LIMIT 1",
+        "SELECT 1 FROM friendships WHERE user_id = $1 AND friend_id = $2 LIMIT 1",
     )
     .bind(me)
     .bind(other)
@@ -164,7 +160,7 @@ async fn can_dm(db: &sqlx::SqlitePool, me: i64, other: i64) -> bool {
         SELECT 1
         FROM server_members s1
         JOIN server_members s2 ON s1.server_id = s2.server_id
-        WHERE s1.user_id = ? AND s2.user_id = ?
+        WHERE s1.user_id = $1 AND s2.user_id = $2
         LIMIT 1
         "#,
     )
@@ -198,7 +194,7 @@ async fn get_or_create_with(
             .into_response();
     }
 
-    let other_row = sqlx::query("SELECT username, is_banned FROM users WHERE id = ? LIMIT 1")
+    let other_row = sqlx::query("SELECT username, is_banned FROM users WHERE id = $1 LIMIT 1")
         .bind(other_id)
         .fetch_optional(db)
         .await
@@ -209,8 +205,8 @@ async fn get_or_create_with(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let is_banned: i64 = orow.get("is_banned");
-    if is_banned != 0 {
+    let is_banned: bool = orow.get("is_banned");
+    if is_banned {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -233,7 +229,7 @@ async fn get_or_create_with(
     let (a, b) = if me.id < other_id { (me.id, other_id) } else { (other_id, me.id) };
 
     if let Some(chat_id) = sqlx::query_scalar::<_, i64>(
-        "SELECT chat_id FROM dm_chats WHERE user_a = ? AND user_b = ? LIMIT 1",
+        "SELECT chat_id FROM dm_chats WHERE user_a = $1 AND user_b = $2 LIMIT 1",
     )
     .bind(a)
     .bind(b)
@@ -242,40 +238,35 @@ async fn get_or_create_with(
     .ok()
     .flatten()
     {
-        if crate::ai_client::is_ai_user(db, other_id).await {
-            crate::ai_client::spawn_start_dm_if_enabled(st.clone(), chat_id, me.id);
-        }
         return (StatusCode::OK, Json(serde_json::json!({"chat_id": chat_id}))).into_response();
     }
 
     let created_at = auth::now_iso();
 
-    let res = sqlx::query(
-        r#"INSERT INTO chats(name, server_id, is_private, created_at) VALUES(NULL, NULL, 1, ?)"#,
+    let res = sqlx::query_scalar::<_, i64>(
+        r#"INSERT INTO chats(name, server_id, is_private, created_at) VALUES(NULL, NULL, TRUE, $1) RETURNING id"#,
     )
     .bind(&created_at)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
-    let Ok(r) = res else {
+    let Ok(chat_id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
-    let chat_id = r.last_insert_rowid();
-
-    let _ = sqlx::query("INSERT OR IGNORE INTO chat_participants(chat_id, user_id) VALUES(?, ?)")
+    let _ = sqlx::query("INSERT INTO chat_participants(chat_id, user_id) VALUES($1, $2) ON CONFLICT DO NOTHING")
         .bind(chat_id)
         .bind(me.id)
         .execute(db)
         .await;
-    let _ = sqlx::query("INSERT OR IGNORE INTO chat_participants(chat_id, user_id) VALUES(?, ?)")
+    let _ = sqlx::query("INSERT INTO chat_participants(chat_id, user_id) VALUES($1, $2) ON CONFLICT DO NOTHING")
         .bind(chat_id)
         .bind(other_id)
         .execute(db)
         .await;
 
     let _ = sqlx::query(
-        "INSERT INTO dm_chats(chat_id, user_a, user_b, created_at) VALUES(?, ?, ?, ?)",
+        "INSERT INTO dm_chats(chat_id, user_a, user_b, created_at) VALUES($1, $2, $3, $4)",
     )
     .bind(chat_id)
     .bind(a)
@@ -283,10 +274,6 @@ async fn get_or_create_with(
     .bind(&created_at)
     .execute(db)
     .await;
-
-    if crate::ai_client::is_ai_user(db, other_id).await {
-        crate::ai_client::spawn_start_dm_if_enabled(st.clone(), chat_id, me.id);
-    }
 
     (StatusCode::OK, Json(serde_json::json!({"chat_id": chat_id}))).into_response()
 }
@@ -345,7 +332,7 @@ async fn create_group(
 
     let mut users = Vec::<(i64, String)>::new();
     for uid in user_ids {
-        let row = sqlx::query("SELECT username, is_banned FROM users WHERE id = ? LIMIT 1")
+        let row = sqlx::query("SELECT username, is_banned FROM users WHERE id = $1 LIMIT 1")
             .bind(uid)
             .fetch_optional(db)
             .await
@@ -360,7 +347,7 @@ async fn create_group(
                 .into_response();
         };
 
-        if r.get::<i64, _>("is_banned") != 0 {
+        if r.get::<bool, _>("is_banned") {
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"detail":"banned_group_member","user_id":uid})),
@@ -387,32 +374,30 @@ async fn create_group(
         users.push((uid, r.get::<String, _>("username")));
     }
 
-    users.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    users.sort_by_key(|(_, name)| name.to_lowercase());
     let names = users.iter().map(|(_, name)| name.clone()).collect::<Vec<_>>();
     let title = normalize_group_title(body.name, &names);
     let created_at = auth::now_iso();
 
-    let res = sqlx::query(
-        "INSERT INTO chats(name, server_id, is_private, kind, created_at) VALUES(?, NULL, 1, 'text', ?)",
+    let res = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO chats(name, server_id, is_private, kind, created_at) VALUES($1, NULL, TRUE, 'text', $2) RETURNING id",
     )
     .bind(&title)
     .bind(&created_at)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
-    let Ok(r) = res else {
+    let Ok(chat_id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-
-    let chat_id = r.last_insert_rowid();
-    let _ = sqlx::query("INSERT OR IGNORE INTO chat_participants(chat_id, user_id) VALUES(?, ?)")
+    let _ = sqlx::query("INSERT INTO chat_participants(chat_id, user_id) VALUES($1, $2) ON CONFLICT DO NOTHING")
         .bind(chat_id)
         .bind(me.id)
         .execute(db)
         .await;
 
     for (uid, _) in &users {
-        let _ = sqlx::query("INSERT OR IGNORE INTO chat_participants(chat_id, user_id) VALUES(?, ?)")
+        let _ = sqlx::query("INSERT INTO chat_participants(chat_id, user_id) VALUES($1, $2) ON CONFLICT DO NOTHING")
             .bind(chat_id)
             .bind(uid)
             .execute(db)
@@ -451,17 +436,17 @@ async fn list_my(
                (SELECT COUNT(1) FROM chat_participants cp WHERE cp.chat_id = c.id) AS member_count,
                lm.id AS last_message_id,
                lm.timestamp AS last_message_at,
-               substr(lm.content, 1, 80) AS last_message_preview
+               substring(lm.content, 1, 80) AS last_message_preview
         FROM chats c
-        JOIN chat_participants mep ON mep.chat_id = c.id AND mep.user_id = ?
+        JOIN chat_participants mep ON mep.chat_id = c.id AND mep.user_id = $1
         LEFT JOIN messages lm
           ON lm.id = (
             SELECT m2.id FROM messages m2 WHERE m2.chat_id = c.id ORDER BY m2.id DESC LIMIT 1
           )
-        WHERE c.is_private = 1
+        WHERE c.is_private = TRUE
           AND c.server_id IS NULL
         ORDER BY COALESCE(lm.id, 0) DESC, c.id DESC
-        LIMIT ?
+        LIMIT $2
         "#,
     )
     .bind(me.id)
@@ -483,7 +468,7 @@ async fn list_my(
             FROM chat_participants cp
             JOIN users u ON u.id = cp.user_id
             LEFT JOIN user_profile up ON up.user_id = u.id
-            WHERE cp.chat_id = ?
+            WHERE cp.chat_id = $1
             ORDER BY lower(u.username)
             "#,
         )
@@ -556,9 +541,9 @@ async fn list_my(
     (StatusCode::OK, Json(out)).into_response()
 }
 
-async fn ensure_dm_participant(db: &sqlx::SqlitePool, chat_id: i64, _user_id: i64) -> bool {
+async fn ensure_dm_participant(db: &sqlx::PgPool, chat_id: i64, _user_id: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(chat_id)
     .bind(_user_id)
@@ -586,14 +571,14 @@ async fn list_participants(
                u.username,
                u.public_encryption_key,
                up.avatar_file_id,
-               COALESCE(p.is_online, 0) AS is_online,
+               COALESCE(p.is_online, FALSE) AS is_online,
                COALESCE(p.status, 'offline') AS status
         FROM chat_participants cp
         JOIN users u ON u.id = cp.user_id
         LEFT JOIN user_profile up ON up.user_id = u.id
         LEFT JOIN user_presence p ON p.user_id = u.id
-        WHERE cp.chat_id = ?
-        ORDER BY CASE WHEN u.id = ? THEN 0 ELSE 1 END, lower(u.username)
+        WHERE cp.chat_id = $1
+        ORDER BY CASE WHEN u.id = $2 THEN 0 ELSE 1 END, lower(u.username)
         "#,
     )
     .bind(chat_id)
@@ -612,7 +597,7 @@ async fn list_participants(
                 avatar_file_id: r.try_get("avatar_file_id").ok(),
                 public_encryption_key: r.try_get("public_encryption_key").ok(),
                 is_me: id == me.id,
-                is_online: r.get::<i64, _>("is_online") != 0,
+                is_online: r.get::<bool, _>("is_online"),
                 status: r.get("status"),
             }
         })
@@ -656,10 +641,10 @@ async fn list_messages(
             LEFT JOIN messages rm ON rm.id = m.reply_to_message_id
             LEFT JOIN users ru ON ru.id = rm.sender_id
             LEFT JOIN user_profile rup ON rup.user_id = ru.id
-            WHERE m.chat_id = ?
-              AND m.id < ?
+            WHERE m.chat_id = $1
+              AND m.id < $2
             ORDER BY m.id DESC
-            LIMIT ?
+            LIMIT $3
             "#,
         )
         .bind(chat_id)
@@ -690,9 +675,9 @@ async fn list_messages(
             LEFT JOIN messages rm ON rm.id = m.reply_to_message_id
             LEFT JOIN users ru ON ru.id = rm.sender_id
             LEFT JOIN user_profile rup ON rup.user_id = ru.id
-            WHERE m.chat_id = ?
+            WHERE m.chat_id = $1
             ORDER BY m.id DESC
-            LIMIT ?
+            LIMIT $2
             "#,
         )
         .bind(chat_id)
@@ -710,7 +695,7 @@ async fn list_messages(
         let mut content: String = r.get("content");
 
         let blocked = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM user_blocks WHERE blocker_id = ? AND blocked_id = ? LIMIT 1",
+            "SELECT 1 FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2 LIMIT 1",
         )
         .bind(me.id)
         .bind(sender_id)
@@ -761,7 +746,7 @@ async fn list_messages(
     if !out.is_empty() {
         let ids = out.iter().map(|m| m.id).collect::<Vec<_>>();
 
-        let mut qb = QueryBuilder::<sqlx::Sqlite>::new(
+        let mut qb = QueryBuilder::<sqlx::Postgres>::new(
             "SELECT message_id, emoji, COUNT(*) as cnt FROM message_reactions WHERE message_id IN (",
         );
         {
@@ -781,7 +766,7 @@ async fn list_messages(
             counts.entry(mid).or_default().push((emoji, cnt));
         }
 
-        let mut qb2 = QueryBuilder::<sqlx::Sqlite>::new(
+        let mut qb2 = QueryBuilder::<sqlx::Postgres>::new(
             "SELECT message_id, emoji FROM message_reactions WHERE user_id = ",
         );
         qb2.push_bind(me.id);
@@ -835,7 +820,7 @@ async fn send_message(
     }
 
     let recipient_rows = sqlx::query(
-        "SELECT user_id FROM chat_participants WHERE chat_id = ? AND user_id != ?",
+        "SELECT user_id FROM chat_participants WHERE chat_id = $1 AND user_id != $2",
     )
     .bind(chat_id)
     .bind(me.id)
@@ -879,7 +864,7 @@ async fn send_message(
 
     if let Some(reply_to_id) = body.reply_to_id {
         let reply_ok = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM messages WHERE id = ? AND chat_id = ? LIMIT 1",
+            "SELECT 1 FROM messages WHERE id = $1 AND chat_id = $2 LIMIT 1",
         )
         .bind(reply_to_id)
         .bind(chat_id)
@@ -900,10 +885,10 @@ async fn send_message(
 
     let timestamp = auth::now_iso();
 
-    let res = sqlx::query(
+    let res = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO messages (chat_id, sender_id, content, timestamp, reply_to_message_id)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4, $5) RETURNING id
         "#,
     )
     .bind(chat_id)
@@ -911,14 +896,12 @@ async fn send_message(
     .bind(content_trimmed)
     .bind(&timestamp)
     .bind(body.reply_to_id)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
-    let Ok(r) = res else {
+    let Ok(message_id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-
-    let message_id = r.last_insert_rowid();
 
     // Привязка загруженных файлов к сообщению ЛС, чтобы cleanup не удалил их как temporary.
     if let Ok(re) = Regex::new(r"\[\[file[:=](\d+)\|") {
@@ -933,12 +916,12 @@ async fn send_message(
             let _ = sqlx::query(
                 r#"
                 UPDATE files
-                SET message_id = ?,
+                SET message_id = $1,
                     storage_kind = 'message',
                     expires_at = NULL
-                WHERE id = ?
-                  AND chat_id = ?
-                  AND uploaded_by = ?
+                WHERE id = $2
+                  AND chat_id = $3
+                  AND uploaded_by = $4
                   AND (message_id IS NULL OR message_id = 0)
                 "#,
             )
@@ -952,7 +935,7 @@ async fn send_message(
     }
 
     let sender_avatar_file_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT avatar_file_id FROM user_profile WHERE user_id = ? LIMIT 1",
+        "SELECT avatar_file_id FROM user_profile WHERE user_id = $1 LIMIT 1",
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -972,7 +955,7 @@ async fn send_message(
             FROM messages rm
             JOIN users ru ON ru.id = rm.sender_id
             LEFT JOIN user_profile rup ON rup.user_id = ru.id
-            WHERE rm.id = ?
+            WHERE rm.id = $1
             LIMIT 1
             "#,
         )
@@ -1009,10 +992,6 @@ async fn send_message(
     });
 
     st.hub.broadcast_room(&RoomId::Channel(chat_id), &out);
-
-    if !content_trimmed.starts_with("[[e2ee:v1|") {
-        crate::ai_client::spawn_dm_reply(st.clone(), chat_id, me.id, message_id);
-    }
 
     (
         StatusCode::OK,

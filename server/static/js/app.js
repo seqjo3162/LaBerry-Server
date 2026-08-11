@@ -578,8 +578,7 @@ async function e2eeCurrentChatRecipients() {
         await Promise.all(list.map(async (row) => {
             const id = Number(row?.id);
             if (!Number.isFinite(id) || id <= 0) return;
-            if (row?.is_ai === true || row?.is_ai === 1) return;
-            
+
             let recipient = { ...row };
             if (!recipient.public_encryption_key && !recipient.public_key) {
                 const userPubKey = await e2eeGetUserPublicKey(id);

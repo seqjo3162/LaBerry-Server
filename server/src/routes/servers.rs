@@ -98,7 +98,7 @@ pub struct JoinRequestView {
     pub created_at: String,
 }
 
-async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
+async fn cleanup_duplicate_channels(db: &sqlx::PgPool, server_id: i64) {
     // Cleanup duplicate channels (same name + kind) safely.
     // If a duplicate has no real data (messages/files/pins), we can merge
     // read-state/participants into the kept channel and delete the duplicate.
@@ -107,7 +107,7 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
         r#"
         SELECT id, COALESCE(name,'') AS name, COALESCE(kind,'text') AS kind
         FROM chats
-        WHERE server_id = ? AND is_private = 0
+        WHERE server_id = $1 AND is_private = FALSE
         "#,
     )
     .bind(server_id)
@@ -137,19 +137,19 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
 
         let mut stats: Vec<(i64, i64, i64, i64)> = Vec::with_capacity(ids.len()); // (id, msgs, files, pins)
         for cid in &ids {
-            let msgs = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM messages WHERE chat_id = ?")
+            let msgs = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM messages WHERE chat_id = $1")
                 .bind(*cid)
                 .fetch_one(db)
                 .await
                 .unwrap_or(0);
 
-            let files = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM files WHERE chat_id = ?")
+            let files = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM files WHERE chat_id = $1")
                 .bind(*cid)
                 .fetch_one(db)
                 .await
                 .unwrap_or(0);
 
-            let pins = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM pinned_messages WHERE chat_id = ?")
+            let pins = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM pinned_messages WHERE chat_id = $1")
                 .bind(*cid)
                 .fetch_one(db)
                 .await
@@ -177,7 +177,7 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
 
             // Merge chat_reads into keep_id (max last_read_message_id)
             let read_rows = sqlx::query(
-                "SELECT user_id, last_read_message_id FROM chat_reads WHERE chat_id = ?",
+                "SELECT user_id, last_read_message_id FROM chat_reads WHERE chat_id = $1",
             )
             .bind(cid)
             .fetch_all(db)
@@ -191,7 +191,7 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
                 let _ = sqlx::query(
                     r#"
                     INSERT INTO chat_reads (chat_id, user_id, last_read_message_id, updated_at)
-                    VALUES (?, ?, ?, ?)
+                    VALUES ($1, $2, $3, $4)
                     ON CONFLICT(chat_id, user_id) DO UPDATE SET
                         last_read_message_id = CASE
                             WHEN excluded.last_read_message_id > chat_reads.last_read_message_id
@@ -209,7 +209,7 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
                 .await;
             }
 
-            let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = ?")
+            let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = $1")
                 .bind(cid)
                 .execute(db)
                 .await;
@@ -218,9 +218,9 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
             let _ = sqlx::query(
                 r#"
                 INSERT INTO chat_participants (chat_id, user_id)
-                SELECT ?, user_id
+                SELECT $1, user_id
                 FROM chat_participants
-                WHERE chat_id = ?
+                WHERE chat_id = $2
                 ON CONFLICT(chat_id, user_id) DO NOTHING
                 "#,
             )
@@ -229,22 +229,22 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
             .execute(db)
             .await;
 
-            let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = ?")
+            let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = $1")
                 .bind(cid)
                 .execute(db)
                 .await;
 
             // Safety: remove any other empty references
-            let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = ?")
+            let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = $1")
                 .bind(cid)
                 .execute(db)
                 .await;
-            let _ = sqlx::query("DELETE FROM files WHERE chat_id = ?")
+            let _ = sqlx::query("DELETE FROM files WHERE chat_id = $1")
                 .bind(cid)
                 .execute(db)
                 .await;
 
-            let _ = sqlx::query("DELETE FROM chats WHERE id = ?")
+            let _ = sqlx::query("DELETE FROM chats WHERE id = $1")
                 .bind(cid)
                 .execute(db)
                 .await;
@@ -252,12 +252,12 @@ async fn cleanup_duplicate_channels(db: &sqlx::SqlitePool, server_id: i64) {
     }
 }
 
-async fn ensure_default_channels(db: &sqlx::SqlitePool, server_id: i64) {
+async fn ensure_default_channels(db: &sqlx::PgPool, server_id: i64) {
     // Требование: у сервера по дефолту должен быть 1 текстовый и 1 голосовой канал.
     // Плюс это чинит старые сервера, созданные до добавления voice.
 
     let has_text = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chats WHERE server_id = ? AND LOWER(TRIM(COALESCE(kind,'text'))) = 'text' LIMIT 1",
+        "SELECT 1 FROM chats WHERE server_id = $1 AND LOWER(TRIM(COALESCE(kind,'text'))) = 'text' LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -267,7 +267,7 @@ async fn ensure_default_channels(db: &sqlx::SqlitePool, server_id: i64) {
     .is_some();
 
     let has_voice = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chats WHERE server_id = ? AND LOWER(TRIM(COALESCE(kind,'text'))) = 'voice' LIMIT 1",
+        "SELECT 1 FROM chats WHERE server_id = $1 AND LOWER(TRIM(COALESCE(kind,'text'))) = 'voice' LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -280,7 +280,7 @@ async fn ensure_default_channels(db: &sqlx::SqlitePool, server_id: i64) {
 
     if !has_text {
         let _ = sqlx::query(
-            "INSERT INTO chats(name, server_id, kind, is_private, created_at) VALUES(?, ?, 'text', 0, ?)",
+            "INSERT INTO chats(name, server_id, kind, is_private, created_at) VALUES($1, $2, 'text', FALSE, $3)",
         )
         .bind("general")
         .bind(server_id)
@@ -291,7 +291,7 @@ async fn ensure_default_channels(db: &sqlx::SqlitePool, server_id: i64) {
 
     if !has_voice {
         let _ = sqlx::query(
-            "INSERT INTO chats(name, server_id, kind, is_private, created_at) VALUES(?, ?, 'voice', 0, ?)",
+            "INSERT INTO chats(name, server_id, kind, is_private, created_at) VALUES($1, $2, 'voice', FALSE, $3)",
         )
         .bind("Voice")
         .bind(server_id)
@@ -304,9 +304,9 @@ async fn ensure_default_channels(db: &sqlx::SqlitePool, server_id: i64) {
 }
 
 
-async fn can_manage_channels(db: &sqlx::SqlitePool, server_id: i64, user_id: i64) -> bool {
+async fn can_manage_channels(db: &sqlx::PgPool, server_id: i64, user_id: i64) -> bool {
     // Server owner OR role=admin
-    let owner = sqlx::query_scalar::<_, i64>("SELECT owner_id FROM servers WHERE id = ? LIMIT 1")
+    let owner = sqlx::query_scalar::<_, i64>("SELECT owner_id FROM servers WHERE id = $1 LIMIT 1")
         .bind(server_id)
         .fetch_optional(db)
         .await
@@ -318,7 +318,7 @@ async fn can_manage_channels(db: &sqlx::SqlitePool, server_id: i64, user_id: i64
     }
 
     let role = sqlx::query_scalar::<_, String>(
-        "SELECT COALESCE(role,'member') FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT COALESCE(role,'member') FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(user_id)
@@ -341,7 +341,7 @@ async fn create_chat(
 
     // membership check
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -374,9 +374,9 @@ async fn create_chat(
     // prevent exact duplicates (name+kind) to avoid UI confusion
     if let Some(existing_id) = sqlx::query_scalar::<_, i64>(
         r#"SELECT id FROM chats
-           WHERE server_id = ? AND is_private = 0
-             AND LOWER(TRIM(COALESCE(name,''))) = LOWER(TRIM(?))
-             AND LOWER(TRIM(COALESCE(kind,'text'))) = ?
+           WHERE server_id = $1 AND is_private = FALSE
+             AND LOWER(TRIM(COALESCE(name,''))) = LOWER(TRIM($2))
+             AND LOWER(TRIM(COALESCE(kind,'text'))) = $3
            LIMIT 1"#,
     )
     .bind(server_id)
@@ -395,21 +395,19 @@ async fn create_chat(
     }
 
     let created_at = auth::now_iso();
-    let res = sqlx::query(
-        "INSERT INTO chats(name, server_id, kind, is_private, created_at) VALUES(?, ?, ?, 0, ?)",
+    let res = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO chats(name, server_id, kind, is_private, created_at) VALUES($1, $2, $3, FALSE, $4) RETURNING id",
     )
     .bind(name)
     .bind(server_id)
     .bind(kind)
     .bind(&created_at)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
-    let Ok(r) = res else {
+    let Ok(chat_id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-
-    let chat_id = r.last_insert_rowid();
 
     // keep server invariant: at least one text + one voice
     ensure_default_channels(db, server_id).await;
@@ -426,7 +424,7 @@ async fn delete_chat(
 
     // membership check
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -445,7 +443,7 @@ async fn delete_chat(
     }
 
     let row = sqlx::query(
-        "SELECT COALESCE(kind,'text') AS kind FROM chats WHERE id = ? AND server_id = ? AND is_private = 0 LIMIT 1",
+        "SELECT COALESCE(kind,'text') AS kind FROM chats WHERE id = $1 AND server_id = $2 AND is_private = FALSE LIMIT 1",
     )
     .bind(chat_id)
     .bind(server_id)
@@ -464,7 +462,7 @@ async fn delete_chat(
 
     // forbid deleting the last channel of this kind
     let cnt = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(1) FROM chats WHERE server_id = ? AND is_private = 0 AND LOWER(TRIM(COALESCE(kind,'text'))) = ?",
+        "SELECT COUNT(1) FROM chats WHERE server_id = $1 AND is_private = FALSE AND LOWER(TRIM(COALESCE(kind,'text'))) = $2",
     )
     .bind(server_id)
     .bind(kind_l)
@@ -480,7 +478,7 @@ async fn delete_chat(
             .into_response();
     }
 
-    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE chat_id = ?")
+    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE chat_id = $1")
         .bind(chat_id)
         .fetch_all(db)
         .await
@@ -495,38 +493,38 @@ async fn delete_chat(
 
     // delete reactions first (no cascade)
     let _ = sqlx::query(
-        r#"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?)"#,
+        r#"DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = $1)"#,
     )
     .bind(chat_id)
     .execute(db)
     .await;
 
-    let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = ?")
+    let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = $1")
         .bind(chat_id)
         .execute(db)
         .await;
 
-    let _ = sqlx::query("DELETE FROM files WHERE chat_id = ?")
+    let _ = sqlx::query("DELETE FROM files WHERE chat_id = $1")
         .bind(chat_id)
         .execute(db)
         .await;
 
-    let _ = sqlx::query("DELETE FROM messages WHERE chat_id = ?")
+    let _ = sqlx::query("DELETE FROM messages WHERE chat_id = $1")
         .bind(chat_id)
         .execute(db)
         .await;
 
-    let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = ?")
+    let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = $1")
         .bind(chat_id)
         .execute(db)
         .await;
 
-    let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = ?")
+    let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = $1")
         .bind(chat_id)
         .execute(db)
         .await;
 
-    let _ = sqlx::query("DELETE FROM chats WHERE id = ?")
+    let _ = sqlx::query("DELETE FROM chats WHERE id = $1")
         .bind(chat_id)
         .execute(db)
         .await;
@@ -582,24 +580,22 @@ async fn create(
 
     let is_public = body.is_public.unwrap_or(true);
 
-    let res = sqlx::query(
-        "INSERT INTO servers(name, owner_id, created_at, is_public) VALUES(?, ?, ?, ?)",
+    let res = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO servers(name, owner_id, created_at, is_public) VALUES($1, $2, $3, $4) RETURNING id",
     )
     .bind(&body.name)
     .bind(me.id)
     .bind(&created_at)
-    .bind(if is_public { 1 } else { 0 })
-    .execute(db)
+    .bind(is_public)
+    .fetch_one(db)
     .await;
 
-    let Ok(r) = res else {
+    let Ok(server_id) = res else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
-    let server_id = r.last_insert_rowid();
-
     let _ = sqlx::query(
-        "INSERT OR IGNORE INTO server_members(server_id, user_id, role) VALUES(?, ?, 'admin')",
+        "INSERT INTO server_members(server_id, user_id, role) VALUES($1, $2, 'admin') ON CONFLICT (server_id, user_id) DO NOTHING",
     )
     .bind(server_id)
     .bind(me.id)
@@ -619,8 +615,8 @@ async fn join(
 ) -> impl IntoResponse {
     let db = &st.db;
 
-    let is_public = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(is_public, 1) FROM servers WHERE id = ? LIMIT 1",
+    let is_public = sqlx::query_scalar::<_, bool>(
+        "SELECT is_public FROM servers WHERE id = $1 LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -632,7 +628,7 @@ async fn join(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    if is_public == 0 {
+    if !is_public {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"detail":"private_server"})),
@@ -641,7 +637,7 @@ async fn join(
     }
 
     if sqlx::query(
-        "INSERT OR IGNORE INTO server_members(server_id, user_id) VALUES(?, ?)",
+        "INSERT INTO server_members(server_id, user_id) VALUES($1, $2) ON CONFLICT (server_id, user_id) DO NOTHING",
     )
     .bind(server_id)
     .bind(me.id)
@@ -664,11 +660,11 @@ async fn list(
     let rows = sqlx::query(
         r#"
         SELECT DISTINCT s.id, s.name, s.owner_id, s.created_at,
-               COALESCE(s.is_public, 1) AS is_public,
+               s.is_public AS is_public,
                COALESCE(m.role, 'member') AS my_role
         FROM servers s
         JOIN server_members m ON m.server_id = s.id
-        WHERE m.user_id = ?
+        WHERE m.user_id = $1
         ORDER BY s.id DESC
         "#,
     )
@@ -684,7 +680,7 @@ async fn list(
             name: r.get("name"),
             owner_id: r.get("owner_id"),
             created_at: r.get("created_at"),
-            is_public: r.get::<i64, _>("is_public") != 0,
+            is_public: r.get::<bool, _>("is_public"),
             my_role: r.get::<String, _>("my_role"),
         })
         .collect::<Vec<_>>();
@@ -710,16 +706,16 @@ async fn discover(
             s.name,
             s.owner_id,
             s.created_at,
-            COALESCE(s.is_public, 1) AS is_public,
+            s.is_public AS is_public,
             (SELECT COUNT(1) FROM server_members sm WHERE sm.server_id = s.id) AS members_count
         FROM servers s
-        WHERE (? = '' OR s.name LIKE ?)
+        WHERE ($1 = '' OR s.name LIKE $2)
           AND NOT EXISTS (
                 SELECT 1 FROM server_members m
-                WHERE m.server_id = s.id AND m.user_id = ?
+                WHERE m.server_id = s.id AND m.user_id = $3
           )
         ORDER BY members_count DESC, s.id DESC
-        LIMIT ?
+        LIMIT $4
         "#,
     )
     .bind(&query)
@@ -735,7 +731,7 @@ async fn discover(
         name: r.get("name"),
         owner_id: r.get("owner_id"),
         created_at: r.get("created_at"),
-        is_public: r.get::<i64, _>("is_public") != 0,
+        is_public: r.get::<bool, _>("is_public"),
         members_count: r.get::<i64, _>("members_count"),
     }).collect::<Vec<_>>();
 
@@ -752,7 +748,7 @@ async fn create_join_request(
     let db = &st.db;
 
     let row = sqlx::query(
-        "SELECT id, COALESCE(is_public, 1) AS is_public FROM servers WHERE id = ? LIMIT 1",
+        "SELECT id, is_public FROM servers WHERE id = $1 LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -764,10 +760,10 @@ async fn create_join_request(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let is_public = r.get::<i64, _>("is_public") != 0;
+    let is_public = r.get::<bool, _>("is_public");
 
     let already_member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -783,7 +779,7 @@ async fn create_join_request(
 
     if is_public {
         if sqlx::query(
-            "INSERT OR IGNORE INTO server_members(server_id, user_id) VALUES(?, ?)",
+            "INSERT INTO server_members(server_id, user_id) VALUES($1, $2) ON CONFLICT (server_id, user_id) DO NOTHING",
         )
         .bind(server_id)
         .bind(me.id)
@@ -799,7 +795,7 @@ async fn create_join_request(
     let from_server_id = match body.from_server_id {
         Some(v) if v > 0 => {
             let allowed = sqlx::query_scalar::<_, i64>(
-                "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+                "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
             )
             .bind(v)
             .bind(me.id)
@@ -817,7 +813,7 @@ async fn create_join_request(
     let res = sqlx::query(
         r#"
         INSERT INTO server_join_requests(server_id, requester_id, from_server_id, status, created_at)
-        VALUES(?, ?, ?, 'pending', ?)
+        VALUES($1, $2, $3, 'pending', $4)
         ON CONFLICT(server_id, requester_id) DO UPDATE SET
             from_server_id = excluded.from_server_id,
             status = 'pending',
@@ -837,31 +833,6 @@ async fn create_join_request(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    let request_id = sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM server_join_requests WHERE server_id = ? AND requester_id = ? LIMIT 1",
-    )
-    .bind(server_id)
-    .bind(me.id)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
-
-    if let Some(request_id) = request_id {
-        if let Some(status) = crate::ai_client::auto_decide_server_join_request_if_ai(st.clone(), request_id).await {
-            let response_status = if status == "accepted" { "joined".to_string() } else { status.clone() };
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": response_status,
-                    "ai_decided": true,
-                    "ai_request_status": status
-                })),
-            )
-                .into_response();
-        }
-    }
-
     (StatusCode::OK, Json(serde_json::json!({ "status": "pending" }))).into_response()
 }
 
@@ -877,7 +848,7 @@ async fn list_incoming_join_requests(
             r.id,
             r.server_id,
             s.name AS server_name,
-            COALESCE(s.is_public, 1) AS server_is_public,
+            s.is_public AS server_is_public,
             r.requester_id,
             u.username AS requester_username,
             up.avatar_file_id AS requester_avatar_file_id,
@@ -890,9 +861,9 @@ async fn list_incoming_join_requests(
         JOIN users u ON u.id = r.requester_id
         LEFT JOIN user_profile up ON up.user_id = u.id
         LEFT JOIN servers fs ON fs.id = r.from_server_id
-        JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = ?
+        JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = $1
         WHERE r.status = 'pending'
-          AND (s.owner_id = ? OR COALESCE(sm.role, 'member') = 'admin')
+          AND (s.owner_id = $2 OR COALESCE(sm.role, 'member') = 'admin')
         ORDER BY r.id DESC
         LIMIT 100
         "#,
@@ -919,7 +890,7 @@ async fn list_outgoing_join_requests(
             r.id,
             r.server_id,
             s.name AS server_name,
-            COALESCE(s.is_public, 1) AS server_is_public,
+            s.is_public AS server_is_public,
             r.requester_id,
             u.username AS requester_username,
             up.avatar_file_id AS requester_avatar_file_id,
@@ -932,7 +903,7 @@ async fn list_outgoing_join_requests(
         JOIN users u ON u.id = r.requester_id
         LEFT JOIN user_profile up ON up.user_id = u.id
         LEFT JOIN servers fs ON fs.id = r.from_server_id
-        WHERE r.requester_id = ?
+        WHERE r.requester_id = $1
         ORDER BY r.id DESC
         LIMIT 100
         "#,
@@ -946,12 +917,12 @@ async fn list_outgoing_join_requests(
     (StatusCode::OK, Json(out)).into_response()
 }
 
-fn join_request_from_row(r: sqlx::sqlite::SqliteRow) -> JoinRequestView {
+fn join_request_from_row(r: sqlx::postgres::PgRow) -> JoinRequestView {
     JoinRequestView {
         id: r.get("id"),
         server_id: r.get("server_id"),
         server_name: r.get("server_name"),
-        server_is_public: r.get::<i64, _>("server_is_public") != 0,
+        server_is_public: r.get::<bool, _>("server_is_public"),
         requester_id: r.get("requester_id"),
         requester_username: r.get("requester_username"),
         requester_avatar_file_id: r.try_get("requester_avatar_file_id").ok(),
@@ -974,9 +945,9 @@ async fn accept_join_request(
         SELECT r.id, r.server_id, r.requester_id
         FROM server_join_requests r
         JOIN servers s ON s.id = r.server_id
-        LEFT JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = ?
-        WHERE r.id = ? AND r.status = 'pending'
-          AND (s.owner_id = ? OR COALESCE(sm.role, 'member') = 'admin')
+        LEFT JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = $1
+        WHERE r.id = $2 AND r.status = 'pending'
+          AND (s.owner_id = $3 OR COALESCE(sm.role, 'member') = 'admin')
         LIMIT 1
         "#,
     )
@@ -997,7 +968,7 @@ async fn accept_join_request(
     let now = auth::now_iso();
 
     let _ = sqlx::query(
-        "INSERT OR IGNORE INTO server_members(server_id, user_id) VALUES(?, ?)",
+        "INSERT INTO server_members(server_id, user_id) VALUES($1, $2) ON CONFLICT (server_id, user_id) DO NOTHING",
     )
     .bind(server_id)
     .bind(requester_id)
@@ -1005,7 +976,7 @@ async fn accept_join_request(
     .await;
 
     let _ = sqlx::query(
-        "UPDATE server_join_requests SET status = 'accepted', decided_at = ?, decided_by = ? WHERE id = ?",
+        "UPDATE server_join_requests SET status = 'accepted', decided_at = $1, decided_by = $2 WHERE id = $3",
     )
     .bind(&now)
     .bind(me.id)
@@ -1028,9 +999,9 @@ async fn reject_join_request(
         SELECT r.id
         FROM server_join_requests r
         JOIN servers s ON s.id = r.server_id
-        LEFT JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = ?
-        WHERE r.id = ? AND r.status = 'pending'
-          AND (s.owner_id = ? OR COALESCE(sm.role, 'member') = 'admin')
+        LEFT JOIN server_members sm ON sm.server_id = r.server_id AND sm.user_id = $1
+        WHERE r.id = $2 AND r.status = 'pending'
+          AND (s.owner_id = $3 OR COALESCE(sm.role, 'member') = 'admin')
         LIMIT 1
         "#,
     )
@@ -1048,7 +1019,7 @@ async fn reject_join_request(
 
     let now = auth::now_iso();
     let _ = sqlx::query(
-        "UPDATE server_join_requests SET status = 'rejected', decided_at = ?, decided_by = ? WHERE id = ?",
+        "UPDATE server_join_requests SET status = 'rejected', decided_at = $1, decided_by = $2 WHERE id = $3",
     )
     .bind(&now)
     .bind(me.id)
@@ -1068,7 +1039,7 @@ async fn invite_member(
     let db = &st.db;
 
     let exists = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM servers WHERE id = ? LIMIT 1",
+        "SELECT 1 FROM servers WHERE id = $1 LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -1091,7 +1062,7 @@ async fn invite_member(
     }
 
     let user_id = sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM users WHERE username = ? AND is_banned = 0 LIMIT 1",
+        "SELECT id FROM users WHERE username = $1 AND is_banned = FALSE LIMIT 1",
     )
     .bind(username)
     .fetch_optional(db)
@@ -1104,7 +1075,7 @@ async fn invite_member(
     };
 
     let _ = sqlx::query(
-        "INSERT OR IGNORE INTO server_members(server_id, user_id) VALUES(?, ?)",
+        "INSERT INTO server_members(server_id, user_id) VALUES($1, $2) ON CONFLICT (server_id, user_id) DO NOTHING",
     )
     .bind(server_id)
     .bind(user_id)
@@ -1122,7 +1093,7 @@ async fn list_chats(
     let db = &st.db;
 
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -1177,12 +1148,12 @@ async fn list_chats(
                   AND m.id > COALESCE((
                     SELECT r.last_read_message_id
                     FROM chat_reads r
-                    WHERE r.chat_id = c.id AND r.user_id = ?
+                    WHERE r.chat_id = c.id AND r.user_id = $1
                     LIMIT 1
                   ), 0)
             ) AS unread_count
         FROM chats c
-        WHERE c.server_id = ?
+        WHERE c.server_id = $2
         ORDER BY CASE COALESCE(c.kind,'text') WHEN 'voice' THEN 0 ELSE 1 END, COALESCE(last_message_id, c.id) DESC
         "#,
     )
@@ -1199,7 +1170,7 @@ async fn list_chats(
             name: r.get("name"),
             kind: r.get("kind"),
             server_id: r.get("server_id"),
-            is_private: r.get("is_private"),
+            is_private: r.get::<bool, _>("is_private") as i64,
             created_at: r.get("created_at"),
             unread_count: r.get::<i64, _>("unread_count"),
             last_message_id: r.try_get("last_message_id").ok(),
@@ -1220,7 +1191,7 @@ async fn list_members(
 
     // membership check
     let member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(me.id)
@@ -1243,12 +1214,12 @@ async fn list_members(
             up.avatar_file_id as avatar_file_id,
             COALESCE(m.role, 'member') as role,
             CASE
-              WHEN COALESCE(p.is_online, 0) = 0 THEN 0
+              WHEN COALESCE(p.is_online, FALSE) = FALSE THEN 0
               WHEN p.status = 'invisible' THEN 0
               ELSE 1
             END as is_online,
             CASE
-              WHEN COALESCE(p.is_online, 0) = 0 THEN 'offline'
+              WHEN COALESCE(p.is_online, FALSE) = FALSE THEN 'offline'
               WHEN p.status = 'invisible' THEN 'offline'
               ELSE COALESCE(p.status, 'online')
             END as status
@@ -1256,7 +1227,7 @@ async fn list_members(
         JOIN users u ON u.id = m.user_id
         LEFT JOIN user_profile up ON up.user_id = u.id
         LEFT JOIN user_presence p ON p.user_id = u.id
-        WHERE m.server_id = ?
+        WHERE m.server_id = $1
         ORDER BY is_online DESC, u.username ASC
         "#,
     )
@@ -1290,7 +1261,7 @@ async fn update_server(
     let db = &st.db;
 
     let owner = sqlx::query_scalar::<_, i64>(
-        "SELECT owner_id FROM servers WHERE id = ? LIMIT 1",
+        "SELECT owner_id FROM servers WHERE id = $1 LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -1315,7 +1286,7 @@ async fn update_server(
             )
                 .into_response();
         }
-        if sqlx::query("UPDATE servers SET name = ? WHERE id = ?")
+        if sqlx::query("UPDATE servers SET name = $1 WHERE id = $2")
             .bind(&name)
             .bind(server_id)
             .execute(db)
@@ -1327,8 +1298,8 @@ async fn update_server(
     }
 
     if let Some(is_public) = body.is_public {
-        if sqlx::query("UPDATE servers SET is_public = ? WHERE id = ?")
-            .bind(if is_public { 1 } else { 0 })
+        if sqlx::query("UPDATE servers SET is_public = $1 WHERE id = $2")
+            .bind(is_public)
             .bind(server_id)
             .execute(db)
             .await
@@ -1356,7 +1327,7 @@ async fn delete_server(
     let db = &st.db;
 
     let owner = sqlx::query_scalar::<_, i64>(
-        "SELECT owner_id FROM servers WHERE id = ? LIMIT 1",
+        "SELECT owner_id FROM servers WHERE id = $1 LIMIT 1",
     )
     .bind(server_id)
     .fetch_optional(db)
@@ -1372,7 +1343,7 @@ async fn delete_server(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let server_file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE chat_id IN (SELECT id FROM chats WHERE server_id = ?)")
+    let server_file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE chat_id IN (SELECT id FROM chats WHERE server_id = $1)")
         .bind(server_id)
         .fetch_all(db)
         .await
@@ -1391,50 +1362,50 @@ async fn delete_server(
     };
 
     // collect chats
-    let chat_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM chats WHERE server_id = ?")
+    let chat_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM chats WHERE server_id = $1")
         .bind(server_id)
         .fetch_all(&mut *tx)
         .await
         .unwrap_or_default();
 
     for cid in chat_ids.iter().copied() {
-        let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM pinned_messages WHERE chat_id = $1")
             .bind(cid)
             .execute(&mut *tx)
             .await;
-        let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM chat_reads WHERE chat_id = $1")
             .bind(cid)
             .execute(&mut *tx)
             .await;
-        let _ = sqlx::query("DELETE FROM files WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM files WHERE chat_id = $1")
             .bind(cid)
             .execute(&mut *tx)
             .await;
-        let _ = sqlx::query("DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?)")
+        let _ = sqlx::query("DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE chat_id = $1)")
             .bind(cid)
             .execute(&mut *tx)
             .await;
-        let _ = sqlx::query("DELETE FROM messages WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM messages WHERE chat_id = $1")
             .bind(cid)
             .execute(&mut *tx)
             .await;
-        let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = ?")
+        let _ = sqlx::query("DELETE FROM chat_participants WHERE chat_id = $1")
             .bind(cid)
             .execute(&mut *tx)
             .await;
     }
 
-    let _ = sqlx::query("DELETE FROM chats WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM chats WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await;
 
-    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await;
 
-    let _ = sqlx::query("DELETE FROM servers WHERE id = ?")
+    let _ = sqlx::query("DELETE FROM servers WHERE id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await;
@@ -1463,7 +1434,7 @@ async fn server_remove_user(
 ) -> impl IntoResponse {
     let db = &st.db;
 
-    let owner_id = match sqlx::query_scalar::<_, i64>("SELECT owner_id FROM servers WHERE id = ? LIMIT 1")
+    let owner_id = match sqlx::query_scalar::<_, i64>("SELECT owner_id FROM servers WHERE id = $1 LIMIT 1")
         .bind(server_id)
         .fetch_optional(db)
         .await
@@ -1494,7 +1465,7 @@ async fn server_remove_user(
         }
 
         let member = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(me.id)
@@ -1510,7 +1481,7 @@ async fn server_remove_user(
 
         if me.id != owner_id {
             let role = sqlx::query_scalar::<_, String>(
-                "SELECT COALESCE(role,'member') FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+                "SELECT COALESCE(role,'member') FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
             )
             .bind(server_id)
             .bind(me.id)
@@ -1527,7 +1498,7 @@ async fn server_remove_user(
     }
 
     let target_member = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(server_id)
     .bind(body.user_id)
@@ -1541,14 +1512,14 @@ async fn server_remove_user(
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({"detail":"user_not_in_server"}))).into_response();
     }
 
-    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = ? AND user_id = ?")
+    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = $1 AND user_id = $2")
         .bind(server_id)
         .bind(body.user_id)
         .execute(db)
         .await;
 
     let _ = sqlx::query(
-        "DELETE FROM chat_participants WHERE user_id = ? AND chat_id IN (SELECT id FROM chats WHERE server_id = ?)"
+        "DELETE FROM chat_participants WHERE user_id = $1 AND chat_id IN (SELECT id FROM chats WHERE server_id = $2)"
     )
     .bind(body.user_id)
     .bind(server_id)
@@ -1556,7 +1527,7 @@ async fn server_remove_user(
     .await;
 
     let _ = sqlx::query(
-        "DELETE FROM chat_reads WHERE user_id = ? AND chat_id IN (SELECT id FROM chats WHERE server_id = ?)"
+        "DELETE FROM chat_reads WHERE user_id = $1 AND chat_id IN (SELECT id FROM chats WHERE server_id = $2)"
     )
     .bind(body.user_id)
     .bind(server_id)

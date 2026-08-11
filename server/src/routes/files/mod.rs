@@ -96,7 +96,7 @@ pub(super) async fn resolve_user_id_for_file_request(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let row = sqlx::query("SELECT token_version, is_banned FROM users WHERE id = ? LIMIT 1")
+    let row = sqlx::query("SELECT token_version, is_banned FROM users WHERE id = $1 LIMIT 1")
         .bind(claims.uid)
         .fetch_optional(&st.db)
         .await
@@ -104,8 +104,8 @@ pub(super) async fn resolve_user_id_for_file_request(
         .flatten()
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let banned: i64 = row.get("is_banned");
-    if banned != 0 {
+    let banned: bool = row.get("is_banned");
+    if banned {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -114,7 +114,7 @@ pub(super) async fn resolve_user_id_for_file_request(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let file_row = sqlx::query("SELECT chat_id FROM files WHERE id = ? LIMIT 1")
+    let file_row = sqlx::query("SELECT chat_id FROM files WHERE id = $1 LIMIT 1")
         .bind(file_id)
         .fetch_optional(&st.db)
         .await
@@ -140,7 +140,7 @@ pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat
         kind: Option<String>,
     }
 
-    let chat: Option<ChatInfo> = sqlx::query_as("SELECT server_id, is_private, kind FROM chats WHERE id = ?")
+    let chat: Option<ChatInfo> = sqlx::query_as("SELECT server_id, is_private, kind FROM chats WHERE id = $1")
         .bind(chat_id)
         .fetch_optional(&st.db)
         .await
@@ -151,15 +151,13 @@ pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat
 
     let kind = chat.kind.unwrap_or_else(|| "text".to_string());
 
-    if kind == "voice" {
-        if st.hub.voice_get_user_channel(user_id) != Some(chat_id) {
-            return false;
-        }
+    if kind == "voice" && st.hub.voice_get_user_channel(user_id) != Some(chat_id) {
+        return false;
     }
 
     if let Some(server_id) = chat.server_id.filter(|sid| *sid > 0) {
         sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(server_id)
         .bind(user_id)
@@ -170,7 +168,7 @@ pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat
         .is_some()
     } else {
         let in_participants = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(user_id)
@@ -184,7 +182,7 @@ pub(super) async fn can_access_chat_by_user_id(st: &AppState, user_id: i64, chat
             true
         } else {
             sqlx::query_scalar::<_, i64>(
-                "SELECT 1 FROM dm_chats WHERE chat_id = ? AND (user_a = ? OR user_b = ?) LIMIT 1",
+                "SELECT 1 FROM dm_chats WHERE chat_id = $1 AND (user_a = $2 OR user_b = $2) LIMIT 1",
             )
             .bind(chat_id)
             .bind(user_id)
@@ -208,11 +206,11 @@ pub(super) async fn load_file_for_serving(st: &AppState, file_id: i64) -> Result
             chat_id,
             CASE
                 WHEN deleted_at IS NOT NULL THEN 1
-                WHEN expires_at IS NOT NULL AND expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now') THEN 1
+                WHEN expires_at IS NOT NULL AND expires_at <= NOW() THEN 1
                 ELSE 0
             END AS is_expired
         FROM files
-        WHERE id = ?
+        WHERE id = $1
         "#,
     )
     .bind(file_id)
@@ -247,11 +245,11 @@ pub(super) async fn load_file_for_access(st: &AppState, file_id: i64) -> Result<
             chat_id,
             CASE
                 WHEN deleted_at IS NOT NULL THEN 1
-                WHEN expires_at IS NOT NULL AND expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now') THEN 1
+                WHEN expires_at IS NOT NULL AND expires_at <= NOW() THEN 1
                 ELSE 0
             END AS is_expired
         FROM files
-        WHERE id = ?
+        WHERE id = $1
         "#,
     )
     .bind(file_id)

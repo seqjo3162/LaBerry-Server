@@ -1,7 +1,7 @@
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use sqlx::{SqlitePool, Row};
+use sqlx::{PgPool, Row};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -16,7 +16,7 @@ static CONN_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub async fn handle_single_ws(
     socket: WebSocket,
-    db: SqlitePool,
+    db: PgPool,
     hub: Arc<Hub>,
     user_id: UserId,
     username: String,
@@ -40,9 +40,9 @@ pub async fn handle_single_ws(
     let _ = sqlx::query(
         r#"
         INSERT INTO user_presence(user_id, is_online, status, updated_at)
-        VALUES(?, 1, 'online', ?)
+        VALUES($1, TRUE, 'online', $2)
         ON CONFLICT(user_id) DO UPDATE SET
-          is_online = 1,
+          is_online = TRUE,
           updated_at = excluded.updated_at
         "#,
     )
@@ -149,7 +149,7 @@ pub async fn handle_single_ws(
         }
     }
 
-    let _ = writer.abort();
+    writer.abort();
 
     hub.cleanup_conn(user_id, conn_id).await;
 
@@ -162,7 +162,7 @@ pub async fn handle_single_ws(
     if !still_online {
         let now = auth::now_iso();
         let _ = sqlx::query(
-            "UPDATE user_presence SET is_online = 0, updated_at = ? WHERE user_id = ?",
+            "UPDATE user_presence SET is_online = FALSE, updated_at = $1 WHERE user_id = $2",
         )
         .bind(&now)
         .bind(user_id)
@@ -179,7 +179,7 @@ pub async fn handle_single_ws(
 
 pub async fn handle_incoming_message(
     text: &str,
-    db: &SqlitePool,
+    db: &PgPool,
     hub: &Hub,
     user_id: UserId,
     conn_id: ConnId,
@@ -673,7 +673,7 @@ pub async fn handle_incoming_message(
             tracing::info!("[WS] send_message: persisted id={} chat={} user={}", message_id, chat_id, user_id);
 
             let sender_avatar_file_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
-                "SELECT avatar_file_id FROM user_profile WHERE user_id = ? LIMIT 1",
+                "SELECT avatar_file_id FROM user_profile WHERE user_id = $1 LIMIT 1",
             )
             .bind(user_id)
             .fetch_optional(db)
@@ -748,7 +748,7 @@ pub async fn handle_incoming_message(
             let message_id = persist_message(db, chat_id, user_id, content, &ts).await;
 
             let sender_avatar_file_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
-                "SELECT avatar_file_id FROM user_profile WHERE user_id = ? LIMIT 1",
+                "SELECT avatar_file_id FROM user_profile WHERE user_id = $1 LIMIT 1",
             )
             .bind(user_id)
             .fetch_optional(db)
@@ -877,13 +877,13 @@ fn voice_leave_conn_internal(
     broadcast_room_excluding_conn(hub, &RoomId::Voice(channel_id), conn_id, &payload);
 }
 
-async fn is_voice_allowed(db: &SqlitePool, chat_id: i64) -> bool {
+async fn is_voice_allowed(db: &PgPool, chat_id: i64) -> bool {
     // Allowed:
     // 1) real voice channel (kind=voice)
     // 2) DM chat (is_private=1 and server_id IS NULL)
     // This enables calls in DMs without creating separate voice chats in DB.
 
-    let row = sqlx::query("SELECT COALESCE(kind, 'text') AS kind, is_private, server_id FROM chats WHERE id = ?")
+    let row = sqlx::query("SELECT COALESCE(kind, 'text') AS kind, is_private, server_id FROM chats WHERE id = $1")
         .bind(chat_id)
         .fetch_optional(db)
         .await;
@@ -891,35 +891,35 @@ async fn is_voice_allowed(db: &SqlitePool, chat_id: i64) -> bool {
     let Ok(Some(r)) = row else { return false; };
 
     let kind: String = r.get("kind");
-    let is_private: i64 = r.get("is_private");
+    let is_private: bool = r.get("is_private");
     let server_id: Option<i64> = r.get("server_id");
 
     if kind == "voice" {
         return true;
     }
 
-    is_private == 1 && server_id.is_none()
+    is_private && server_id.is_none()
 }
 
-async fn persist_message(db: &SqlitePool, chat_id: i64, user_id: UserId, content: &str, ts: &str) -> i64 {
-    let res = sqlx::query(
+async fn persist_message(db: &PgPool, chat_id: i64, user_id: UserId, content: &str, ts: &str) -> i64 {
+    let res = sqlx::query_scalar::<_, i64>(
         r#"INSERT INTO messages (chat_id, sender_id, content, timestamp)
-           VALUES (?, ?, ?, ?)"#,
+           VALUES ($1, $2, $3, $4) RETURNING id"#,
     )
     .bind(chat_id)
     .bind(user_id)
     .bind(content)
     .bind(ts)
-    .execute(db)
+    .fetch_one(db)
     .await;
 
-    res.ok().map(|r| r.last_insert_rowid()).unwrap_or(0)
+    res.unwrap_or(0)
 }
 
-async fn dm_peer_user_id(db: &SqlitePool, chat_id: i64, me: UserId) -> Option<UserId> {
+async fn dm_peer_user_id(db: &PgPool, chat_id: i64, me: UserId) -> Option<UserId> {
     // Only for DM chats: is_private=1 AND server_id IS NULL.
-    let meta = sqlx::query_as::<_, (Option<i64>, i64)>(
-        "SELECT server_id, is_private FROM chats WHERE id = ? LIMIT 1",
+    let meta = sqlx::query_as::<_, (Option<i64>, bool)>(
+        "SELECT server_id, is_private FROM chats WHERE id = $1 LIMIT 1",
     )
     .bind(chat_id)
     .fetch_optional(db)
@@ -928,12 +928,12 @@ async fn dm_peer_user_id(db: &SqlitePool, chat_id: i64, me: UserId) -> Option<Us
     .flatten()?;
 
     let (server_id, is_private) = meta;
-    if server_id.is_some() || is_private != 1 {
+    if server_id.is_some() || !is_private {
         return None;
     }
 
     sqlx::query_scalar::<_, i64>(
-        "SELECT user_id FROM chat_participants WHERE chat_id = ? AND user_id <> ? LIMIT 1",
+        "SELECT user_id FROM chat_participants WHERE chat_id = $1 AND user_id <> $2 LIMIT 1",
     )
     .bind(chat_id)
     .bind(me)
@@ -943,8 +943,8 @@ async fn dm_peer_user_id(db: &SqlitePool, chat_id: i64, me: UserId) -> Option<Us
     .flatten()
 }
 
-async fn chat_is_voice(db: &SqlitePool, chat_id: i64) -> bool {
-    sqlx::query_scalar::<_, String>("SELECT COALESCE(kind, 'text') FROM chats WHERE id = ? LIMIT 1")
+async fn chat_is_voice(db: &PgPool, chat_id: i64) -> bool {
+    sqlx::query_scalar::<_, String>("SELECT COALESCE(kind, 'text') FROM chats WHERE id = $1 LIMIT 1")
         .bind(chat_id)
         .fetch_optional(db)
         .await
@@ -954,9 +954,9 @@ async fn chat_is_voice(db: &SqlitePool, chat_id: i64) -> bool {
         .unwrap_or(false)
 }
 
-async fn can_access_chat(db: &SqlitePool, user_id: UserId, chat_id: i64) -> bool {
-    let meta = sqlx::query_as::<_, (Option<i64>, i64)>(
-        "SELECT server_id, is_private FROM chats WHERE id = ? LIMIT 1",
+async fn can_access_chat(db: &PgPool, user_id: UserId, chat_id: i64) -> bool {
+    let meta = sqlx::query_as::<_, (Option<i64>, bool)>(
+        "SELECT server_id, is_private FROM chats WHERE id = $1 LIMIT 1",
     )
     .bind(chat_id)
     .fetch_optional(db)
@@ -968,9 +968,9 @@ async fn can_access_chat(db: &SqlitePool, user_id: UserId, chat_id: i64) -> bool
         return false;
     };
 
-    if is_private == 1 {
+    if is_private {
         return sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(chat_id)
         .bind(user_id)
@@ -983,7 +983,7 @@ async fn can_access_chat(db: &SqlitePool, user_id: UserId, chat_id: i64) -> bool
 
     if let Some(sid) = server_id {
         return sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM server_members WHERE server_id = ? AND user_id = ? LIMIT 1",
+            "SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 LIMIT 1",
         )
         .bind(sid)
         .bind(user_id)
@@ -995,7 +995,7 @@ async fn can_access_chat(db: &SqlitePool, user_id: UserId, chat_id: i64) -> bool
     }
 
     sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
+        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
     )
     .bind(chat_id)
     .bind(user_id)
@@ -1006,13 +1006,13 @@ async fn can_access_chat(db: &SqlitePool, user_id: UserId, chat_id: i64) -> bool
     .is_some()
 }
 
-async fn get_accessible_rooms(db: &SqlitePool, user_id: UserId) -> Vec<RoomId> {
+async fn get_accessible_rooms(db: &PgPool, user_id: UserId) -> Vec<RoomId> {
     let ids = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT c.id
         FROM chats c
         JOIN chat_participants p ON p.chat_id = c.id
-        WHERE p.user_id = ?
+        WHERE p.user_id = $1
           AND COALESCE(c.kind, 'text') <> 'voice'
 
         UNION
@@ -1020,9 +1020,9 @@ async fn get_accessible_rooms(db: &SqlitePool, user_id: UserId) -> Vec<RoomId> {
         SELECT c.id
         FROM chats c
         JOIN server_members sm ON sm.server_id = c.server_id
-        WHERE sm.user_id = ?
+        WHERE sm.user_id = $1
           AND c.server_id IS NOT NULL
-          AND c.is_private = 0
+          AND NOT c.is_private
           AND COALESCE(c.kind, 'text') <> 'voice'
         "#,
     )

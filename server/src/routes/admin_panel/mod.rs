@@ -14,7 +14,7 @@ use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use regex::Regex;
 use serde::Deserialize;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, PgPool};
 use std::{env, net::IpAddr};
 
 pub mod users;
@@ -186,7 +186,7 @@ pub(super) fn admin_sanitize_filename(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         let ok = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
-        if ok { out.push(ch); } else if ch.is_whitespace() { out.push('_'); } else { out.push('_'); }
+        if ok { out.push(ch); } else { out.push('_'); }
     }
     if out.is_empty() { "file".to_string() } else { out }
 }
@@ -1266,12 +1266,12 @@ async fn admin_report_status(
     };
     let now = auth::now_iso();
     let res = if status == "open" {
-        sqlx::query("UPDATE user_reports SET status = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = ?")
+        sqlx::query("UPDATE user_reports SET status = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = $1")
             .bind(id)
             .execute(&st.db)
             .await
     } else {
-        sqlx::query("UPDATE user_reports SET status = ?, resolved_at = ?, resolved_by = NULL WHERE id = ?")
+        sqlx::query("UPDATE user_reports SET status = $1, resolved_at = $2, resolved_by = NULL WHERE id = $3")
             .bind(status)
             .bind(&now)
             .bind(id)
@@ -1352,14 +1352,14 @@ async fn admin_suggestion_status(
     let now = auth::now_iso();
     let res = if status == "open" {
         sqlx::query(
-            "UPDATE user_suggestions SET status = 'open', reviewed_at = NULL, reviewed_by = NULL WHERE id = ?",
+            "UPDATE user_suggestions SET status = 'open', reviewed_at = NULL, reviewed_by = NULL WHERE id = $1",
         )
         .bind(id)
         .execute(&st.db)
         .await
     } else {
         sqlx::query(
-            "UPDATE user_suggestions SET status = ?, reviewed_at = ?, reviewed_by = NULL, admin_note = ? WHERE id = ?",
+            "UPDATE user_suggestions SET status = $1, reviewed_at = $2, reviewed_by = NULL, admin_note = $3 WHERE id = $4",
         )
         .bind(status)
         .bind(&now)
@@ -1421,7 +1421,7 @@ async fn center_page(
     let users_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(&st.db).await.unwrap_or(0);
     let servers_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM servers").fetch_one(&st.db).await.unwrap_or(0);
     // messages count removed from admin center (messages are E2EE)
-    let banned_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetch_one(&st.db).await.unwrap_or(0);
+    let banned_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_banned = TRUE").fetch_one(&st.db).await.unwrap_or(0);
 
     let users_query = q.q.clone().unwrap_or_default().trim().to_string();
     let users = fetch_users(&st.db, &users_query, 200).await.unwrap_or_default();
@@ -1439,11 +1439,13 @@ async fn center_page(
     let users_panel = render_users_panel_body(
         &sess,
         &users,
-        &users_query,
+        &users::UsersPanelFilter {
+            query: &users_query,
+            mode: users_mode,
+            requested_user_id: selected_id,
+            current_return_to: &users_return_to,
+        },
         true,
-        users_mode,
-        selected_id,
-        &users_return_to,
         &user_reports,
         &selected_servers,
     );
@@ -1610,14 +1612,14 @@ struct UserSuggestionRow {
     admin_note: String,
 }
 
-fn map_user_row(r: sqlx::sqlite::SqliteRow) -> UserRow {
+fn map_user_row(r: sqlx::postgres::PgRow) -> UserRow {
     UserRow {
         id: r.get("id"),
         username: r.get("username"),
         email: r.get("email"),
-        is_banned: r.get::<i64, _>("is_banned") != 0,
+        is_banned: r.get::<bool, _>("is_banned"),
         created_at: r.get("created_at"),
-        is_online: r.get::<i64, _>("is_online") != 0,
+        is_online: r.get::<bool, _>("is_online"),
         presence_status: r.get("presence_status"),
         presence_updated_at: r.get("presence_updated_at"),
         avatar_file_id: r.get("avatar_file_id"),
@@ -1632,14 +1634,14 @@ fn map_user_row(r: sqlx::sqlite::SqliteRow) -> UserRow {
     }
 }
 
-async fn fetch_users(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<Vec<UserRow>> {
+async fn fetch_users(db: &PgPool, q: &str, limit: i64) -> anyhow::Result<Vec<UserRow>> {
     let select = r#"
         SELECT u.id,
                u.username,
                COALESCE(u.email,'') AS email,
                u.is_banned,
                u.created_at,
-               COALESCE(p.is_online, 0) AS is_online,
+               COALESCE(p.is_online, FALSE) AS is_online,
                COALESCE(p.status, 'offline') AS presence_status,
                COALESCE(p.updated_at, '') AS presence_updated_at,
                up.avatar_file_id AS avatar_file_id,
@@ -1657,19 +1659,19 @@ async fn fetch_users(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<Vec
     "#;
 
     let rows = if q.is_empty() {
-        sqlx::query(sqlx::AssertSqlSafe(format!("{select} ORDER BY u.id DESC LIMIT ?")))
+        sqlx::query(sqlx::AssertSqlSafe(format!("{select} ORDER BY u.id DESC LIMIT $1")))
             .bind(limit)
             .fetch_all(db)
             .await?
     } else if let Ok(id) = q.parse::<i64>() {
-        sqlx::query(sqlx::AssertSqlSafe(format!("{select} WHERE u.id = ? ORDER BY u.id DESC LIMIT ?")))
+        sqlx::query(sqlx::AssertSqlSafe(format!("{select} WHERE u.id = $1 ORDER BY u.id DESC LIMIT $2")))
             .bind(id)
             .bind(limit)
             .fetch_all(db)
             .await?
     } else {
         let like = format!("%{}%", q);
-        sqlx::query(sqlx::AssertSqlSafe(format!("{select} WHERE u.username LIKE ? OR u.email LIKE ? ORDER BY u.id DESC LIMIT ?")))
+        sqlx::query(sqlx::AssertSqlSafe(format!("{select} WHERE u.username LIKE $1 OR u.email LIKE $2 ORDER BY u.id DESC LIMIT $3")))
             .bind(&like)
             .bind(&like)
             .bind(limit)
@@ -1680,14 +1682,14 @@ async fn fetch_users(db: &SqlitePool, q: &str, limit: i64) -> anyhow::Result<Vec
     Ok(rows.into_iter().map(map_user_row).collect())
 }
 
-async fn fetch_user_by_id(db: &SqlitePool, id: i64) -> anyhow::Result<Option<UserRow>> {
+async fn fetch_user_by_id(db: &PgPool, id: i64) -> anyhow::Result<Option<UserRow>> {
     let select = r#"
         SELECT u.id,
                u.username,
                COALESCE(u.email,'') AS email,
                u.is_banned,
                u.created_at,
-               COALESCE(p.is_online, 0) AS is_online,
+               COALESCE(p.is_online, FALSE) AS is_online,
                COALESCE(p.status, 'offline') AS presence_status,
                COALESCE(p.updated_at, '') AS presence_updated_at,
                up.avatar_file_id AS avatar_file_id,
@@ -1702,14 +1704,14 @@ async fn fetch_user_by_id(db: &SqlitePool, id: i64) -> anyhow::Result<Option<Use
         FROM users u
         LEFT JOIN user_presence p ON p.user_id = u.id
         LEFT JOIN user_profile up ON up.user_id = u.id
-        WHERE u.id = ?
+        WHERE u.id = $1
         LIMIT 1
     "#;
     let row = sqlx::query(select).bind(id).fetch_optional(db).await?;
     Ok(row.map(map_user_row))
 }
 
-async fn fetch_user_reports(db: &SqlitePool, user_id: i64, limit: i64) -> anyhow::Result<Vec<UserReportRow>> {
+async fn fetch_user_reports(db: &PgPool, user_id: i64, limit: i64) -> anyhow::Result<Vec<UserReportRow>> {
     let rows = sqlx::query(
         r#"
         SELECT r.id,
@@ -1723,9 +1725,9 @@ async fn fetch_user_reports(db: &SqlitePool, user_id: i64, limit: i64) -> anyhow
                r.created_at
         FROM user_reports r
         LEFT JOIN users u ON u.id = r.reporter_id
-        WHERE r.target_user_id = ?
+        WHERE r.target_user_id = $1
         ORDER BY CASE r.status WHEN 'open' THEN 0 ELSE 1 END, r.id DESC
-        LIMIT ?
+        LIMIT $2
         "#,
     )
     .bind(user_id)
@@ -1749,7 +1751,7 @@ async fn fetch_user_reports(db: &SqlitePool, user_id: i64, limit: i64) -> anyhow
         .collect())
 }
 
-async fn fetch_suggestions(db: &SqlitePool, status: &str, limit: i64) -> anyhow::Result<Vec<UserSuggestionRow>> {
+async fn fetch_suggestions(db: &PgPool, status: &str, limit: i64) -> anyhow::Result<Vec<UserSuggestionRow>> {
     let status = normalized_suggestion_status(Some(status));
     let base = r#"
         SELECT s.id,
@@ -1767,14 +1769,14 @@ async fn fetch_suggestions(db: &SqlitePool, status: &str, limit: i64) -> anyhow:
 
     let rows = if status == "all" {
         sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{base} ORDER BY CASE s.status WHEN 'open' THEN 0 ELSE 1 END, s.id DESC LIMIT ?"
+            "{base} ORDER BY CASE s.status WHEN 'open' THEN 0 ELSE 1 END, s.id DESC LIMIT $1"
         )))
         .bind(limit)
         .fetch_all(db)
         .await?
     } else {
         sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{base} WHERE s.status = ? ORDER BY s.id DESC LIMIT ?"
+            "{base} WHERE s.status = $1 ORDER BY s.id DESC LIMIT $2"
         )))
         .bind(status)
         .bind(limit)
@@ -1798,12 +1800,12 @@ async fn fetch_suggestions(db: &SqlitePool, status: &str, limit: i64) -> anyhow:
         .collect())
 }
 
-async fn fetch_test_users(db: &SqlitePool, re: &Regex, limit: i64) -> anyhow::Result<Vec<UserRow>> {
+async fn fetch_test_users(db: &PgPool, re: &Regex, limit: i64) -> anyhow::Result<Vec<UserRow>> {
     let rows = sqlx::query(
         r#"SELECT id, username, COALESCE(email,'') AS email, is_banned, created_at
            FROM users
            ORDER BY id DESC
-           LIMIT ?"#,
+           LIMIT $1"#,
     )
     .bind(limit)
     .fetch_all(db)
@@ -1818,7 +1820,7 @@ async fn fetch_test_users(db: &SqlitePool, re: &Regex, limit: i64) -> anyhow::Re
                 id: r.get("id"),
                 username,
                 email,
-                is_banned: r.get::<i64, _>("is_banned") != 0,
+                is_banned: r.get::<bool, _>("is_banned"),
                 created_at: r.get("created_at"),
                 is_online: false,
                 presence_status: "offline".to_string(),
@@ -1842,13 +1844,13 @@ async fn fetch_test_users(db: &SqlitePool, re: &Regex, limit: i64) -> anyhow::Re
 
 // moved to content.rs
 
-async fn purge_server_exec(db: &SqlitePool, server_id: i64) -> anyhow::Result<()> {
+async fn purge_server_exec(db: &PgPool, server_id: i64) -> anyhow::Result<()> {
     use std::path::PathBuf;
 
     let mut tx = db.begin().await?;
 
     // Collect file paths first (so we can delete from FS after commit)
-    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE server_id = ?")
+    let file_rows = sqlx::query("SELECT storage_path, filename FROM files WHERE server_id = $1")
         .bind(server_id)
         .fetch_all(&mut *tx)
         .await?;
@@ -1867,7 +1869,7 @@ async fn purge_server_exec(db: &SqlitePool, server_id: i64) -> anyhow::Result<()
     }
 
     let profile_rows =
-        sqlx::query("SELECT storage_path FROM profile_files WHERE server_id = ?")
+        sqlx::query("SELECT storage_path FROM profile_files WHERE server_id = $1")
             .bind(server_id)
             .fetch_all(&mut *tx)
             .await?;
@@ -1877,68 +1879,68 @@ async fn purge_server_exec(db: &SqlitePool, server_id: i64) -> anyhow::Result<()
         profile_paths.push(PathBuf::from(p));
     }
 
-    let _ = sqlx::query("DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE server_id = ?)")
+    let _ = sqlx::query("DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE server_id = $1)")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM pinned_messages WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM pinned_messages WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM pinned_messages WHERE message_id IN (SELECT id FROM messages WHERE server_id = ?)")
+    let _ = sqlx::query("DELETE FROM pinned_messages WHERE message_id IN (SELECT id FROM messages WHERE server_id = $1)")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM server_members WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM server_categories WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM server_categories WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM server_roles WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM server_roles WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM server_bans WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM server_bans WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM server_invites WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM server_invites WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM server_backups WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM server_backups WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
-    let _ = sqlx::query("DELETE FROM server_webhooks WHERE server_id = ?")
-        .bind(server_id)
-        .execute(&mut *tx)
-        .await?;
-
-    let _ = sqlx::query("DELETE FROM gif_assets WHERE source_file_id IN (SELECT id FROM files WHERE server_id = ?)")
+    let _ = sqlx::query("DELETE FROM server_webhooks WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM files WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM gif_assets WHERE source_file_id IN (SELECT id FROM files WHERE server_id = $1)")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM profile_files WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM files WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM messages WHERE server_id = ?")
+    let _ = sqlx::query("DELETE FROM profile_files WHERE server_id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;
 
-    let _ = sqlx::query("DELETE FROM servers WHERE id = ?")
+    let _ = sqlx::query("DELETE FROM messages WHERE server_id = $1")
+        .bind(server_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let _ = sqlx::query("DELETE FROM servers WHERE id = $1")
         .bind(server_id)
         .execute(&mut *tx)
         .await?;

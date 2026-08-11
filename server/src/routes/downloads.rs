@@ -84,12 +84,12 @@ pub fn router() -> Router<AppState> {
         .fallback(get(list_downloads))
 }
 
-async fn latest_for_platform(db: &sqlx::SqlitePool, platform: &str) -> Option<sqlx::sqlite::SqliteRow> {
+async fn latest_for_platform(db: &sqlx::PgPool, platform: &str) -> Option<sqlx::postgres::PgRow> {
     sqlx::query(
         r#"
         SELECT id, platform, version, original_name, mime_type, file_size, storage_path, uploaded_at
         FROM app_downloads
-        WHERE platform = ? AND is_active = 1
+        WHERE platform = $1 AND is_active = TRUE
         ORDER BY id DESC
         LIMIT 1
         "#,

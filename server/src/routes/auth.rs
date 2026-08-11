@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use sea_query::{Iden, IdenStatic};
 use uuid::Uuid;
 
 use crate::{auth, server::AppState};
@@ -97,11 +98,11 @@ async fn register(
     }
 
     let username_exists = sqlx::query_scalar::<_, i64>(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "SELECT 1 FROM {} WHERE {} = $1 LIMIT 1",
             UserIden::Table.to_string(),
             UserIden::Username.to_string()
-        )
+        ))
     )
     .bind(&username)
     .fetch_optional(db)
@@ -115,11 +116,11 @@ async fn register(
 
     if let Some(email) = &body.email {
         let email_exists = sqlx::query_scalar::<_, i64>(
-            &format!(
+            sqlx::AssertSqlSafe(format!(
                 "SELECT 1 FROM {} WHERE {} = $1 LIMIT 1",
                 UserIden::Table.to_string(),
                 UserIden::Email.to_string()
-            )
+            ))
         )
         .bind(email)
         .fetch_optional(db)
@@ -143,7 +144,7 @@ async fn register(
         .unwrap_or("license-rules-2026-05-24");
 
     let row = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "INSERT INTO {} (
                 {}, {}, {}, {}, {}, {}, {},
                 {}, {}
@@ -160,7 +161,7 @@ async fn register(
             UserIden::TermsAcceptedAt.to_string(),
             UserIden::TermsAgreementVersion.to_string(),
             UserIden::Id.to_string()
-        )
+        ))
     )
     .bind(&username)
     .bind(&body.email)
@@ -200,7 +201,7 @@ async fn login(
     let db = &st.db;
 
     let r = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "SELECT {}, {}, {}, {}, {}, {}
              FROM {}
              WHERE {} = $1
@@ -213,7 +214,7 @@ async fn login(
             UserIden::Is2faEnabled.to_string(),
             UserIden::Table.to_string(),
             UserIden::Username.to_string()
-        )
+        ))
     )
     .bind(&body.username)
     .fetch_optional(db)
@@ -225,7 +226,8 @@ async fn login(
         None => (false, None),
     };
 
-    if !auth::verify_password_timing_safe(&body.password, r_unwrapped.as_ref().map(|r| r.get::<String, _>(UserIden::PasswordHash.to_string()).as_str())) {
+    let stored_password_hash = r_unwrapped.as_ref().map(|r| r.get::<String, _>(UserIden::PasswordHash.as_str()));
+    if !auth::verify_password_timing_safe(&body.password, stored_password_hash.as_deref()) {
         return Err(ApiError::Unauthorized("Invalid credentials"));
     }
 
@@ -237,22 +239,22 @@ async fn login(
         return Err(ApiError::Internal("User vanished"));
     };
 
-    if r.get::<bool, _>(UserIden::IsBanned.to_string()) {
+    if r.get::<bool, _>(UserIden::IsBanned.as_str()) {
         return Err(ApiError::Forbidden("User banned"));
     }
 
-    let user_id: i64 = r.get(UserIden::Id.to_string());
-    let username: String = r.get(UserIden::Username.to_string());
-    let token_version: i64 = r.get(UserIden::TokenVersion.to_string());
+    let user_id: i64 = r.get(UserIden::Id.as_str());
+    let username: String = r.get(UserIden::Username.as_str());
+    let token_version: i64 = r.get(UserIden::TokenVersion.as_str());
 
-    if r.get::<bool, _>(UserIden::Is2faEnabled.to_string()) {
+    if r.get::<bool, _>(UserIden::Is2faEnabled.as_str()) {
         let code = auth::generate_2fa_code_6();
         let code_hash = auth::sha256_hex(&code);
         let sent_at = auth::now_iso();
         let expires_at = (auth::now_unix() + 300).to_string();
 
         sqlx::query(
-            &format!(
+            sqlx::AssertSqlSafe(format!(
                 "UPDATE {}
                  SET {} = $1, {} = $2, {} = $3, {} = 0, {} = NULL
                  WHERE {} = $4",
@@ -263,7 +265,7 @@ async fn login(
                 UserIden::TwoFactorCodeAttempts.to_string(),
                 UserIden::TwoFactorLockedUntil.to_string(),
                 UserIden::Id.to_string()
-            )
+            ))
         )
         .bind(code_hash)
         .bind(sent_at)
@@ -274,7 +276,7 @@ async fn login(
         .map_err(|_| ApiError::Internal("Database error"))?;
 
         let _ = sqlx::query(
-            &format!(
+            sqlx::AssertSqlSafe(format!(
                 "INSERT INTO {} ({}, {}, {}, {}, {})
                  VALUES ($1, $2, $3, $4, $5)",
                 AuditLogIden::Table.to_string(),
@@ -283,7 +285,7 @@ async fn login(
                 AuditLogIden::Status.to_string(),
                 AuditLogIden::IpAddress.to_string(),
                 AuditLogIden::CreatedAt.to_string()
-            )
+            ))
         )
         .bind(user_id)
         .bind("2fa_code_request")
@@ -322,7 +324,7 @@ async fn login(
 
     let token_hash = auth::sha256_hex(&token);
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "INSERT INTO {} ({}, {}, {}, {}, {}, {}, {})
              VALUES ($1, $2, $3, $4, $5, $6, NULL)
              ON CONFLICT ({}) DO NOTHING",
@@ -335,7 +337,7 @@ async fn login(
             UserSessionIden::LastSeenAt.to_string(),
             UserSessionIden::RevokedAt.to_string(),
             UserSessionIden::TokenHash.to_string()
-        )
+        ))
     )
     .bind(user_id)
     .bind(&token_hash)
@@ -351,7 +353,7 @@ async fn login(
     let expires_at = refresh_claims.exp.to_string();
 
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "INSERT INTO {} ({}, {}, {}, {}, {}, {}, {}, {})
              VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)",
             RefreshSessionIden::Table.to_string(),
@@ -363,7 +365,7 @@ async fn login(
             RefreshSessionIden::LastUsedAt.to_string(),
             RefreshSessionIden::ExpiresAt.to_string(),
             RefreshSessionIden::RevokedAt.to_string()
-        )
+        ))
     )
     .bind(user_id)
     .bind(&refresh_hash)
@@ -394,7 +396,7 @@ async fn verify_2fa(
     let db = &st.db;
 
     let r = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "SELECT {}, {}, {}, {}, {}, {}, {}
              FROM {}
              WHERE {} = $1
@@ -408,7 +410,7 @@ async fn verify_2fa(
             UserIden::TwoFactorLockedUntil.to_string(),
             UserIden::Table.to_string(),
             UserIden::Id.to_string()
-        )
+        ))
     )
     .bind(body.user_id)
     .fetch_optional(db)
@@ -416,13 +418,13 @@ async fn verify_2fa(
     .map_err(|_| ApiError::Internal("Database error"))?
     .ok_or(ApiError::NotFound("User not found"))?;
 
-    let user_id: i64 = r.get(UserIden::Id.to_string());
-    let username: String = r.get(UserIden::Username.to_string());
-    let token_version: i64 = r.get(UserIden::TokenVersion.to_string());
-    let stored_hash: Option<String> = r.get(UserIden::TwoFactorSecretCodeHash.to_string());
-    let expires_at_str: Option<String> = r.get(UserIden::TwoFactorCodeExpiresAt.to_string());
-    let attempts: i64 = r.get(UserIden::TwoFactorCodeAttempts.to_string());
-    let locked_until_str: Option<String> = r.get(UserIden::TwoFactorLockedUntil.to_string());
+    let user_id: i64 = r.get(UserIden::Id.as_str());
+    let username: String = r.get(UserIden::Username.as_str());
+    let token_version: i64 = r.get(UserIden::TokenVersion.as_str());
+    let stored_hash: Option<String> = r.get(UserIden::TwoFactorSecretCodeHash.as_str());
+    let expires_at_str: Option<String> = r.get(UserIden::TwoFactorCodeExpiresAt.as_str());
+    let attempts: i64 = r.get(UserIden::TwoFactorCodeAttempts.as_str());
+    let locked_until_str: Option<String> = r.get(UserIden::TwoFactorLockedUntil.as_str());
 
     let stored_hash = stored_hash.ok_or(ApiError::NotFound("2FA not active"))?;
 
@@ -430,7 +432,7 @@ async fn verify_2fa(
         if let Ok(locked_ts) = locked_until.parse::<i64>() {
             if auth::now_unix() < locked_ts {
                 let _ = sqlx::query(
-                    &format!(
+                    sqlx::AssertSqlSafe(format!(
                         "INSERT INTO {} ({}, {}, {}, {}, {})
                          VALUES ($1, $2, $3, $4, $5)",
                         AuditLogIden::Table.to_string(),
@@ -439,7 +441,7 @@ async fn verify_2fa(
                         AuditLogIden::Status.to_string(),
                         AuditLogIden::Details.to_string(),
                         AuditLogIden::CreatedAt.to_string()
-                    )
+                    ))
                 )
                 .bind(user_id)
                 .bind("2fa_verify")
@@ -457,7 +459,7 @@ async fn verify_2fa(
         if let Ok(exp_ts) = exp_at.parse::<i64>() {
             if auth::now_unix() > exp_ts {
                 let _ = sqlx::query(
-                    &format!(
+                    sqlx::AssertSqlSafe(format!(
                         "INSERT INTO {} ({}, {}, {}, {}, {})
                          VALUES ($1, $2, $3, $4, $5)",
                         AuditLogIden::Table.to_string(),
@@ -466,7 +468,7 @@ async fn verify_2fa(
                         AuditLogIden::Status.to_string(),
                         AuditLogIden::Details.to_string(),
                         AuditLogIden::CreatedAt.to_string()
-                    )
+                    ))
                 )
                 .bind(user_id)
                 .bind("2fa_verify")
@@ -488,7 +490,7 @@ async fn verify_2fa(
         if new_attempts >= 3 {
             let locked_until = auth::now_unix() + 900;
             sqlx::query(
-                &format!(
+                sqlx::AssertSqlSafe(format!(
                     "UPDATE {}
                      SET {} = 3, {} = $1, {} = NULL, {} = NULL
                      WHERE {} = $2",
@@ -497,7 +499,7 @@ async fn verify_2fa(
                     UserIden::TwoFactorLockedUntil.to_string(),
                     UserIden::TwoFactorSecretCodeHash.to_string(),
                     UserIden::TwoFactorCodeSentAt.to_string(),
-                    UserIden::Id.to_string()
+                    UserIden::Id.to_string())
                 )
             )
             .bind(locked_until.to_string())
@@ -507,7 +509,7 @@ async fn verify_2fa(
             .ok();
 
             let _ = sqlx::query(
-                &format!(
+                sqlx::AssertSqlSafe(format!(
                     "INSERT INTO {} ({}, {}, {}, {}, {})
                      VALUES ($1, $2, $3, $4, $5)",
                     AuditLogIden::Table.to_string(),
@@ -515,7 +517,7 @@ async fn verify_2fa(
                     AuditLogIden::Action.to_string(),
                     AuditLogIden::Status.to_string(),
                     AuditLogIden::Details.to_string(),
-                    AuditLogIden::CreatedAt.to_string()
+                    AuditLogIden::CreatedAt.to_string())
                 )
             )
             .bind(user_id)
@@ -529,13 +531,13 @@ async fn verify_2fa(
             return Err(ApiError::Forbidden("Too many failed attempts. Account locked for 15 minutes"));
         } else {
             sqlx::query(
-                &format!(
+                sqlx::AssertSqlSafe(format!(
                     "UPDATE {}
                      SET {} = $1
                      WHERE {} = $2",
                     UserIden::Table.to_string(),
                     UserIden::TwoFactorCodeAttempts.to_string(),
-                    UserIden::Id.to_string()
+                    UserIden::Id.to_string())
                 )
             )
             .bind(new_attempts)
@@ -545,7 +547,7 @@ async fn verify_2fa(
             .ok();
 
             let _ = sqlx::query(
-                &format!(
+                sqlx::AssertSqlSafe(format!(
                     "INSERT INTO {} ({}, {}, {}, {}, {})
                      VALUES ($1, $2, $3, $4, $5)",
                     AuditLogIden::Table.to_string(),
@@ -553,7 +555,7 @@ async fn verify_2fa(
                     AuditLogIden::Action.to_string(),
                     AuditLogIden::Status.to_string(),
                     AuditLogIden::Details.to_string(),
-                    AuditLogIden::CreatedAt.to_string()
+                    AuditLogIden::CreatedAt.to_string())
                 )
             )
             .bind(user_id)
@@ -568,7 +570,7 @@ async fn verify_2fa(
     }
 
     sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "UPDATE {}
              SET {} = NULL, {} = NULL, {} = NULL, {} = 0
              WHERE {} = $1",
@@ -578,7 +580,7 @@ async fn verify_2fa(
             UserIden::TwoFactorCodeExpiresAt.to_string(),
             UserIden::TwoFactorCodeAttempts.to_string(),
             UserIden::Id.to_string()
-        )
+        ))
     )
     .bind(user_id)
     .execute(db)
@@ -598,7 +600,7 @@ async fn verify_2fa(
     let expires_at = refresh_claims.exp.to_string();
 
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "INSERT INTO {} ({}, {}, {}, {}, {}, {}, {}, {})
              VALUES ($1, $2, NULL, NULL, $3, $4, $5, NULL)",
             RefreshSessionIden::Table.to_string(),
@@ -610,7 +612,7 @@ async fn verify_2fa(
             RefreshSessionIden::LastUsedAt.to_string(),
             RefreshSessionIden::ExpiresAt.to_string(),
             RefreshSessionIden::RevokedAt.to_string()
-        )
+        ))
     )
     .bind(user_id)
     .bind(&refresh_hash)
@@ -621,7 +623,7 @@ async fn verify_2fa(
     .await;
 
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "INSERT INTO {} ({}, {}, {}, {})
              VALUES ($1, $2, $3, $4)",
             AuditLogIden::Table.to_string(),
@@ -629,7 +631,7 @@ async fn verify_2fa(
             AuditLogIden::Action.to_string(),
             AuditLogIden::Status.to_string(),
             AuditLogIden::CreatedAt.to_string()
-        )
+        ))
     )
     .bind(user_id)
     .bind("2fa_verify_success")
@@ -676,7 +678,7 @@ async fn refresh(
         .map_err(|_| ApiError::Unauthorized("Invalid token"))?;
 
     let user_row = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "SELECT {}, {}, {}
              FROM {}
              WHERE {} = $1
@@ -686,7 +688,7 @@ async fn refresh(
             UserIden::IsBanned.to_string(),
             UserIden::Table.to_string(),
             UserIden::Username.to_string()
-        )
+        ))
     )
     .bind(&claims.sub)
     .fetch_optional(&st.db)
@@ -694,12 +696,12 @@ async fn refresh(
     .map_err(|_| ApiError::Internal("Database error"))?
     .ok_or(ApiError::Unauthorized("Invalid token"))?;
 
-    if user_row.get::<bool, _>(UserIden::IsBanned.to_string()) {
+    if user_row.get::<bool, _>(UserIden::IsBanned.as_str()) {
         return Err(ApiError::Forbidden("User banned"));
     }
 
-    let user_id: i64 = user_row.get(UserIden::Id.to_string());
-    let tv: i64 = user_row.get(UserIden::TokenVersion.to_string());
+    let user_id: i64 = user_row.get(UserIden::Id.as_str());
+    let tv: i64 = user_row.get(UserIden::TokenVersion.as_str());
     if tv != claims.token_version {
         return Err(ApiError::Unauthorized("Token revoked"));
     }
@@ -710,7 +712,7 @@ async fn refresh(
     let token_hash = auth::sha256_hex(token);
 
     let sess = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "SELECT {}, {}, {}
              FROM {}
              WHERE {} = $1 AND {} = $2
@@ -721,7 +723,7 @@ async fn refresh(
             RefreshSessionIden::Table.to_string(),
             RefreshSessionIden::RefreshTokenHash.to_string(),
             RefreshSessionIden::UserId.to_string()
-        )
+        ))
     )
     .bind(&token_hash)
     .bind(user_id)
@@ -730,23 +732,23 @@ async fn refresh(
     .map_err(|_| ApiError::Internal("Database error"))?
     .ok_or(ApiError::Unauthorized("Invalid token"))?;
 
-    let revoked_at: Option<String> = sess.get(RefreshSessionIden::RevokedAt.to_string());
+    let revoked_at: Option<String> = sess.get(RefreshSessionIden::RevokedAt.as_str());
     if revoked_at.is_some() {
         return Err(ApiError::Unauthorized("Invalid token"));
     }
 
-    let expires_at: String = sess.get(RefreshSessionIden::ExpiresAt.to_string());
+    let expires_at: String = sess.get(RefreshSessionIden::ExpiresAt.as_str());
     let exp = expires_at.parse::<i64>().unwrap_or(0);
     if exp <= now_u {
         let _ = sqlx::query(
-            &format!(
+            sqlx::AssertSqlSafe(format!(
                 "UPDATE {}
                  SET {} = $1
                  WHERE {} = $2",
                 RefreshSessionIden::Table.to_string(),
                 RefreshSessionIden::RevokedAt.to_string(),
                 RefreshSessionIden::RefreshTokenHash.to_string()
-            )
+            ))
         )
         .bind(&now)
         .bind(&token_hash)
@@ -756,7 +758,7 @@ async fn refresh(
     }
 
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "UPDATE {}
              SET {} = $1, {} = $2
              WHERE {} = $3",
@@ -764,7 +766,7 @@ async fn refresh(
             RefreshSessionIden::RevokedAt.to_string(),
             RefreshSessionIden::LastUsedAt.to_string(),
             RefreshSessionIden::RefreshTokenHash.to_string()
-        )
+        ))
     )
     .bind(&now)
     .bind(&now)
@@ -792,7 +794,7 @@ async fn refresh(
     let expires_at_new = refresh_claims.exp.to_string();
 
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "INSERT INTO {} ({}, {}, {}, {}, {}, {}, {}, {})
              VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)",
             RefreshSessionIden::Table.to_string(),
@@ -804,7 +806,7 @@ async fn refresh(
             RefreshSessionIden::LastUsedAt.to_string(),
             RefreshSessionIden::ExpiresAt.to_string(),
             RefreshSessionIden::RevokedAt.to_string()
-        )
+        ))
     )
     .bind(user_id)
     .bind(&refresh_hash)
@@ -817,7 +819,7 @@ async fn refresh(
     .await;
 
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "INSERT INTO {} ({}, {}, {}, {}, {}, {}, {})
              VALUES ($1, $2, $3, $4, $5, $6, NULL)
              ON CONFLICT ({}) DO NOTHING",
@@ -830,7 +832,7 @@ async fn refresh(
             UserSessionIden::LastSeenAt.to_string(),
             UserSessionIden::RevokedAt.to_string(),
             UserSessionIden::TokenHash.to_string()
-        )
+        ))
     )
     .bind(user_id)
     .bind(&access_hash)
@@ -859,7 +861,7 @@ async fn logout(
     let now = auth::now_iso();
 
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "UPDATE {}
              SET {} = $1
              WHERE {} = $2 AND {} = $3 AND {} IS NULL",
@@ -868,7 +870,7 @@ async fn logout(
             UserSessionIden::UserId.to_string(),
             UserSessionIden::TokenHash.to_string(),
             UserSessionIden::RevokedAt.to_string()
-        )
+        ))
     )
     .bind(&now)
     .bind(user.id)
@@ -882,7 +884,7 @@ async fn logout(
         if !refresh_token.is_empty() {
             let refresh_hash = auth::sha256_hex(refresh_token);
             let _ = sqlx::query(
-                &format!(
+                sqlx::AssertSqlSafe(format!(
                     "UPDATE {}
                      SET {} = $1
                      WHERE {} = $2 AND {} = $3 AND {} IS NULL",
@@ -890,7 +892,7 @@ async fn logout(
                     RefreshSessionIden::RevokedAt.to_string(),
                     RefreshSessionIden::UserId.to_string(),
                     RefreshSessionIden::RefreshTokenHash.to_string(),
-                    RefreshSessionIden::RevokedAt.to_string()
+                    RefreshSessionIden::RevokedAt.to_string())
                 )
             )
             .bind(&now)
@@ -912,7 +914,7 @@ async fn logout_all(
     user: AuthUser,
 ) -> Result<Response, ApiError> {
     let res = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "UPDATE {}
              SET {} = {} + 1
              WHERE {} = $1",
@@ -920,7 +922,7 @@ async fn logout_all(
             UserIden::TokenVersion.to_string(),
             UserIden::TokenVersion.to_string(),
             UserIden::Id.to_string()
-        )
+        ))
     )
     .bind(user.id)
     .execute(&st.db)
@@ -929,7 +931,7 @@ async fn logout_all(
 
     let now = auth::now_iso();
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "UPDATE {}
              SET {} = $1
              WHERE {} = $2 AND {} IS NULL",
@@ -937,7 +939,7 @@ async fn logout_all(
             RefreshSessionIden::RevokedAt.to_string(),
             RefreshSessionIden::UserId.to_string(),
             RefreshSessionIden::RevokedAt.to_string()
-        )
+        ))
     )
     .bind(&now)
     .bind(user.id)
@@ -949,7 +951,7 @@ async fn logout_all(
     }
 
     let _ = sqlx::query(
-        &format!(
+        sqlx::AssertSqlSafe(format!(
             "UPDATE {}
              SET {} = false, {} = $1
              WHERE {} = $2",
@@ -957,7 +959,7 @@ async fn logout_all(
             UserPresenceIden::IsOnline.to_string(),
             UserPresenceIden::UpdatedAt.to_string(),
             UserPresenceIden::UserId.to_string()
-        )
+        ))
     )
     .bind(&now)
     .bind(user.id)

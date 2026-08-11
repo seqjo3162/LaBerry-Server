@@ -22,7 +22,7 @@ use axum::{
 
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, PgPool};
 use dashmap::DashMap;
 use chrono;
 use tracing;
@@ -64,7 +64,7 @@ pub struct AdminSession {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: SqlitePool,
+    pub db: PgPool,
     pub hub: Arc<Hub>,
     pub connected_ws: Arc<AtomicUsize>,
     pub friends: Arc<DashMap<UserId, HashSet<UserId>>>,
@@ -91,20 +91,20 @@ pub async fn run_server(
         Err(err) => tracing::error!("[SERVER] CWD error: {}", err),
     }
     
-    if secret.as_bytes().len() < 32 {
+    if secret.len() < 32 {
         anyhow::bail!("SECRET_KEY must be at least 32 bytes");
     }
 
-    let db_url = format!("sqlite:{}?mode=rwc", db_path);
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| db_path.to_string());
     tracing::info!("[SERVER] Connecting DB: {}", db_url);
     std::env::set_var("DATABASE_URL", &db_url);
     std::env::set_var("SECRET_KEY", secret);
 
     tracing::info!("[DB] Connecting...");
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
-    
-    let db = SqlitePoolOptions::new()
+
+    let db = PgPoolOptions::new()
         .max_connections(32)
         .min_connections(8)
         .acquire_timeout(Duration::from_secs(5))
@@ -183,7 +183,7 @@ pub async fn run_server(
                             Err(e) => tracing::error!("[ERROR] Failed to cleanup rate limit logs: {}", e),
                         }
                         let now = chrono::Utc::now().to_rfc3339();
-                        match sqlx::query(r#"DELETE FROM csrf_tokens WHERE expires_at < ?"#)
+                        match sqlx::query(r#"DELETE FROM csrf_tokens WHERE expires_at < $1"#)
                             .bind(&now)
                             .execute(&cleanup_db)
                             .await {
@@ -504,9 +504,9 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn test_state() -> AppState {
-        let db = sqlx::sqlite::SqlitePoolOptions::new()
+        let db = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
-            .connect_lazy("sqlite::memory:")
+            .connect_lazy("postgres://localhost/nonexistent_pool_for_tests")
             .expect("test db");
         let hub = Hub::new();
         let geo_guard = GeoGuardState::from_custom_file("assets/custom_blocked_cidr")
@@ -735,7 +735,7 @@ async fn ws_main(
             r#"
             SELECT id, token_version, is_banned
             FROM users
-            WHERE username = ?
+            WHERE username = $1
             LIMIT 1
             "#,
         )
@@ -751,8 +751,8 @@ async fn ws_main(
             return;
         };
 
-        let is_banned: i64 = row.get("is_banned");
-        if is_banned != 0 {
+        let is_banned: bool = row.get("is_banned");
+        if is_banned {
             let _ = socket.send(Message::Text(json!({"type":"error","code":"banned"}).to_string().into())).await;
             let _ = socket.send(Message::Close(None)).await;
             let after = connected.fetch_sub(1, Ordering::Relaxed) - 1;

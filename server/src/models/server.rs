@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sea_query::Iden;
 
 #[derive(Iden)]
-#[sea_query(rename = "servers")]
+#[iden(rename = "servers")]
 pub enum ServerIden {
     Table,
     Id,
@@ -24,7 +24,7 @@ pub struct Server {
 }
 
 #[derive(Iden)]
-#[sea_query(rename = "server_members")]
+#[iden(rename = "server_members")]
 pub enum ServerMemberIden {
     Table,
     ServerId,
@@ -40,7 +40,7 @@ pub struct ServerMember {
 }
 
 #[derive(Iden)]
-#[sea_query(rename = "server_join_requests")]
+#[iden(rename = "server_join_requests")]
 pub enum ServerJoinRequestIden {
     Table,
     Id,

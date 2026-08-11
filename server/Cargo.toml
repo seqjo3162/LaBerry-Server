@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "Messenger"
+name = "laberry_server"
 # crate-type = ["rlib"]
 
 [features]
@@ -40,9 +40,8 @@ hmac = { version = "0.12", features = ["std"] }
 jsonwebtoken = "10.4.0"
 rand = "0.10.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "json"] }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "macros", "time"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "macros", "time", "chrono"] }
 sea-query = { version = "0.32", features = ["backend-postgres"] }
-sea-query-binder = { version = "0.7", features = ["sqlx-postgres"] }
 thiserror = "2.0"
 sha2 = "0.11.0"
 sha1 = "0.10.6"

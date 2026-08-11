@@ -73,7 +73,7 @@ mod b64 {
     }
 
     pub fn encode(input: &[u8]) -> String {
-        let mut out = String::with_capacity(((input.len() + 2) / 3) * 4);
+        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
         let mut bits: u32 = 0;
         let mut depth: u32 = 0;
 
@@ -243,7 +243,7 @@ impl E2eeMessage {
         let nonce = chacha20poly1305::Nonce::from_slice(&iv_bytes);
 
         let pt = cipher
-            .decrypt(&nonce, ct_bytes.as_ref())
+            .decrypt(nonce, ct_bytes.as_ref())
             .map_err(|e| format!("ChaCha20 decrypt: {}", e))?;
 
         String::from_utf8(pt).map_err(|e| format!("UTF-8: {}", e))

@@ -70,20 +70,20 @@ async fn get_2fa_status(
     let db = &st.db;
 
     let r = sqlx::query(
-        r#"SELECT is_2fa_enabled FROM users WHERE id = ?"#,
+        r#"SELECT is_2fa_enabled FROM users WHERE id = $1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
     .await;
 
     let is_enabled = match r {
-        Ok(Some(row)) => row.get::<i64, _>("is_2fa_enabled") != 0,
+        Ok(Some(row)) => row.get::<bool, _>("is_2fa_enabled"),
         _ => false,
     };
 
     // Count remaining backup codes
     let backup_count = sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(*) FROM two_factor_backup_codes WHERE user_id = ? AND is_used = 0"#,
+        r#"SELECT COUNT(*) FROM two_factor_backup_codes WHERE user_id = $1 AND is_used = FALSE"#,
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -110,7 +110,7 @@ async fn setup_2fa(
     let db = &st.db;
 
     let r = sqlx::query(
-        r#"SELECT is_2fa_enabled FROM users WHERE id = ?"#,
+        r#"SELECT is_2fa_enabled FROM users WHERE id = $1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
@@ -126,7 +126,7 @@ async fn setup_2fa(
             let _ = sqlx::query(
                 r#"
                 INSERT INTO two_factor_backup_codes(user_id, code_hash, created_at)
-                VALUES(?, ?, ?)
+                VALUES($1, $2, $3)
                 "#,
             )
             .bind(me.id)
@@ -138,7 +138,7 @@ async fn setup_2fa(
 
         // Enable 2FA on user account
         let _ = sqlx::query(
-            r#"UPDATE users SET is_2fa_enabled = 1 WHERE id = ?"#,
+            r#"UPDATE users SET is_2fa_enabled = TRUE WHERE id = $1"#,
         )
         .bind(me.id)
         .execute(db)
@@ -168,7 +168,7 @@ async fn disable_2fa(
     let db = &st.db;
 
     let result = sqlx::query(
-        r#"UPDATE users SET is_2fa_enabled = 0 WHERE id = ?"#,
+        r#"UPDATE users SET is_2fa_enabled = FALSE WHERE id = $1"#,
     )
     .bind(me.id)
     .execute(db)
@@ -176,7 +176,7 @@ async fn disable_2fa(
 
     // Also clear all backup codes
     let _ = sqlx::query(
-        r#"DELETE FROM two_factor_backup_codes WHERE user_id = ?"#,
+        r#"DELETE FROM two_factor_backup_codes WHERE user_id = $1"#,
     )
     .bind(me.id)
     .execute(db)
@@ -199,15 +199,15 @@ async fn generate_backup_codes(
     let db = &st.db;
 
     // Check if 2FA is enabled
-    let r = sqlx::query_scalar::<_, i64>(
-        r#"SELECT is_2fa_enabled FROM users WHERE id = ?"#,
+    let r = sqlx::query_scalar::<_, bool>(
+        r#"SELECT is_2fa_enabled FROM users WHERE id = $1"#,
     )
     .bind(me.id)
     .fetch_optional(db)
     .await;
 
     if let Ok(Some(enabled)) = r {
-        if enabled == 0 {
+        if !enabled {
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "2FA not enabled"}))).into_response();
         }
     } else {
@@ -216,7 +216,7 @@ async fn generate_backup_codes(
 
     // Clear old backup codes
     let _ = sqlx::query(
-        r#"DELETE FROM two_factor_backup_codes WHERE user_id = ?"#,
+        r#"DELETE FROM two_factor_backup_codes WHERE user_id = $1"#,
     )
     .bind(me.id)
     .execute(db)
@@ -231,7 +231,7 @@ async fn generate_backup_codes(
         let _ = sqlx::query(
             r#"
             INSERT INTO two_factor_backup_codes(user_id, code_hash, created_at)
-            VALUES(?, ?, ?)
+            VALUES($1, $2, $3)
             "#,
         )
         .bind(me.id)
@@ -263,9 +263,9 @@ async fn list_backup_codes(
 
     let rows = sqlx::query(
         r#"
-        SELECT created_at, is_used 
-        FROM two_factor_backup_codes 
-        WHERE user_id = ?
+        SELECT created_at, is_used
+        FROM two_factor_backup_codes
+        WHERE user_id = $1
         ORDER BY created_at DESC
         "#,
     )
@@ -274,7 +274,7 @@ async fn list_backup_codes(
     .await
     .unwrap_or_default();
 
-    let unused = rows.iter().filter(|r| r.get::<i64, _>("is_used") == 0).count();
+    let unused = rows.iter().filter(|r| !r.get::<bool, _>("is_used")).count();
     let total = rows.len();
 
     (StatusCode::OK, Json(serde_json::json!({
@@ -300,8 +300,8 @@ async fn verify_backup_code(
     // Find and verify code
     let r = sqlx::query(
         r#"
-        SELECT id, is_used FROM two_factor_backup_codes 
-        WHERE user_id = ? AND code_hash = ?
+        SELECT id, is_used FROM two_factor_backup_codes
+        WHERE user_id = $1 AND code_hash = $2
         "#,
     )
     .bind(me.id)
@@ -311,14 +311,14 @@ async fn verify_backup_code(
     .map_err(|_| ApiError::Internal("Database error"))?
     .ok_or(ApiError::Unauthorized("Invalid backup code"))?;
 
-    if r.get::<i64, _>("is_used") != 0 {
+    if r.get::<bool, _>("is_used") {
         return Err(ApiError::Unauthorized("Backup code already used"));
     }
 
     // Mark as used
     let now = auth::now_iso();
     sqlx::query(
-        r#"UPDATE two_factor_backup_codes SET is_used = 1, used_at = ? WHERE id = ?"#,
+        r#"UPDATE two_factor_backup_codes SET is_used = TRUE, used_at = $1 WHERE id = $2"#,
     )
     .bind(&now)
     .bind(r.get::<i64, _>("id"))

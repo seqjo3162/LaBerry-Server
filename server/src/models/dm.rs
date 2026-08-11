@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sea_query::Iden;
 
 #[derive(Iden)]
-#[sea_query(rename = "dm_chats")]
+#[iden(rename = "dm_chats")]
 pub enum DmChatIden {
     Table,
     ChatId,

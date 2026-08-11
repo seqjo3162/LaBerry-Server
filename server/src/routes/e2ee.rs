@@ -41,7 +41,7 @@ pub async fn save_room_key(
     Json(body): Json<SaveRoomKeyBody>,
 ) -> impl IntoResponse {
     let is_participant = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1"
+        "SELECT 1 FROM chat_participants WHERE chat_id = $1 AND user_id = $2 LIMIT 1"
     )
     .bind(chat_id)
     .bind(me.id)
@@ -58,7 +58,7 @@ pub async fn save_room_key(
     let now = chrono::Utc::now().to_rfc3339();
     let result = sqlx::query(
         "INSERT INTO e2ee_room_keys (user_id, chat_id, encrypted_key, nonce, created_at)
-         VALUES (?, ?, ?, ?, ?)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT(user_id, chat_id) DO UPDATE SET
              encrypted_key = excluded.encrypted_key,
              nonce = excluded.nonce,
@@ -87,7 +87,7 @@ pub async fn get_room_key(
     Path(chat_id): Path<i64>,
 ) -> impl IntoResponse {
     let row = sqlx::query(
-        "SELECT encrypted_key, nonce FROM e2ee_room_keys WHERE user_id = ? AND chat_id = ? LIMIT 1"
+        "SELECT encrypted_key, nonce FROM e2ee_room_keys WHERE user_id = $1 AND chat_id = $2 LIMIT 1"
     )
     .bind(me.id)
     .bind(chat_id)
@@ -115,7 +115,7 @@ pub async fn get_room_keys(
 ) -> impl IntoResponse {
     let rows = if let Some(chat_id) = q.chat_id {
         sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT chat_id, encrypted_key, nonce FROM e2ee_room_keys WHERE user_id = ? AND chat_id = ?"
+            "SELECT chat_id, encrypted_key, nonce FROM e2ee_room_keys WHERE user_id = $1 AND chat_id = $2"
         )
         .bind(me.id)
         .bind(chat_id)
@@ -123,7 +123,7 @@ pub async fn get_room_keys(
         .await
     } else {
         sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT chat_id, encrypted_key, nonce FROM e2ee_room_keys WHERE user_id = ?"
+            "SELECT chat_id, encrypted_key, nonce FROM e2ee_room_keys WHERE user_id = $1"
         )
         .bind(me.id)
         .fetch_all(&st.db)

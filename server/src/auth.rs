@@ -105,7 +105,7 @@ fn file_dl_ttl_secs() -> i64 {
 fn secret_key_bytes() -> anyhow::Result<Vec<u8>> {
     let key = std::env::var("SECRET_KEY").context("SECRET_KEY env var is required")?;
     // Минимально разумная длина для HMAC ключа
-    if key.as_bytes().len() < 32 {
+    if key.len() < 32 {
         anyhow::bail!("SECRET_KEY must be at least 32 bytes long");
     }
     Ok(key.into_bytes())

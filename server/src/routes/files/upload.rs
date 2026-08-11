@@ -86,9 +86,9 @@ async fn active_ref_count_by_storage_path(st: &AppState, storage_path: &str) -> 
         r#"
         SELECT COUNT(1)
         FROM files
-        WHERE storage_path = ?
+        WHERE storage_path = $1
           AND deleted_at IS NULL
-          AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+          AND (expires_at IS NULL OR expires_at > NOW())
         "#,
     )
     .bind(storage_path)
@@ -97,7 +97,7 @@ async fn active_ref_count_by_storage_path(st: &AppState, storage_path: &str) -> 
     .unwrap_or(0);
 
     let gif_refs = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(1) FROM gif_assets WHERE storage_path = ?",
+        "SELECT COUNT(1) FROM gif_assets WHERE storage_path = $1",
     )
     .bind(storage_path)
     .fetch_one(&st.db)
@@ -112,9 +112,9 @@ async fn active_ref_count_by_filename(st: &AppState, filename: &str) -> i64 {
         r#"
         SELECT COUNT(1)
         FROM files
-        WHERE filename = ?
+        WHERE filename = $1
           AND deleted_at IS NULL
-          AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+          AND (expires_at IS NULL OR expires_at > NOW())
         "#,
     )
     .bind(filename)
@@ -123,7 +123,7 @@ async fn active_ref_count_by_filename(st: &AppState, filename: &str) -> i64 {
     .unwrap_or(0);
 
     let gif_refs = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(1) FROM gif_assets WHERE filename = ?",
+        "SELECT COUNT(1) FROM gif_assets WHERE filename = $1",
     )
     .bind(filename)
     .fetch_one(&st.db)
@@ -155,8 +155,8 @@ pub(crate) async fn mark_file_expired(st: &AppState, file_id: i64, storage_path:
     let _ = sqlx::query(
         r#"
         UPDATE files
-        SET deleted_at = COALESCE(deleted_at, ?)
-        WHERE id = ?
+        SET deleted_at = COALESCE(deleted_at, $1)
+        WHERE id = $2
         "#,
     )
     .bind(deleted_at)
@@ -199,7 +199,7 @@ pub(crate) async fn cleanup_orphan_storage_files(st: &AppState) {
             chat_id,
             CASE
                 WHEN deleted_at IS NULL
-                 AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                 AND (expires_at IS NULL OR expires_at > NOW())
                 THEN 1
                 ELSE 0
             END AS is_active
@@ -282,7 +282,7 @@ pub(crate) async fn cleanup_expired_files(st: &AppState) {
         WHERE storage_kind = 'temporary'
           AND deleted_at IS NULL
           AND expires_at IS NOT NULL
-          AND expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+          AND expires_at <= NOW()
         LIMIT 250
         "#,
     )
@@ -310,79 +310,69 @@ pub(crate) async fn cleanup_expired_files(st: &AppState) {
     cleanup_orphan_storage_files(st).await;
 }
 
-fn message_id_referencing_file<'a>(st: &'a AppState, file_id: i64, chat_id: i64) -> impl std::future::Future<Output = Option<i64>> + 'a {
-    async move {
-        let pat_pipe = format!("%[[file:{}|%", file_id);
-        let pat_eq = format!("%[[file={}|%", file_id);
-        let pat_broken = format!("%[[file:{}]]%", file_id);
+async fn message_id_referencing_file(st: &AppState, file_id: i64, chat_id: i64) -> Option<i64> {
+    let pat_pipe = format!("%[[file:{}|%", file_id);
+    let pat_eq = format!("%[[file={}|%", file_id);
+    let pat_broken = format!("%[[file:{}]]%", file_id);
 
-        sqlx::query_scalar(
-            r#"
-            SELECT id
-            FROM messages
-            WHERE chat_id = ?
-              AND (content LIKE ? OR content LIKE ? OR content LIKE ?)
-            ORDER BY id DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(chat_id)
-        .bind(&pat_pipe)
-        .bind(&pat_eq)
-        .bind(&pat_broken)
-        .fetch_optional(&st.db)
-        .await
-        .ok()
-        .flatten()
-    }
+    sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM messages
+        WHERE chat_id = $1
+          AND (content LIKE $2 OR content LIKE $3 OR content LIKE $4)
+        ORDER BY id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(chat_id)
+    .bind(&pat_pipe)
+    .bind(&pat_eq)
+    .bind(&pat_broken)
+    .fetch_optional(&st.db)
+    .await
+    .ok()
+    .flatten()
 }
 
-fn thumb_available_for<'a>(filename: &'a str, storage_path: Option<&'a str>) -> impl std::future::Future<Output = bool> + 'a {
-    async move {
-        existing_thumb_path_for(filename, storage_path).await.is_some()
-    }
+async fn thumb_available_for(filename: &str, storage_path: Option<&str>) -> bool {
+    existing_thumb_path_for(filename, storage_path).await.is_some()
 }
 
-fn original_available_for<'a>(storage_path: &'a str) -> impl std::future::Future<Output = bool> + 'a {
-    async move {
-        fs::metadata(storage_path).await.map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
-    }
+async fn original_available_for(storage_path: &str) -> bool {
+    fs::metadata(storage_path).await.map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
 }
 
-pub(crate) fn thumb_only_file_can_be_shown<'a>(st: &'a AppState, file_id: i64, chat_id: i64, filename: &'a str, storage_path: &'a str) -> impl std::future::Future<Output = bool> + 'a {
-    async move {
-        thumb_available_for(filename, Some(storage_path)).await && message_id_referencing_file(st, file_id, chat_id).await.is_some()
-    }
+pub(crate) async fn thumb_only_file_can_be_shown(st: &AppState, file_id: i64, chat_id: i64, filename: &str, storage_path: &str) -> bool {
+    thumb_available_for(filename, Some(storage_path)).await && message_id_referencing_file(st, file_id, chat_id).await.is_some()
 }
 
-pub(crate) fn heal_message_file_if_referenced<'a>(st: &'a AppState, file_id: i64, chat_id: i64, storage_path: &'a str) -> impl std::future::Future<Output = bool> + 'a {
-    async move {
-        if !original_available_for(storage_path).await {
-            return false;
-        }
-
-        let Some(message_id) = message_id_referencing_file(st, file_id, chat_id).await else {
-            return false;
-        };
-
-        sqlx::query(
-            r#"
-            UPDATE files
-            SET message_id = ?,
-                storage_kind = 'message',
-                expires_at = NULL,
-                deleted_at = NULL
-            WHERE id = ?
-              AND chat_id = ?
-            "#,
-        )
-        .bind(message_id)
-        .bind(file_id)
-        .bind(chat_id)
-        .execute(&st.db)
-        .await
-        .is_ok()
+pub(crate) async fn heal_message_file_if_referenced(st: &AppState, file_id: i64, chat_id: i64, storage_path: &str) -> bool {
+    if !original_available_for(storage_path).await {
+        return false;
     }
+
+    let Some(message_id) = message_id_referencing_file(st, file_id, chat_id).await else {
+        return false;
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE files
+        SET message_id = $1,
+            storage_kind = 'message',
+            expires_at = NULL,
+            deleted_at = NULL
+        WHERE id = $2
+          AND chat_id = $3
+        "#,
+    )
+    .bind(message_id)
+    .bind(file_id)
+    .bind(chat_id)
+    .execute(&st.db)
+    .await
+    .is_ok()
 }
 
 fn is_raster_image(mime: &str) -> bool {
@@ -397,83 +387,79 @@ fn is_normalizable_raster_image(mime: &str) -> bool {
     )
 }
 
-fn compute_normalized_image_hash<'a>(path: &'a std::path::Path, mime_type: &'a str) -> impl std::future::Future<Output = Option<String>> + 'a {
-    async move {
-        if !is_normalizable_raster_image(mime_type) {
+async fn compute_normalized_image_hash(path: &std::path::Path, mime_type: &str) -> Option<String> {
+    if !is_normalizable_raster_image(mime_type) {
+        return None;
+    }
+
+    let img_path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Option<String> {
+        let (w, h) = image::image_dimensions(&img_path).ok()?;
+        let pixels = (w as u64).saturating_mul(h as u64);
+        if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM || pixels > MAX_IMAGE_PIXELS {
             return None;
         }
 
-        let img_path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || -> Option<String> {
-            let (w, h) = image::image_dimensions(&img_path).ok()?;
-            let pixels = (w as u64).saturating_mul(h as u64);
-            if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM || pixels > MAX_IMAGE_PIXELS {
-                return None;
-            }
+        let img = image::open(&img_path).ok()?;
+        let rgba = img.to_rgba8();
 
-            let img = image::open(&img_path).ok()?;
-            let rgba = img.to_rgba8();
-
-            let mut hasher = Sha256::new();
-            hasher.update(b"laberry-normalized-image-v1\\0");
-            hasher.update(&rgba.width().to_be_bytes());
-            hasher.update(&rgba.height().to_be_bytes());
-            hasher.update(rgba.as_raw());
-            Some(hasher.finalize_hex())
-        })
-        .await
-        .ok()
-        .flatten()
-    }
+        let mut hasher = Sha256::new();
+        hasher.update(b"laberry-normalized-image-v1\\0");
+        hasher.update(&rgba.width().to_be_bytes());
+        hasher.update(&rgba.height().to_be_bytes());
+        hasher.update(rgba.as_raw());
+        Some(hasher.finalize_hex())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
-fn ensure_thumbnail<'a>(original_path: &'a std::path::Path, stored_filename: &'a str, mime_type: &'a str) -> impl std::future::Future<Output = Result<(), StatusCode>> + 'a {
-    async move {
-        if !is_raster_image(mime_type) {
-            return Ok(());
-        }
-
-        let thumb_path = thumb_path_for(stored_filename);
-        if fs::metadata(&thumb_path).await.is_ok() {
-            return Ok(());
-        }
-
-        let thumbs_dir = thumb_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("storage/files/thumbs"));
-        if fs::create_dir_all(&thumbs_dir).await.is_err() {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-
-        let orig = original_path.to_path_buf();
-        let out_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, StatusCode> {
-            let (w, h) = image::image_dimensions(&orig)
-                .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
-            let pixels = (w as u64).saturating_mul(h as u64);
-            if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM || pixels > MAX_IMAGE_PIXELS {
-                return Err(StatusCode::UNPROCESSABLE_ENTITY);
-            }
-
-            let img = image::open(&orig)
-                .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
-            let thumb = img.thumbnail(THUMB_MAX_W, THUMB_MAX_H);
-
-            let mut out = Vec::new();
-            thumb
-                .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Ok(out)
-        })
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
-
-        if fs::write(&thumb_path, out_bytes).await.is_err() {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-
-        Ok(())
+async fn ensure_thumbnail(original_path: &std::path::Path, stored_filename: &str, mime_type: &str) -> Result<(), StatusCode> {
+    if !is_raster_image(mime_type) {
+        return Ok(());
     }
+
+    let thumb_path = thumb_path_for(stored_filename);
+    if fs::metadata(&thumb_path).await.is_ok() {
+        return Ok(());
+    }
+
+    let thumbs_dir = thumb_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("storage/files/thumbs"));
+    if fs::create_dir_all(&thumbs_dir).await.is_err() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let orig = original_path.to_path_buf();
+    let out_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, StatusCode> {
+        let (w, h) = image::image_dimensions(&orig)
+            .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+        let pixels = (w as u64).saturating_mul(h as u64);
+        if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM || pixels > MAX_IMAGE_PIXELS {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        let img = image::open(&orig)
+            .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+        let thumb = img.thumbnail(THUMB_MAX_W, THUMB_MAX_H);
+
+        let mut out = Vec::new();
+        thumb
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(out)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    if fs::write(&thumb_path, out_bytes).await.is_err() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok(())
 }
 
 struct Sha256 {
@@ -539,8 +525,8 @@ impl Sha256 {
         self.update(&bit_len.to_be_bytes());
 
         let mut out = [0u8; 32];
-        for (i, word) in self.state.iter().enumerate() {
-            out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        for (chunk, word) in out.chunks_exact_mut(4).zip(self.state.iter()) {
+            chunk.copy_from_slice(&word.to_be_bytes());
         }
         out
     }
@@ -575,9 +561,8 @@ impl Sha256 {
         ];
 
         let mut w = [0u32; 64];
-        for i in 0..16 {
-            let j = i * 4;
-            w[i] = u32::from_be_bytes([block[j], block[j + 1], block[j + 2], block[j + 3]]);
+        for (i, chunk) in block.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -909,7 +894,7 @@ fn detect_upload_type(head: &[u8], original_name: &str, provided_mime: &str) -> 
 
 async fn temporary_file_expires_at(st: &AppState) -> Result<String, StatusCode> {
     sqlx::query_scalar::<_, String>(
-        "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
+        "SELECT to_char(now() + ($1::text)::interval, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
     )
     .bind(TEMP_FILE_EXPIRES_SQL_MODIFIER)
     .fetch_one(&st.db)
@@ -918,7 +903,7 @@ async fn temporary_file_expires_at(st: &AppState) -> Result<String, StatusCode> 
 }
 
 async fn sqlite_now_iso(st: &AppState) -> Result<String, StatusCode> {
-    sqlx::query_scalar::<_, String>("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')")
+    sqlx::query_scalar::<_, String>("SELECT to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
         .fetch_one(&st.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -1078,10 +1063,10 @@ pub(crate) async fn upload_file(
         r#"
         SELECT id, filename, storage_path
         FROM files
-        WHERE content_hash = ?
-          AND file_size = ?
+        WHERE content_hash = $1
+          AND file_size = $2
           AND deleted_at IS NULL
-          AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+          AND (expires_at IS NULL OR expires_at > NOW())
         ORDER BY id ASC
         LIMIT 1
         "#,
@@ -1109,10 +1094,10 @@ pub(crate) async fn upload_file(
                 r#"
                 SELECT id, filename, storage_path
                 FROM files
-                WHERE normalized_hash = ?
-                  AND mime_type = ?
+                WHERE normalized_hash = $1
+                  AND mime_type = $2
                   AND deleted_at IS NULL
-                  AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                  AND (expires_at IS NULL OR expires_at > NOW())
                 ORDER BY id ASC
                 LIMIT 1
                 "#,
@@ -1201,14 +1186,14 @@ pub(crate) async fn upload_file(
             return upload_json_error(code, "expires_at_failed");
         }
     };
-    let r = sqlx::query(
+    let file_id = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO files (
             filename, original_name, file_size, mime_type,
             storage_path, uploaded_by, chat_id, created_at,
             content_hash, normalized_hash, content_hash_algo, storage_kind, expires_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sha256', 'temporary', ?)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'sha256', 'temporary', $11) RETURNING id
         "#,
     )
     .bind(&stored_filename)
@@ -1222,10 +1207,10 @@ pub(crate) async fn upload_file(
     .bind(&content_hash)
     .bind(normalized_hash.as_deref())
     .bind(&expires_at)
-    .execute(&st.db)
+    .fetch_one(&st.db)
     .await;
 
-    let r = match r {
+    let file_id = match file_id {
         Ok(v) => v,
         Err(e) => {
             let err_text = e.to_string();
@@ -1235,8 +1220,6 @@ pub(crate) async fn upload_file(
             return upload_json_error_with_message(StatusCode::INTERNAL_SERVER_ERROR, "db_insert_failed", err_text);
         }
     };
-
-    let file_id = r.last_insert_rowid();
 
     (
         StatusCode::OK,

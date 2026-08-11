@@ -62,7 +62,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 is_banned,
                 'user' AS role
             FROM users
-            WHERE username = ?
+            WHERE username = $1
             LIMIT 1
             "#,
         )
@@ -72,7 +72,7 @@ impl FromRequestParts<AppState> for AuthUser {
         .map_err(|_| ApiError::Internal("Database error"))?
         .ok_or(ApiError::Unauthorized("User not found"))?;
 
-        if row.get::<i64, _>("is_banned") != 0 {
+        if row.get::<bool, _>("is_banned") {
             return Err(ApiError::Forbidden("User banned"));
         }
 
@@ -92,7 +92,7 @@ impl FromRequestParts<AppState> for AuthUser {
         let now = auth::now_iso();
 
         if let Ok(Some(revoked_at)) = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT revoked_at FROM user_sessions WHERE token_hash = ? LIMIT 1",
+            "SELECT revoked_at FROM user_sessions WHERE token_hash = $1 LIMIT 1",
         )
         .bind(&token_hash)
         .fetch_optional(&state.db)
@@ -103,7 +103,7 @@ impl FromRequestParts<AppState> for AuthUser {
             }
         }
 
-        let _ = sqlx::query("UPDATE user_sessions SET last_seen_at = ? WHERE token_hash = ?")
+        let _ = sqlx::query("UPDATE user_sessions SET last_seen_at = $1 WHERE token_hash = $2")
             .bind(&now)
             .bind(&token_hash)
             .execute(&state.db)

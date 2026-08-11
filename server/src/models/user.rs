@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use chrono::{DateTime, Utc};
-use sea_query::Iden;
+use sea_query::IdenStatic;
 
-#[derive(Iden)]
-#[sea_query(rename = "users")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "users")]
 pub enum UserIden {
     Table,
     Id,
@@ -28,8 +28,6 @@ pub enum UserIden {
     TrustReviewStatus,
     TrustReviewReason,
     TrustReviewAt,
-    IsAi,
-    AiLabel,
     TwoFactorCodeExpiresAt,
     TwoFactorCodeAttempts,
     TwoFactorLockedUntil,
@@ -58,15 +56,13 @@ pub struct User {
     pub trust_review_status: String,
     pub trust_review_reason: Option<String>,
     pub trust_review_at: Option<DateTime<Utc>>,
-    pub is_ai: bool,
-    pub ai_label: Option<String>,
     pub two_factor_code_expires_at: Option<DateTime<Utc>>,
     pub two_factor_code_attempts: i32,
     pub two_factor_locked_until: Option<DateTime<Utc>>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_presence")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_presence")]
 pub enum UserPresenceIden {
     Table,
     UserId,
@@ -83,8 +79,8 @@ pub struct UserPresence {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_settings")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_settings")]
 pub enum UserSettingsIden {
     Table,
     UserId,
@@ -99,8 +95,8 @@ pub struct UserSettings {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_blocks")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_blocks")]
 pub enum UserBlockIden {
     Table,
     BlockerId,
@@ -115,8 +111,8 @@ pub struct UserBlock {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_profile")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_profile")]
 pub enum UserProfileIden {
     Table,
     UserId,
@@ -141,8 +137,8 @@ pub struct UserProfile {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "pinned_messages")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "pinned_messages")]
 pub enum PinnedMessageIden {
     Table,
     ChatId,
@@ -159,8 +155,8 @@ pub struct PinnedMessage {
     pub pinned_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "profile_files")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "profile_files")]
 pub enum ProfileFileIden {
     Table,
     Id,
@@ -185,8 +181,8 @@ pub struct ProfileFile {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_sessions")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_sessions")]
 pub enum UserSessionIden {
     Table,
     Id,
@@ -211,8 +207,8 @@ pub struct UserSession {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "refresh_sessions")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "refresh_sessions")]
 pub enum RefreshSessionIden {
     Table,
     Id,
@@ -239,8 +235,8 @@ pub struct RefreshSession {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "email_codes")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "email_codes")]
 pub enum EmailCodeIden {
     Table,
     Id,
@@ -265,8 +261,8 @@ pub struct EmailCode {
     pub consumed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_device_keys")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_device_keys")]
 pub enum UserDeviceKeyIden {
     Table,
     DeviceId,
@@ -287,8 +283,8 @@ pub struct UserDeviceKey {
     pub last_seen: Option<DateTime<Utc>>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "e2ee_key_pins")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "e2ee_key_pins")]
 pub enum E2eeKeyPinIden {
     Table,
     Id,
@@ -309,8 +305,8 @@ pub struct E2eeKeyPin {
     pub last_verified_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "rate_limit_logs")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "rate_limit_logs")]
 pub enum RateLimitLogIden {
     Table,
     Id,
@@ -325,8 +321,8 @@ pub struct RateLimitLog {
     pub timestamp: i64, // Unix timestamp
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "csrf_tokens")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "csrf_tokens")]
 pub enum CsrfTokenIden {
     Table,
     TokenHash,
@@ -343,8 +339,8 @@ pub struct CsrfToken {
     pub expires_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_reports")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_reports")]
 pub enum UserReportIden {
     Table,
     Id,
@@ -373,8 +369,8 @@ pub struct UserReport {
     pub resolved_by: Option<i64>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_suggestions")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_suggestions")]
 pub enum UserSuggestionIden {
     Table,
     Id,
@@ -401,8 +397,8 @@ pub struct UserSuggestion {
     pub admin_note: String,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "moderation_events")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "moderation_events")]
 pub enum ModerationEventIden {
     Table,
     Id,
@@ -425,8 +421,8 @@ pub struct ModerationEvent {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "two_factor_backup_codes")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "two_factor_backup_codes")]
 pub enum TwoFactorBackupCodeIden {
     Table,
     Id,
@@ -447,8 +443,8 @@ pub struct TwoFactorBackupCode {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "audit_logs")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "audit_logs")]
 pub enum AuditLogIden {
     Table,
     Id,
@@ -477,8 +473,8 @@ pub struct AuditLog {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "gif_assets")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "gif_assets")]
 pub enum GifAssetIden {
     Table,
     Id,
@@ -509,8 +505,8 @@ pub struct GifAsset {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "app_downloads")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "app_downloads")]
 pub enum AppDownloadIden {
     Table,
     Id,
@@ -537,8 +533,8 @@ pub struct AppDownload {
     pub is_active: bool,
 }
 
-#[derive(Iden)]
-#[sea_query(rename = "user_key_backups")]
+#[derive(IdenStatic, Copy, Clone)]
+#[iden(rename = "user_key_backups")]
 pub enum UserKeyBackupIden {
     Table,
     UserId,

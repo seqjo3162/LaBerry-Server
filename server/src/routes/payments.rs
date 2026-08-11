@@ -46,13 +46,13 @@ pub struct CreatePaymentResponse {
 }
 
 // Активация подписки
-async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::SqlitePool) {
+async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::PgPool) {
     let duration_days = 30;
     let now = chrono::Utc::now();
     let expires_at_str = (now + chrono::Duration::days(duration_days)).to_rfc3339();
 
     let existing = sqlx::query(
-        "SELECT id FROM subscriptions WHERE user_id = ? AND expires_at > datetime('now')",
+        "SELECT id FROM subscriptions WHERE user_id = $1 AND expires_at > NOW()",
     )
     .bind(user_id)
     .fetch_optional(db)
@@ -62,7 +62,7 @@ async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::SqlitePoo
 
     if let Some(row) = existing {
         let sub_id: i64 = row.get(0);
-        sqlx::query("UPDATE subscriptions SET expires_at = ? WHERE id = ?")
+        sqlx::query("UPDATE subscriptions SET expires_at = $1 WHERE id = $2")
             .bind(&expires_at_str)
             .bind(sub_id)
             .execute(db)
@@ -70,7 +70,7 @@ async fn activate_subscription(user_id: i64, plan_id: &str, db: &sqlx::SqlitePoo
             .ok();
     } else {
         sqlx::query(
-            "INSERT INTO subscriptions (user_id, plan_id, expires_at) VALUES (?, ?, ?)",
+            "INSERT INTO subscriptions (user_id, plan_id, expires_at) VALUES ($1, $2, $3)",
         )
         .bind(user_id)
         .bind(plan_id)
@@ -96,7 +96,7 @@ async fn create_payment(
         crate::auth::decode_username(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     let user_row = sqlx::query(
-        "SELECT id, token_version, is_banned FROM users WHERE username = ? LIMIT 1"
+        "SELECT id, token_version, is_banned FROM users WHERE username = $1 LIMIT 1"
     )
     .bind(&username)
     .fetch_optional(&state.db)
@@ -106,9 +106,9 @@ async fn create_payment(
 
     let user_id: i64 = user_row.get(0);
     let db_token_version: i64 = user_row.get(1);
-    let is_banned: i64 = user_row.get(2);
+    let is_banned: bool = user_row.get(2);
 
-    if db_token_version != token_version || is_banned != 0 {
+    if db_token_version != token_version || is_banned {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -126,7 +126,7 @@ async fn create_payment(
     let order_id = uuid::Uuid::new_v4().to_string();
 
     sqlx::query(
-        "INSERT INTO payment_orders (id, user_id, plan_id, amount, status, created_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'))",
+        "INSERT INTO payment_orders (id, user_id, plan_id, amount, status, created_at) VALUES ($1, $2, $3, $4, 'pending', NOW())",
     )
     .bind(&order_id)
     .bind(user_id)
@@ -193,7 +193,7 @@ async fn payment_callback(
 
     let transaction_id = params.get("MNT_TRANSACTION_ID").cloned().unwrap_or_default();
 
-    let order = sqlx::query("SELECT user_id, plan_id, status FROM payment_orders WHERE id = ?")
+    let order = sqlx::query("SELECT user_id, plan_id, status FROM payment_orders WHERE id = $1")
         .bind(&transaction_id)
         .fetch_optional(&state.db)
         .await;
@@ -209,7 +209,7 @@ async fn payment_callback(
 
             activate_subscription(user_id, &plan_id, &state.db).await;
 
-            sqlx::query("UPDATE payment_orders SET status = 'paid' WHERE id = ?")
+            sqlx::query("UPDATE payment_orders SET status = 'paid' WHERE id = $1")
                 .bind(&transaction_id)
                 .execute(&state.db)
                 .await

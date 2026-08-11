@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 use uuid::Uuid;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use chrono;
 use crate::auth;
 
@@ -18,7 +18,7 @@ pub fn hash_csrf_token(token: &str) -> String {
 }
 
 pub async fn store_csrf_token(
-    db: &SqlitePool,
+    db: &PgPool,
     user_id: i64,
     token: &str,
     ttl_seconds: i64,
@@ -33,7 +33,7 @@ pub async fn store_csrf_token(
     sqlx::query(
         r#"
         INSERT INTO csrf_tokens(token_hash, user_id, created_at, expires_at)
-        VALUES(?, ?, ?, ?)
+        VALUES($1, $2, $3, $4)
         "#,
     )
     .bind(&token_hash)
@@ -47,7 +47,7 @@ pub async fn store_csrf_token(
 }
 
 pub async fn validate_csrf_token(
-    db: &SqlitePool,
+    db: &PgPool,
     user_id: i64,
     token: &str,
 ) -> Result<bool, sqlx::Error> {
@@ -55,7 +55,7 @@ pub async fn validate_csrf_token(
     let now = auth::now_iso();
 
     sqlx::query(
-        r#"DELETE FROM csrf_tokens WHERE expires_at < ?"#
+        r#"DELETE FROM csrf_tokens WHERE expires_at < $1"#
     )
     .bind(&now)
     .execute(db)
@@ -64,7 +64,7 @@ pub async fn validate_csrf_token(
     let result = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*) FROM csrf_tokens
-        WHERE token_hash = ? AND user_id = ? AND expires_at > ?
+        WHERE token_hash = $1 AND user_id = $2 AND expires_at > $3
         "#,
     )
     .bind(&token_hash)
@@ -75,7 +75,7 @@ pub async fn validate_csrf_token(
 
     if result > 0 {
         sqlx::query(
-            r#"DELETE FROM csrf_tokens WHERE token_hash = ?"#
+            r#"DELETE FROM csrf_tokens WHERE token_hash = $1"#
         )
         .bind(&token_hash)
         .execute(db)

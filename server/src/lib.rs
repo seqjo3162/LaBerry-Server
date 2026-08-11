@@ -11,6 +11,6 @@ pub mod server;
 pub mod routes;
 pub mod middleware;
 pub mod api_error;
-pub mod ai_client;
 pub mod tls;
-pub mod e2ee;
+pub mod models;
+pub mod crypto;
